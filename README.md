@@ -34,13 +34,13 @@ spring/
 
 ## 🛠️ 安装与配置
 
-1. **环境准备**
+### **环境准备**
    确保已安装 Python 3.9+，并安装所需依赖：
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **数据库初始化**
+### **数据库初始化**
    配置环境变量 `DUCKDB_PATH` 指向你的本地数据库文件路径，然后执行初始化脚本建表：
    ```bash
    # Windows (PowerShell)
@@ -48,8 +48,84 @@ spring/
    python etl/init_db.py
    ```
 
-3. **数据同步**
-   按照需求运行 `etl/` 目录下的脚本，同步基础信息与日线数据（建议配置定时任务进行盘后更新）。
+### **ETL**  
+#### 初始化表  
+```bash
+# 第一次或者创建新表的时候运行
+python -m etl.init_db
+```
+
+#### 同步交易日  
+```bash
+# 每年年底公布次年节假日之后运行
+python -m etl.trade_cal -b 20000101
+```
+
+#### 同步股票基本信息  
+```bash
+
+# 每天运行
+python -m etl.sync_basic
+
+# 从akstock数据源中获取京市股本信息(若当日不是交易日也强制执行)
+python -m etl.sync_basic -x bj -s akstock -f
+```
+
+#### 同步股票日线数据  
+```bash
+# 每天运行(获取当天)
+python -m etl.import_daily -b 20000101
+
+# 从lday数据源中获取从2000-01-01到2025-12-31的京市的日线数据
+python -m etl.import_daily -b 20000101 -e 20251231 -x bj -s lday 
+
+# 从akstock数据源中获取从2026-01-01开始的京市的日线数据
+python -m etl.import_daily -b 20260101 -x bj -s akstock
+```
+
+#### 同步指数日线数据  
+```bash
+# 每天运行(获取当天)
+python -m etl.fetch_index 
+
+# 从lday数据源中获取从2000-01-01的指数数据
+python -m etl.fetch_index -b 20000101 -s lday
+```
+
+#### 同步复权因子  
+```bash
+# 每天运行(获取当天)
+python -m etl.adjust  
+
+# 从bstock数据源中获取从2000-01-01开始所有股票的复权因子
+python -m etl.adjust -b 20000101
+```
+
+#### 下载通达信股本资料(要求csv目录或本地目录存在gbbq文件)  
+```bash
+# 每个季度1号运行
+python -m etl.sync_capital
+```
+
+#### 补齐指标量比,涨停,流通市值(流通市值等数据前置条件是需要股本资料)  
+```bash
+# 补齐深沪市量比数据(补齐T-1日,每天运行)
+python -m etl.fill_volratio -x sz
+python -m etl.fill_volratio -x sh
+
+# 补齐深沪市涨停数据(补齐T-1日,每天运行)
+python -m etl.update_limit -x sz
+python -m etl.update_limit -x sh
+
+# 根据CAPITAL_DETAIL回填DAILY_BASIC的总股本和流通股本(补齐T-1日)
+python  -m etl.fill_shares 
+```
+
+#### 同步申万行业数据  
+```bash
+# 每季度1号运行
+python -m etl.sync_sw_industry
+```
 
 4. **启动 MCP 服务**
    用于对接 Claude 或其他支持 MCP 协议的客户端：
@@ -83,3 +159,5 @@ spring/
 
 1. **只读保护**：MCP 服务默认处于只读模式 (`duckdb-quant-readonly`)，拦截所有的 DDL/DML 操作以保障本地数据安全。
 2. **轻量连接**：数据库在 MCP 请求中采用 Connect-Per-Request（短连接）的策略，避免了多线程死锁或长期锁表的问题。
+
+

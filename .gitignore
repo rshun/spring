@@ -8,3 +8,4 @@ csv/
 .cache/
 tmp/
 download/
+log/

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.vscode
+.DS_Store
+settings*.json
+.mcp*
+csv/
+.cache/
+tmp/
+download/

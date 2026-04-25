@@ -13,15 +13,17 @@ logger = logging.getLogger("etl.check_daily")
       停牌股票(tradestatus=0)不计入缺失
 
 输入参数:
-  -b, --begin   起始日期 (格式: YYYYMMDD)，默认为当天
-  -e, --end     结束日期 (格式: YYYYMMDD)，默认为当天
-  -x, --exchanges  交易所范围: sh / sz / bj / all (默认 all)
-  -c, --codes   指定股票代码 (可选)
+  -b, --begin         起始日期 (格式: YYYYMMDD)，默认为当天
+  -e, --end           结束日期 (格式: YYYYMMDD)，默认为当天
+  -x, --exchanges     交易所范围: sh / sz / bj / all (默认 all)
+  -c, --codes         指定股票代码 (可选)
+  -i, --include-index 同时校验指数日线数据 (默认不校验)
 
 用法:
   python -m etl.check_daily -b 20260325
   python -m etl.check_daily -b 20260301 -e 20260325
   python -m etl.check_daily -b 20260325 -x sh sz
+  python -m etl.check_daily -b 20260325 -i
 """
 
 
@@ -56,6 +58,12 @@ def parse_arguments() -> argparse.Namespace:
         type=str.lower,
         choices=['sh', 'sz', 'bj', 'all'],
         help='指定交易所范围: sh (沪), sz (深), bj (北), all (默认全部)'
+    )
+
+    parser.add_argument(
+        '-i', '--include-index',
+        action='store_true',
+        help='同时校验指数日线数据 (默认不校验)'
     )
 
     return parser.parse_args()
@@ -241,6 +249,7 @@ def main() -> int:
     logger.info(f"     结束日期: {end_date}")
     logger.info(f"     交易所:   {args.exchanges}")
     logger.info(f"     指定代码: {args.codes if args.codes else '无 (检查全市场)'}")
+    logger.info(f"     校验指数: {'是' if args.include_index else '否'}")
     logger.info("=" * 60)
 
     ex_filter = _build_exchange_filter(args.exchanges)
@@ -258,9 +267,10 @@ def main() -> int:
                                       begin_date, end_date, ex_filter, code_filter)
         total_missing += _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
                                       begin_date, end_date, ex_filter, code_filter)
-        # total_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
-        #                               begin_date, end_date, ex_filter, code_filter,
-        #                               is_self_table=True, board_sql="board = 'INDEX'")
+        if args.include_index:
+            total_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
+                                          begin_date, end_date, ex_filter, code_filter,
+                                          is_self_table=True, board_sql="board = 'INDEX'")
 
         logger.info("-" * 60)
         if total_missing == 0:

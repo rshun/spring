@@ -896,6 +896,10 @@ def get_newest_trade_date() -> str:
             con.close()
 
 """
+DEPRECATED: 旧版 SW_INDUSTRY 写入函数。
+  旧表结构使用 sw_code/sw_name，已被新版
+  SW_INDUSTRY(sw_version, industry_code, industry_name, ...) 替代。
+  新流程请使用 save_sw_industry_hierarchy_to_db()。
 UPSERT 申万行业定义到 sw_industry 表
   参数:
     df: DataFrame，含 sw_code / sw_name / sw_level / parent_code
@@ -930,6 +934,10 @@ def save_sw_industry_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) ->
             pass
 
 """
+DEPRECATED: 旧版股票-申万行业映射写入函数。
+  旧流程写入 STOCK_SW_INDUSTRY，已被
+  STOCK_INDUSTRY_CLF_HIST_SW_RAW + STOCK_SW_INDUSTRY_VIEW 替代。
+  新流程请使用 save_stock_industry_clf_hist_sw_raw_to_db()。
 比对现有记录，将行业发生变更的股票插入 stock_sw_industry 表
   参数:
     new_df : 本次从 akshare 拉取的全量映射，含
@@ -998,6 +1006,113 @@ def save_stock_sw_industry_to_db(
     finally:
         try:
             conn.unregister("temp_stock_sw")
+        except Exception:
+            pass
+
+
+"""
+UPSERT 股票申万行业历史原始数据到 STOCK_INDUSTRY_CLF_HIST_SW_RAW 表
+  参数:
+    df: DataFrame，含 symbol / start_date / industry_code / update_time
+    conn: duckdb连接
+"""
+def save_stock_industry_clf_hist_sw_raw_to_db(
+    df: pd.DataFrame,
+    conn: duckdb.DuckDBPyConnection
+) -> None:
+
+    logger.info(f"正在将 {len(df)} 条股票申万行业历史原始数据写入数据库...")
+    if df is None or df.empty:
+        logger.info("无股票申万行业历史原始数据，跳过写入。")
+        return
+
+    required_cols = ['symbol', 'start_date', 'industry_code', 'update_time']
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        logger.error(f"写入 STOCK_INDUSTRY_CLF_HIST_SW_RAW 失败，缺少字段: {missing}")
+        return
+
+    try:
+        data = df[required_cols].copy()
+        conn.register("temp_stock_industry_clf_hist_sw_raw", data)
+        conn.execute("""
+            INSERT INTO STOCK_INDUSTRY_CLF_HIST_SW_RAW
+                (symbol, start_date, industry_code, update_time, updated_at)
+            SELECT
+                symbol,
+                CAST(start_date AS DATE),
+                industry_code,
+                CAST(update_time AS TIMESTAMP),
+                now()
+            FROM temp_stock_industry_clf_hist_sw_raw
+            ON CONFLICT (symbol, start_date, industry_code) DO UPDATE SET
+                update_time = excluded.update_time,
+                updated_at = now()
+        """)
+        count = conn.execute("SELECT COUNT(*) FROM STOCK_INDUSTRY_CLF_HIST_SW_RAW").fetchone()[0]
+        logger.info(f"股票申万行业历史原始数据写入成功，当前共 {count} 条记录。")
+    except Exception as e:
+        logger.error(f"写入 STOCK_INDUSTRY_CLF_HIST_SW_RAW 失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_stock_industry_clf_hist_sw_raw")
+        except Exception:
+            pass
+
+
+"""
+UPSERT 申万行业层级定义到 SW_INDUSTRY 表
+  参数:
+    df: DataFrame，含 sw_version / industry_code / industry_name / sw_level / parent_code
+    conn: duckdb连接
+"""
+def save_sw_industry_hierarchy_to_db(
+    df: pd.DataFrame,
+    conn: duckdb.DuckDBPyConnection
+) -> None:
+
+    logger.info(f"正在将 {len(df)} 条申万行业层级定义写入数据库...")
+    if df is None or df.empty:
+        logger.info("无申万行业层级定义，跳过写入。")
+        return
+
+    required_cols = ['sw_version', 'industry_code', 'industry_name', 'sw_level', 'parent_code']
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        logger.error(f"写入 SW_INDUSTRY 失败，缺少字段: {missing}")
+        return
+
+    try:
+        data = df[required_cols].copy()
+        conn.register("temp_sw_industry_hierarchy", data)
+        conn.execute("""
+            INSERT INTO SW_INDUSTRY
+                (sw_version, industry_code, industry_name, sw_level, parent_code, updated_at)
+            SELECT
+                sw_version,
+                industry_code,
+                industry_name,
+                CAST(sw_level AS INTEGER),
+                parent_code,
+                now()
+            FROM temp_sw_industry_hierarchy
+            ON CONFLICT (sw_version, industry_code) DO UPDATE SET
+                industry_name = excluded.industry_name,
+                sw_level      = excluded.sw_level,
+                parent_code   = excluded.parent_code,
+                updated_at    = now()
+            WHERE
+                SW_INDUSTRY.industry_name IS DISTINCT FROM excluded.industry_name OR
+                SW_INDUSTRY.sw_level      IS DISTINCT FROM excluded.sw_level OR
+                SW_INDUSTRY.parent_code   IS DISTINCT FROM excluded.parent_code
+        """)
+        count = conn.execute("SELECT COUNT(*) FROM SW_INDUSTRY").fetchone()[0]
+        logger.info(f"申万行业层级定义写入成功，当前共 {count} 条记录。")
+    except Exception as e:
+        logger.error(f"写入 SW_INDUSTRY 失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_sw_industry_hierarchy")
         except Exception:
             pass
 

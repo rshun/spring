@@ -456,36 +456,121 @@ def get_stock_industry(
     查询股票的申万行业分类（一/二/三级）。
     如果指定 trade_date，返回该日期生效的行业归属；否则返回最新记录。
     """
-    _ = parse_code(code)
+    symbol, _ = parse_code(code)
 
-    if not table_exists("STOCK_SW_INDUSTRY"):
-        raise RuntimeError("STOCK_SW_INDUSTRY table not found.")
+    if not table_exists("STOCK_SW_INDUSTRY_VIEW"):
+        raise RuntimeError("STOCK_SW_INDUSTRY_VIEW view not found.")
 
     if trade_date:
         trade_date = validate_date(trade_date)
         df = run_sql(
             """
-            SELECT *
-            FROM STOCK_SW_INDUSTRY
-            WHERE UPPER(code) = UPPER(?)
-              AND effective_date <= ?
-            ORDER BY effective_date DESC
+            SELECT
+                ? AS code,
+                symbol,
+                start_date,
+                sw_version,
+                sw_l1_code,
+                sw_l1_name,
+                sw_l2_code,
+                sw_l2_name,
+                sw_l3_code,
+                sw_l3_name,
+                industry_code,
+                update_time,
+                updated_at
+            FROM STOCK_SW_INDUSTRY_VIEW
+            WHERE symbol = ?
+              AND start_date <= ?
+            ORDER BY start_date DESC
             LIMIT 1
             """,
-            [code, trade_date],
+            [code, symbol, trade_date],
         )
     else:
         df = run_sql(
             """
-            SELECT *
-            FROM STOCK_SW_INDUSTRY
-            WHERE UPPER(code) = UPPER(?)
-            ORDER BY effective_date DESC
+            SELECT
+                ? AS code,
+                symbol,
+                start_date,
+                sw_version,
+                sw_l1_code,
+                sw_l1_name,
+                sw_l2_code,
+                sw_l2_name,
+                sw_l3_code,
+                sw_l3_name,
+                industry_code,
+                update_time,
+                updated_at
+            FROM STOCK_SW_INDUSTRY_VIEW
+            WHERE symbol = ?
+            ORDER BY start_date DESC
             LIMIT 1
             """,
-            [code],
+            [code, symbol],
         )
     return df_to_payload(df, 1)
+
+
+@mcp.tool()
+def get_stock_industry_history(
+    code: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_rows: int = 2000,
+) -> Dict[str, Any]:
+    """
+    查询股票申万行业分类历史（一/二/三级展开）。
+    可选 start_date / end_date 按计入日期过滤。
+    """
+    symbol, _ = parse_code(code)
+
+    if start_date:
+        start_date = validate_date(start_date)
+    if end_date:
+        end_date = validate_date(end_date)
+    if start_date and end_date:
+        ensure_span(start_date, end_date, MAX_DAYS_DEFAULT)
+
+    if not table_exists("STOCK_SW_INDUSTRY_VIEW"):
+        raise RuntimeError("STOCK_SW_INDUSTRY_VIEW view not found.")
+
+    max_rows = max(1, min(int(max_rows), 20000))
+
+    filters = ["symbol = ?"]
+    params: List[Any] = [symbol]
+    if start_date:
+        filters.append("start_date >= ?")
+        params.append(start_date)
+    if end_date:
+        filters.append("start_date <= ?")
+        params.append(end_date)
+
+    df = run_sql(
+        f"""
+        SELECT
+            ? AS code,
+            symbol,
+            start_date,
+            sw_version,
+            sw_l1_code,
+            sw_l1_name,
+            sw_l2_code,
+            sw_l2_name,
+            sw_l3_code,
+            sw_l3_name,
+            industry_code,
+            update_time,
+            updated_at
+        FROM STOCK_SW_INDUSTRY_VIEW
+        WHERE {' AND '.join(filters)}
+        ORDER BY start_date
+        """,
+        [code] + params,
+    )
+    return df_to_payload(df, max_rows)
 
 
 @mcp.tool()

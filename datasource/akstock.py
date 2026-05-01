@@ -169,6 +169,9 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     所属行业    object
 '''
 '''
+DEPRECATED: 旧申万行业定义接口。
+  新流程使用 etl.sync_industry --input 读取 tmp/swclasscode.csv，
+  并写入新版 SW_INDUSTRY(sw_version, industry_code, ...)。
 获取申万一/二/三级行业定义
 返回参数:
     pd.DataFrame -- sw_code / sw_name / sw_level / parent_code
@@ -204,6 +207,9 @@ def fetch_sw_industries() -> pd.DataFrame:
     return pd.concat([l1, l2, l3], ignore_index=True)
 
 '''
+DEPRECATED: 旧股票-申万行业映射接口。
+  新流程使用 fetch_stock_industry_clf_hist_sw() 获取
+  ak.stock_industry_clf_hist_sw() 原始历史数据，并通过视图展开一/二/三级。
 遍历行业代码，获取所有股票的申万行业归属
 输入参数:
     industry_df: fetch_sw_industries() 返回的行业定义 DataFrame
@@ -378,3 +384,41 @@ def fetch_margin_data(trade_date: str) -> pd.DataFrame:
             result[col] = None
 
     return result[OUT_COLS].reset_index(drop=True)
+
+
+'''
+获取股票申万行业分类历史原始数据
+接口: ak.stock_industry_clf_hist_sw()
+返回:
+  symbol / start_date / industry_code / update_time
+'''
+def fetch_stock_industry_clf_hist_sw() -> pd.DataFrame:
+
+    OUT_COLS = ['symbol', 'start_date', 'industry_code', 'update_time']
+
+    try:
+        df = ak.stock_industry_clf_hist_sw()
+        if df is None or df.empty:
+            logger.warning("stock_industry_clf_hist_sw 未返回数据")
+            return pd.DataFrame(columns=OUT_COLS)
+
+        missing = [c for c in OUT_COLS if c not in df.columns]
+        if missing:
+            logger.error(f"stock_industry_clf_hist_sw 缺少字段: {missing}")
+            return pd.DataFrame(columns=OUT_COLS)
+
+        result = df[OUT_COLS].copy()
+        result = result.dropna(subset=['symbol', 'start_date', 'industry_code'])
+        result['symbol'] = result['symbol'].astype(str).str.strip().str.zfill(6)
+        result['industry_code'] = result['industry_code'].astype(str).str.strip()
+        result['start_date'] = pd.to_datetime(result['start_date'], errors='coerce').dt.date
+        result['update_time'] = pd.to_datetime(result['update_time'], errors='coerce')
+        result = result.dropna(subset=['start_date'])
+        result = result[(result['symbol'] != '') & (result['industry_code'] != '')]
+        result = result.drop_duplicates(subset=['symbol', 'start_date', 'industry_code'], keep='last')
+
+        logger.info(f"[成功] 获取股票申万行业历史 {len(result)} 条")
+        return result[OUT_COLS].reset_index(drop=True)
+    except Exception as e:
+        logger.error(f"获取股票申万行业历史失败: {e}")
+        return pd.DataFrame(columns=OUT_COLS)

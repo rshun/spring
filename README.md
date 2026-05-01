@@ -18,7 +18,7 @@ spring/
 │   ├── import_daily.py # 导入日线行情数据
 │   ├── sync_basic.py   # 同步每日基础指标（市值、换手率、市盈率等）
 │   ├── sync_capital.py # 同步股本变动与权息资料
-│   ├── sync_sw_industry.py # 同步申万行业分类
+│   ├── sync_industry.py # 同步申万行业分类
 │   ├── trade_cal.py    # 交易日历同步
 │   └── adjust.py, ...  # 其他复权因子及数据处理脚本
 ├── mcp_server/         # MCP 服务端代码
@@ -123,8 +123,8 @@ python  -m etl.fill_shares
 
 #### 同步申万行业数据  
 ```bash
-# 每季度1号运行
-python -m etl.sync_sw_industry
+# 每天运行
+python -m etl.sync_industry
 ```
 
 4. **启动 MCP 服务**
@@ -141,7 +141,7 @@ python -m etl.sync_sw_industry
 - `get_stock_daily` / `get_daily_basic`: 获取指定股票的历史 K 线及每日核心指标（换手率、PE、PB、量比等）
 - `calc_indicators`: 动态计算技术指标（如各种周期的均线 MA、成交量均线 VOL_MA、收益率等）
 - `get_adj_factor` / `get_capital_detail`: 获取复权因子与除权除息/送配股明细
-- `get_stock_industry`: 查询股票的申万行业（一/二/三级）归属及历史变动
+- `get_stock_industry` / `get_stock_industry_history`: 查询股票的申万行业（一/二/三级）归属及历史变动
 - `get_margin_data`: 获取融资融券明细
 - `get_model_pool`: 检索并跟踪量化策略模型输出的股票池（观察、关注、触发名单）
 - `query`: 提供安全的只读 SQL 查询接口，方便 AI 进行复杂的交叉分析
@@ -152,12 +152,12 @@ python -m etl.sync_sw_industry
 - `STOCK_DAILY`: 股票日线行情（开高低收、成交量、成交额）
 - `DAILY_BASIC`: 每日基本面衍生指标（市值、涨跌停状态等）
 - `TRADE_CAL`: 交易日历
-- `STOCK_SW_INDUSTRY`: 申万行业分类及历史映射
+- `STOCK_INDUSTRY_CLF_HIST_SW_RAW`: 股票申万行业历史原始数据
+- `STOCK_SW_INDUSTRY_VIEW`: 申万行业分类历史查询视图（一/二/三级展开）
 - `CAPITAL_DETAIL`: 股本变动及除权除息资料
 
 ## 📝 开发协议
 
 1. **只读保护**：MCP 服务默认处于只读模式 (`duckdb-quant-readonly`)，拦截所有的 DDL/DML 操作以保障本地数据安全。
 2. **轻量连接**：数据库在 MCP 请求中采用 Connect-Per-Request（短连接）的策略，避免了多线程死锁或长期锁表的问题。
-
 

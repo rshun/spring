@@ -171,7 +171,7 @@ WITH raw_with_version AS (
         update_time,
         updated_at,
         CASE
-            WHEN start_date < DATE '2021-07-30' THEN '2014'
+            WHEN start_date < DATE '2021-12-10' THEN '2014'
             ELSE '2021'
         END AS sw_version
     FROM STOCK_INDUSTRY_CLF_HIST_SW_RAW

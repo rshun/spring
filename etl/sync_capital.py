@@ -32,6 +32,7 @@ GBBQ_FILE    = CSV_DIR / "gbbq"
 
 TDX_CW_TXT_URL  = "http://down.tdx.com.cn:8001/tdxfin/gpcw.txt"
 TDX_CW_FILE_URL = "http://down.tdx.com.cn:8001/tdxfin/"
+TDX_GBBQ_ZIP_URL = "http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
 
 CATEGORY = {
     '1': '除权除息', '2': '送配股上市', '3': '非流通股上市', '4': '未知股本变动', '5': '股本变化',
@@ -291,8 +292,34 @@ def _load_gbbq_from_csv() -> pd.DataFrame | None:
     return df
 
 
+def _load_gbbq_from_download() -> pd.DataFrame | None:
+    """步骤3: 从通达信公开下载地址下载 gbbq.zip 并读取"""
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    CSV_DIR.mkdir(parents=True, exist_ok=True)
+
+    zip_path = DOWNLOAD_DIR / "gbbq.zip"
+    try:
+        logger.info(f"下载通达信 gbbq 文件: {TDX_GBBQ_ZIP_URL}")
+        resp = download_url(TDX_GBBQ_ZIP_URL)
+        zip_path.write_bytes(resp.content)
+
+        with zipfile.ZipFile(str(zip_path), "r") as zf:
+            member = next((name for name in zf.namelist() if Path(name).name.lower() == "gbbq"), None)
+            if member is None:
+                logger.info("gbbq.zip 中未找到 gbbq 文件")
+                return None
+            GBBQ_FILE.write_bytes(zf.read(member))
+
+        logger.info(f"gbbq 文件已下载到 {GBBQ_FILE}")
+    except Exception as e:
+        logger.info(f"下载 gbbq 文件失败: {e}")
+        return None
+
+    return _load_gbbq_from_csv()
+
+
 def _load_gbbq_from_server() -> pd.DataFrame | None:
-    """步骤3: 通过 pytdx 行情接口从通达信服务器在线拉取"""
+    """步骤4: 通过 pytdx 行情接口从通达信服务器在线拉取"""
     from datasource.tdx import fetch_xdxr_data
     from util import dbutil
 
@@ -314,13 +341,21 @@ def _load_gbbq_from_server() -> pd.DataFrame | None:
 
 # ── 组装：获取 + 保存 + 入库 ──────────────────────────────
 
-def sync_gbbq():
+def sync_gbbq(download: bool = False):
     """三步获取 gbbq 股本变迁数据，保存 csv 并写入数据库"""
     tick = time.time()
 
-    # 按优先级依次尝试三个数据源
-    df_gbbq = _load_gbbq_from_local()
-    source = "本地二进制"
+    # 按优先级依次尝试数据源；--download 时下载优先级最高
+    if download:
+        df_gbbq = _load_gbbq_from_download()
+        source = "下载文件"
+    else:
+        df_gbbq = None
+        source = ""
+
+    if df_gbbq is None:
+        df_gbbq = _load_gbbq_from_local()
+        source = "本地二进制"
     if df_gbbq is None:
         df_gbbq = _load_gbbq_from_csv()
         source = "CSV"
@@ -340,6 +375,17 @@ def sync_gbbq():
 
     # 写入数据库
     save_capital_detail_to_db(df_gbbq)
+
+
+def cleanup_gbbq_file():
+    """删除项目 csv 目录下的 gbbq 二进制缓存文件"""
+    if not GBBQ_FILE.exists():
+        return
+    try:
+        GBBQ_FILE.unlink()
+        logger.info(f"已删除 gbbq 二进制缓存文件: {GBBQ_FILE}")
+    except Exception as e:
+        logger.error(f"删除 gbbq 二进制缓存文件失败: {e}")
 
 
 def save_capital_detail_to_db(df: pd.DataFrame):
@@ -392,22 +438,33 @@ def parse_arguments() -> argparse.Namespace:
             "  2. 生成或补齐对应的 dat/pkl 文件\n"
             "  3. 按优先级读取 gbbq 股本变迁数据\n"
             "  4. 保存到 csv/gbbq.csv 并写入 CAPITAL_DETAIL 表\n\n"
-            "gbbq 数据源优先级:\n"
+            "gbbq 数据源优先级(默认):\n"
             "  1. 本地通达信目录中的二进制 gbbq 文件\n"
             "  2. 项目 csv/gbbq 文件\n"
             "  3. 在线通达信服务器接口\n\n"
+            "gbbq 数据源优先级(加 --download):\n"
+            "  1. 从 gbbq.zip 下载\n"
+            "  2. 本地通达信目录中的二进制 gbbq 文件\n"
+            "  3. 项目 csv/gbbq 文件\n"
+            "  4. 在线通达信服务器接口\n\n"
             "示例:\n"
             "  python -m etl.sync_capital\n"
+            "  python -m etl.sync_capital --download\n"
             "  python etl/sync_capital.py"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="优先下载 gbbq.zip，默认不下载",
     )
     return parser.parse_args()
 
 
 def main():
     configure_etl_logging()
-    parse_arguments()
+    args = parse_arguments()
 
     start = time.time()
     logger.info('=' * 60)
@@ -417,8 +474,9 @@ def main():
     sync_cw_files()
 
 
-    sync_gbbq()
+    sync_gbbq(download=args.download)
 
+    cleanup_gbbq_file()
 
     logger.info('=' * 60)
     logger.info(f'全部完成 用时 {time.time() - start:.2f}s')

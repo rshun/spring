@@ -165,21 +165,21 @@ COMMENT ON COLUMN STOCK_INDUSTRY_CLF_HIST_SW_RAW.updated_at    IS '记录写入�
 CREATE OR REPLACE VIEW STOCK_SW_INDUSTRY_VIEW AS
 WITH raw_with_version AS (
     SELECT symbol, start_date, industry_code, update_time, updated_at,
-           CASE WHEN start_date < DATE '2021-12-10' THEN '2014' ELSE '2021' END AS sw_version
+           CASE WHEN start_date < DATE '2021-07-30' THEN '2014' ELSE '2021' END AS sw_version
     FROM STOCK_INDUSTRY_CLF_HIST_SW_RAW
 )
 SELECT
-    si.code,                              -- 新增
+    si.code,
     r.symbol,
     r.start_date,
-    r.start_date AS effective_date,       -- 新增 alias
+    r.start_date AS effective_date,
     r.sw_version,
     l1.industry_code AS sw_l1_code, l1.industry_name AS sw_l1_name,
     l2.industry_code AS sw_l2_code, l2.industry_name AS sw_l2_name,
     l3.industry_code AS sw_l3_code, l3.industry_name AS sw_l3_name,
     r.industry_code, r.update_time, r.updated_at
 FROM raw_with_version r
-JOIN STOCK_INFO si                        -- 新增 INNER JOIN
+JOIN STOCK_INFO si
     ON si.symbol = r.symbol
    AND si.board IN ('MAIN','STAR','GEM','BJ')
 LEFT JOIN SW_INDUSTRY l3

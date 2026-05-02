@@ -48,6 +48,12 @@ spring/
    python etl/init_db.py
    ```
 
+**启动 MCP 服务**
+用于对接 Claude 或其他支持 MCP 协议的客户端：
+```bash
+  python mcp_server/server.py
+```
+
 ### **ETL**  
 #### 初始化表  
 ```bash
@@ -63,12 +69,20 @@ python -m etl.trade_cal -b 20000101
 
 #### 同步股票基本信息  
 ```bash
-
 # 每天运行
 python -m etl.sync_basic
 
 # 从akstock数据源中获取京市股本信息(若当日不是交易日也强制执行)
 python -m etl.sync_basic -x bj -s akstock -f
+```
+
+#### 同步股本股息资料gbbq (默认优先级: 从本地目录读取  csv/gbbq 通达信服务器上下载)  
+```bash
+# 每天运行
+python -m etl.sync_capital 
+
+# 优先从通达信服务器下载gbbq
+python -m etl.sync_capital --download
 ```
 
 #### 同步股票日线数据  
@@ -101,12 +115,6 @@ python -m etl.adjust
 python -m etl.adjust -b 20000101
 ```
 
-#### 下载通达信股本资料(要求csv目录或本地目录存在gbbq文件)  
-```bash
-# 每个季度1号运行
-python -m etl.sync_capital
-```
-
 #### 补齐指标量比,涨停,流通市值(流通市值等数据前置条件是需要股本资料)  
 ```bash
 # 补齐深沪市量比数据(补齐T-1日,每天运行)
@@ -125,13 +133,10 @@ python  -m etl.fill_shares
 ```bash
 # 每天运行
 python -m etl.sync_industry
-```
 
-4. **启动 MCP 服务**
-   用于对接 Claude 或其他支持 MCP 协议的客户端：
-   ```bash
-   python mcp_server/server.py
-   ```
+# 从文件中同步申万一、二级行业数据(执行一次)  
+python -m etl.sync_industry --input industry.csv
+```
 
 ## 🤖 MCP 工具能力 (Tools)
 
@@ -142,7 +147,6 @@ python -m etl.sync_industry
 - `calc_indicators`: 动态计算技术指标（如各种周期的均线 MA、成交量均线 VOL_MA、收益率等）
 - `get_adj_factor` / `get_capital_detail`: 获取复权因子与除权除息/送配股明细
 - `get_stock_industry` / `get_stock_industry_history`: 查询股票的申万行业（一/二/三级）归属及历史变动
-- `get_margin_data`: 获取融资融券明细
 - `get_model_pool`: 检索并跟踪量化策略模型输出的股票池（观察、关注、触发名单）
 - `query`: 提供安全的只读 SQL 查询接口，方便 AI 进行复杂的交叉分析
 
@@ -160,4 +164,3 @@ python -m etl.sync_industry
 
 1. **只读保护**：MCP 服务默认处于只读模式 (`duckdb-quant-readonly`)，拦截所有的 DDL/DML 操作以保障本地数据安全。
 2. **轻量连接**：数据库在 MCP 请求中采用 Connect-Per-Request（短连接）的策略，避免了多线程死锁或长期锁表的问题。
-

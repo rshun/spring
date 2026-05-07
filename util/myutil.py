@@ -98,6 +98,9 @@ def get_logger(name: str) -> logging.Logger:
 """
 def get_default_dbfile() -> Path:
 
+    db_path = os.environ.get("DUCKDB_PATH", "").strip()
+    if db_path:
+        return Path(db_path).expanduser()
     return Path.home() / "data" / "quant.db"
 
 

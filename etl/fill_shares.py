@@ -111,8 +111,15 @@ def main():
     logger.info(f"     股票代码: {codes if codes else '全量'}")
     logger.info("=" * 60)
 
-    dbutil.fill_daily_basic_shares(begin_date, end_date, codes, exchanges)
-    dbutil.fill_daily_basic_mv(begin_date, end_date, codes, exchanges)
+    from util.dbutil import get_connection
+    con = None
+    try:
+        con = get_connection(is_read_only=False)
+        dbutil.fill_daily_basic_shares(begin_date, end_date, codes, exchanges, conn=con)
+        dbutil.fill_daily_basic_mv(begin_date, end_date, codes, exchanges, conn=con)
+    finally:
+        if con is not None:
+            con.close()
 
 
 if __name__ == "__main__":

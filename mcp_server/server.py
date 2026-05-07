@@ -31,7 +31,7 @@ if not DB_PATH:
 # Safety / stability guards
 MAX_ROWS_DEFAULT = int(os.environ.get("MAX_ROWS", "2000"))
 MAX_DAYS_DEFAULT = int(os.environ.get("MAX_DAYS", "800"))  # limit per request
-ALLOW_RAW_QUERY = os.environ.get("ALLOW_RAW_QUERY", "1").strip() == "1"  # you can turn off later
+ALLOW_RAW_QUERY = os.environ.get("ALLOW_RAW_QUERY", "0").strip() == "1"
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
 # DuckDB connection:
@@ -46,7 +46,12 @@ _CODE_RE = re.compile(r"^\s*(\d{6})\.(SZ|SH|BJ)\s*$", re.IGNORECASE)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _DANGEROUS_SQL_RE = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA)\b",
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA|CALL|SET|LOAD|INSTALL)\b",
+    re.IGNORECASE,
+)
+
+_DANGEROUS_TABLE_FUNCTION_RE = re.compile(
+    r"\b(read_[A-Za-z0-9_]*|glob|filename|parquet_scan|csv_scan|sqlite_scan|postgres_scan|httpfs)\s*\(",
     re.IGNORECASE,
 )
 
@@ -165,6 +170,22 @@ def add_limit_if_missing(sql: str, max_rows: int) -> str:
     if re.search(r"\bLIMIT\b", sql, re.IGNORECASE):
         return sql
     return sql.rstrip().rstrip(";") + f" LIMIT {int(max_rows)}"
+
+
+def validate_raw_query(sql: str) -> None:
+    statements = [s.strip() for s in sql.split(";") if s.strip()]
+    if len(statements) != 1:
+        raise ValueError("only one SQL statement is allowed.")
+
+    q = statements[0]
+    if not re.match(r"^(SELECT|WITH)\b", q, re.IGNORECASE):
+        raise ValueError("only SELECT/WITH queries are allowed.")
+
+    if _DANGEROUS_SQL_RE.search(q):
+        raise ValueError("DDL/DML/admin statements are not allowed in read-only server.")
+
+    if _DANGEROUS_TABLE_FUNCTION_RE.search(q):
+        raise ValueError("file/network table functions are not allowed in raw query.")
 
 
 # -----------------------------
@@ -727,8 +748,7 @@ def query(sql: str, max_rows: int = 2000) -> Dict[str, Any]:
     if not q:
         raise ValueError("sql is required")
 
-    if _DANGEROUS_SQL_RE.search(q):
-        raise ValueError("DDL/DML/PRAGMA-like statements are not allowed in read-only server.")
+    validate_raw_query(q)
 
     max_rows = max(1, min(int(max_rows), 20000))
     q2 = add_limit_if_missing(q, max_rows)

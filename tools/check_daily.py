@@ -5,7 +5,7 @@ import os
 from util import dbutil, myutil
 from util import validators as pv
 
-logger = logging.getLogger("etl.check_daily")
+logger = logging.getLogger("tools.check_daily")
 
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
@@ -20,10 +20,10 @@ logger = logging.getLogger("etl.check_daily")
   -i, --include-index 同时校验指数日线数据 (默认不校验)
 
 用法:
-  python -m etl.check_daily -b 20260325
-  python -m etl.check_daily -b 20260301 -e 20260325
-  python -m etl.check_daily -b 20260325 -x sh sz
-  python -m etl.check_daily -b 20260325 -i
+  python -m tools.check_daily -b 20260325
+  python -m tools.check_daily -b 20260301 -e 20260325
+  python -m tools.check_daily -b 20260325 -x sh sz
+  python -m tools.check_daily -b 20260325 -i
 """
 
 

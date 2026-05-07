@@ -214,7 +214,7 @@ def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
         # 使用 ON CONFLICT DO UPDATE 避免覆盖其他来源(如 sync_basic)写入的字段(如 float_mv, total_mv)
         conn.execute("""
-            INSERT OR REPLACE INTO DAILY_BASIC
+            INSERT INTO DAILY_BASIC
                 (code, trade_date, turnover_rate, pe, pb, is_st)
             SELECT
                 code,
@@ -224,6 +224,11 @@ def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
                 pb,
                 is_st
             FROM temp_daily_basic
+            ON CONFLICT (code, trade_date) DO UPDATE
+            SET turnover_rate = EXCLUDED.turnover_rate,
+                pe            = EXCLUDED.pe,
+                pb            = EXCLUDED.pb,
+                is_st         = EXCLUDED.is_st
         """)
 
         logger.info(f"[入库] 成功合并 {len(df)} 条每日指标数据")
@@ -746,7 +751,9 @@ def update_price_limits_by_range(start_date, end_date, markets=['ALL']):
 """
 补齐量比数据
 """
-def fill_daily_basic_volume_ratio(start_date: str, end_date: str, codes: list[str]) -> None:
+def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
+                                  codes: list[str],
+                                  conn: duckdb.DuckDBPyConnection | None = None) -> None:
 
     code_filter = ""
     update_code_filter = ""
@@ -813,15 +820,16 @@ def fill_daily_basic_volume_ratio(start_date: str, end_date: str, codes: list[st
         {update_code_filter};
         """
     
+    need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
     try:
-        con = get_connection(is_read_only=False)
+        con = conn if conn is not None else get_connection(is_read_only=False)
         con.execute(sql)
         logger.info("更新成功")
     except Exception as e:
-        logger.info(f"获取数据库连接失败: {e}")
+        logger.error(f"量比更新失败: {e}")
     finally:
-        if con:
+        if need_close and con is not None:
             con.close()
 
 """
@@ -1002,12 +1010,12 @@ def save_stock_sw_industry_to_db(
         """)
         logger.info(f"[入库] 成功写入 {len(changed)} 条申万行业映射记录。")
     except Exception as e:
-        logger.info(f"写入 stock_sw_industry 失败: {e}")
+        logger.error(f"写入 stock_sw_industry 失败: {e}")
     finally:
         try:
             conn.unregister("temp_stock_sw")
-        except Exception:
-            pass
+        except (duckdb.Error, RuntimeError) as e:
+            logger.warning(f"清理 temp_stock_sw 注册表失败: {e}")
 
 
 """
@@ -1056,8 +1064,8 @@ def save_stock_industry_clf_hist_sw_raw_to_db(
     finally:
         try:
             conn.unregister("temp_stock_industry_clf_hist_sw_raw")
-        except Exception:
-            pass
+        except (duckdb.Error, RuntimeError) as e:
+            logger.warning(f"清理 temp_stock_industry_clf_hist_sw_raw 注册表失败: {e}")
 
 
 """
@@ -1113,8 +1121,8 @@ def save_sw_industry_hierarchy_to_db(
     finally:
         try:
             conn.unregister("temp_sw_industry_hierarchy")
-        except Exception:
-            pass
+        except (duckdb.Error, RuntimeError) as e:
+            logger.warning(f"清理 temp_sw_industry_hierarchy 注册表失败: {e}")
 
 
 """
@@ -1131,8 +1139,9 @@ def save_sw_industry_hierarchy_to_db(
     exchanges:  交易所列表(可选)，格式如 ['SH', 'SZ']
 """
 def fill_daily_basic_shares(start_date: str, end_date: str,
-                            codes: list[str] = None,
-                            exchanges: list[str] = None) -> None:
+                            codes: list[str] | None = None,
+                            exchanges: list[str] | None = None,
+                            conn: duckdb.DuckDBPyConnection | None = None) -> None:
 
     code_filter = ""
     exchange_filter = ""
@@ -1200,9 +1209,10 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
           AND DAILY_BASIC.trade_date = m.trade_date;
     """
 
+    need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
     try:
-        con = get_connection(is_read_only=False)
+        con = conn if conn is not None else get_connection(is_read_only=False)
 
         # 先统计待更新行数
         count_sql = f"""
@@ -1242,9 +1252,9 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         logger.info(f"  成功更新 {updated_rows} 行, 跳过 {skipped} 行(无股本变化数据)")
 
     except Exception as e:
-        logger.info(f"更新股本数据失败: {e}")
+        logger.error(f"更新股本数据失败: {e}")
     finally:
-        if con:
+        if need_close and con is not None:
             con.close()
 
 
@@ -1261,7 +1271,8 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
 """
 def fill_daily_basic_mv(start_date: str, end_date: str,
                         codes: list[str] | None = None,
-                        exchanges: list[str] | None = None) -> None:
+                        exchanges: list[str] | None = None,
+                        conn: duckdb.DuckDBPyConnection | None = None) -> None:
 
     code_filter = ""
     exchange_filter = ""
@@ -1292,9 +1303,10 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
           {exchange_filter};
     """
 
+    need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
     try:
-        con = get_connection(is_read_only=False)
+        con = conn if conn is not None else get_connection(is_read_only=False)
 
         con.execute(sql)
 
@@ -1313,7 +1325,7 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
         logger.info(f"  成功更新 {updated_rows} 行市值数据(total_mv, float_mv)")
 
     except Exception as e:
-        logger.info(f"更新市值数据失败: {e}")
+        logger.error(f"更新市值数据失败: {e}")
     finally:
-        if con:
+        if need_close and con is not None:
             con.close()

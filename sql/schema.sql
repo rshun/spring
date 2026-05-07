@@ -209,3 +209,68 @@ COMMENT ON COLUMN CAPITAL_DETAIL.allotment_price IS '配股价(元)/前总股本
 COMMENT ON COLUMN CAPITAL_DETAIL.bonus_share     IS '送转股(每10股)/后流通盘(万股)';
 COMMENT ON COLUMN CAPITAL_DETAIL.allotment_share IS '配股(每10股)/后总股本(万股)';
 COMMENT ON COLUMN CAPITAL_DETAIL.updated_at      IS '记录写入时间';
+
+-- 融资融券汇总数据
+CREATE TABLE IF NOT EXISTS MARGIN_SUMMARY_DAILY (
+    trade_date             DATE NOT NULL,
+    exchange_code          VARCHAR(4) NOT NULL CHECK (exchange_code IN ('SH', 'SZ', 'BJ')),
+    margin_buy_amount      NUMERIC(20, 4),
+    margin_repay_amount    NUMERIC(20, 4),
+    margin_balance         NUMERIC(20, 4),
+    short_sell_volume      NUMERIC(20, 4),
+    short_repay_volume     NUMERIC(20, 4),
+    short_balance_volume   NUMERIC(20, 4),
+    short_balance_amount   NUMERIC(20, 4),
+    margin_short_balance   NUMERIC(20, 4),
+    created_at             TIMESTAMP DEFAULT now(),
+    updated_at             TIMESTAMP,
+    PRIMARY KEY (trade_date, exchange_code)
+);
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.trade_date           IS '交易日期';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.exchange_code        IS '交易所代码，取 STOCK_INFO.exchange：SH、SZ、BJ';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.margin_buy_amount    IS '融资买入额，单位：元';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.margin_repay_amount  IS '融资偿还额，单位：元；若交易所未披露则为空';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.margin_balance       IS '融资余额，单位：元';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.short_sell_volume    IS '融券卖出量，单位：股/份/手，按交易所披露证券类型口径';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.short_repay_volume   IS '融券偿还量，单位：股/份/手；若交易所未披露则为空';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.short_balance_volume IS '融券余量，单位：股/份/手，按交易所披露证券类型口径';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.short_balance_amount IS '融券余额，单位：元';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.margin_short_balance IS '融资融券余额，单位：元';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.created_at           IS '记录创建时间';
+COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.updated_at           IS '记录最后更新时间';
+
+-- 融资融券明细数据
+CREATE TABLE IF NOT EXISTS MARGIN_DETAIL_DAILY (
+    trade_date             DATE NOT NULL,
+    exchange_code          VARCHAR(4) NOT NULL CHECK (exchange_code IN ('SH', 'SZ', 'BJ')),
+    symbol                 VARCHAR(20) NOT NULL,
+    code                   VARCHAR(20) NOT NULL,
+    security_name          VARCHAR(64),
+    margin_buy_amount      NUMERIC(20, 4),
+    margin_repay_amount    NUMERIC(20, 4),
+    margin_balance         NUMERIC(20, 4),
+    short_sell_volume      NUMERIC(20, 4),
+    short_repay_volume     NUMERIC(20, 4),
+    short_balance_volume   NUMERIC(20, 4),
+    short_balance_amount   NUMERIC(20, 4),
+    margin_short_balance   NUMERIC(20, 4),
+    created_at             TIMESTAMP DEFAULT now(),
+    updated_at             TIMESTAMP,
+    PRIMARY KEY (trade_date, exchange_code, symbol),
+    UNIQUE (trade_date, code)
+);
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.trade_date           IS '交易日期';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.exchange_code        IS '交易所代码，取 STOCK_INFO.exchange：SH、SZ、BJ';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.symbol               IS '证券代码，不带交易所后缀';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.code                 IS '带交易所后缀的证券代码，对齐 STOCK_INFO.code，如 600000.SH、000001.SZ、430047.BJ';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.security_name        IS '证券简称，按交易所披露名称保存快照';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.margin_buy_amount    IS '融资买入额，单位：元';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.margin_repay_amount  IS '融资偿还额，单位：元；若交易所未披露则为空';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.margin_balance       IS '融资余额，单位：元';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.short_sell_volume    IS '融券卖出量，单位：股/份/手，按交易所披露证券类型口径';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.short_repay_volume   IS '融券偿还量，单位：股/份/手；若交易所未披露则为空';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.short_balance_volume IS '融券余量，单位：股/份/手，按交易所披露证券类型口径';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.short_balance_amount IS '融券余额，单位：元';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.margin_short_balance IS '融资融券余额，单位：元';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.created_at           IS '记录创建时间';
+COMMENT ON COLUMN MARGIN_DETAIL_DAILY.updated_at           IS '记录最后更新时间';

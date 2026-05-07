@@ -12,35 +12,31 @@ import pandas as pd
 import logging
 from pytdx.hq import TdxHq_API
 from util.myutil import timer
+from util.config import get_config
 
 logger = logging.getLogger("etl.datasource.tdx")
 
 
-# 备选服务器列表，按经验排序
-TDX_SERVERS = [
-    ('218.6.170.55', 7709),
-    ('123.125.108.24', 7709),
-    ('180.153.39.51', 7709),
-    ('221.194.181.176', 7709),
-    ('59.173.18.140', 7709),
-    ('115.238.90.165', 7709),
-    ('124.160.88.183', 7709),
-    ('60.28.23.80', 7709),
-]
+def _get_servers():
+    """从 config.yaml 读取通达信服务器列表"""
+    cfg = get_config()
+    return [tuple(s) for s in cfg["tdx"]["servers"]]
 
-# 每次最多拉800条，分页次数（10页 ≈ 8000个交易日）
-MAX_PAGES = 10
+
+def _get_max_pages():
+    """从 config.yaml 读取最大分页数"""
+    return get_config()["tdx"]["max_pages"]
 
 
 def _connect_api() -> TdxHq_API:
     """尝试多个服务器，返回已连接的 API 实例"""
     api = TdxHq_API(raise_exception=False)
-    for ip, port in TDX_SERVERS:
+    for ip, port in _get_servers():
         try:
             if api.connect(ip, port, time_out=3):
                 return api
-        except Exception:
-            continue
+        except Exception as e:
+            logger.warning(f"连接通达信服务器 {ip}:{port} 失败: {e}")
     raise ConnectionError("所有通达信行情服务器均无法连接")
 
 
@@ -62,7 +58,7 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
     """
     mkt = _to_market(market)
     dfs = []
-    for page in range(MAX_PAGES):
+    for page in range(_get_max_pages()):
         raw = api.get_security_bars(9, mkt, symbol, page * 800, 800)
         if not raw:
             break
@@ -125,15 +121,15 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
 
             except Exception as e:
                 fail_count += 1
-                logger.info(f"  获取失败: {symbol}.{market} | 原因: {e}")
+                logger.warning(f"  获取失败: {symbol}.{market} | 原因: {e}")
                 if fail_count >= MAX_FAIL:
-                    logger.info(f"  [警告] 连续失败 {MAX_FAIL} 次，尝试重连...")
+                    logger.warning(f"  连续失败 {MAX_FAIL} 次，尝试重连...")
                     try:
                         api.disconnect()
                         api = _connect_api()
                         fail_count = 0
                     except ConnectionError:
-                        logger.info("  [错误] 重连失败，终止采集")
+                        logger.error("  重连失败，终止采集")
                         break
 
             if (i + 1) % 100 == 0:
@@ -147,14 +143,9 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     return final_daily, pd.DataFrame()
 
 
-# ── CATEGORY 映射 (股本变迁类别) ─────────────────────────
-
-CATEGORY = {
-    '1': '除权除息', '2': '送配股上市', '3': '非流通股上市', '4': '未知股本变动', '5': '股本变化',
-    '6': '增发新股', '7': '股份回购', '8': '增发新股上市', '9': '转配股上市', '10': '可转债上市',
-    '11': '扩缩股', '12': '非流通股缩股', '13': '送认购权证', '14': '送认沽权证',
-    '15': '未知新类别',
-}
+def _get_category():
+    """从 config.yaml 读取股本变迁类别映射"""
+    return get_config()["tdx"]["capital_category"]
 
 
 '''
@@ -168,7 +159,7 @@ CATEGORY = {
 def fetch_xdxr_data(stocks: list[tuple]) -> pd.DataFrame | None:
 
     if not stocks:
-        logger.info("[pytdx] 股票列表为空")
+        logger.warning("[pytdx] 股票列表为空，跳过 xdxr 拉取")
         return None
 
     logger.info(f"[pytdx] 从服务器在线拉取 xdxr (股本变迁) 数据，共 {len(stocks)} 只...")
@@ -176,7 +167,7 @@ def fetch_xdxr_data(stocks: list[tuple]) -> pd.DataFrame | None:
     try:
         api = _connect_api()
     except ConnectionError as e:
-        logger.info(f"[错误] {e}")
+        logger.error(f"连接通达信服务器失败: {e}")
         return None
 
     all_dfs = []
@@ -193,7 +184,7 @@ def fetch_xdxr_data(stocks: list[tuple]) -> pd.DataFrame | None:
                       + df['day'].astype(int)),
                 code=symbol,
             )
-            df['category'] = df['category'].astype(str).map(CATEGORY)
+            df['category'] = df['category'].astype(str).map(_get_category())
             df = df.rename(columns={
                 'fenhong':     'dividend',
                 'peigujia':    'allotment_price',
@@ -209,7 +200,7 @@ def fetch_xdxr_data(stocks: list[tuple]) -> pd.DataFrame | None:
         api.disconnect()
 
     if not all_dfs:
-        logger.info("[pytdx] 未拉取到任何 xdxr 数据")
+        logger.warning("[pytdx] 未拉取到任何 xdxr 数据")
         return None
 
     df_result = pd.concat(all_dfs, ignore_index=True)

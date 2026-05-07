@@ -18,9 +18,11 @@ import hashlib
 import zipfile
 import threading
 import time
+import pandas as pd
 from pathlib import Path
 from queue import Queue
 from util.myutil import configure_etl_logging
+from util.config import get_config
 
 logger = logging.getLogger("etl.sync_capital")
 
@@ -30,16 +32,9 @@ CSV_DIR      = PROJECT_ROOT / "csv"
 
 GBBQ_FILE    = CSV_DIR / "gbbq"
 
-TDX_CW_TXT_URL  = "http://down.tdx.com.cn:8001/tdxfin/gpcw.txt"
-TDX_CW_FILE_URL = "http://down.tdx.com.cn:8001/tdxfin/"
-TDX_GBBQ_ZIP_URL = "http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
-
-CATEGORY = {
-    '1': '除权除息', '2': '送配股上市', '3': '非流通股上市', '4': '未知股本变动', '5': '股本变化',
-    '6': '增发新股', '7': '股份回购', '8': '增发新股上市', '9': '转配股上市', '10': '可转债上市',
-    '11': '扩缩股', '12': '非流通股缩股', '13': '送认购权证', '14': '送认沽权证',
-    '15': '未知新类别',
-}
+def _get_tdx_config():
+    """从 config.yaml 读取通达信财务相关配置"""
+    return get_config()["tdx"]
 
 
 # ── 工具函数 ──────────────────────────────────────────────
@@ -84,24 +79,43 @@ class ManyThreadDownload:
 
     def _download_chunk(self, ts_queue):
         import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
 
         while not ts_queue.empty():
             start_, end_ = ts_queue.get()
             headers = {'Range': 'Bytes=%s-%s' % (start_, end_), 'Accept-Encoding': '*'}
+            res = None
             flag = False
-            while not flag:
+            retry_count = 0
+            max_retries = 20
+            while not flag and retry_count < max_retries:
                 try:
-                    requests.adapters.DEFAULT_RETRIES = 10
-                    res = requests.get(self.url, headers=headers)
+                    session = requests.Session()
+                    retry_strategy = Retry(
+                        total=10,
+                        backoff_factor=1,
+                        status_forcelist=[429, 500, 502, 503, 504],
+                    )
+                    adapter = HTTPAdapter(max_retries=retry_strategy)
+                    session.mount('http://', adapter)
+                    session.mount('https://', adapter)
+                    res = session.get(self.url, headers=headers)
                     res.close()
+                    session.close()
                 except Exception as e:
-                    logger.info(f"  下载分片 ({start_}-{end_}) 出错，重试: {e}")
+                    logger.warning(f"  下载分片 ({start_}-{end_}) 出错 (第{retry_count+1}次重试): {e}")
                     time.sleep(1)
+                    retry_count += 1
                     continue
                 flag = True
-            with open(self.name, "rb+") as fd:
-                fd.seek(start_)
-                fd.write(res.content)
+            if not flag:
+                logger.error(f"  下载分片 ({start_}-{end_}) 失败，已达最大重试次数")
+                raise RuntimeError(f"下载分片 ({start_}-{end_}) 失败，超过 {max_retries} 次重试")
+            if res is not None:
+                with open(self.name, "rb+") as fd:
+                    fd.seek(start_)
+                    fd.write(res.content)
 
     def run(self, url, name):
         import requests
@@ -181,7 +195,7 @@ def sync_cw_files():
     pkl_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("下载通达信财务文件校验信息...")
-    resp = download_url(TDX_CW_TXT_URL)
+    resp = download_url(_get_tdx_config()["cw_txt_url"])
     lines = resp.text.strip().split('\r\n')
     rows = [line.strip().split(",") for line in lines]
     server_df = pd.DataFrame(rows, columns=['filename', 'md5', 'filesize'])
@@ -195,7 +209,7 @@ def sync_cw_files():
             tick = time.time()
             logger.info(f"  {filename} 本机没有，开始下载")
             zip_path = cw_dir / filename
-            downloader.run(TDX_CW_FILE_URL + filename, str(zip_path))
+            downloader.run(_get_tdx_config()["cw_file_url"] + filename, str(zip_path))
             if not _extract_and_convert(zip_path, cw_dir, pkl_dir):
                 continue
             logger.info(f"  {filename} 完成 用时 {time.time() - tick:.2f}s")
@@ -211,7 +225,7 @@ def sync_cw_files():
             tick = time.time()
             logger.info(f"  {filename} 需要更新，开始下载")
             os.remove(zip_path)
-            downloader.run(TDX_CW_FILE_URL + filename, str(zip_path))
+            downloader.run(_get_tdx_config()["cw_file_url"] + filename, str(zip_path))
             if not _extract_and_convert(zip_path, cw_dir, pkl_dir):
                 continue
             logger.info(f"  {filename} 完成更新 用时 {time.time() - tick:.2f}s")
@@ -271,7 +285,7 @@ def _load_gbbq_from_local() -> pd.DataFrame | None:
     df.drop(columns=['market'], inplace=True)
     df.columns = ['code', 'date', 'category',
                    'dividend', 'allotment_price', 'bonus_share', 'allotment_share']
-    df['category'] = df['category'].astype(str).map(CATEGORY)
+    df['category'] = df['category'].astype(str).map(_get_tdx_config()["capital_category"])
     df['code'] = df['code'].astype(str)
     return df
 
@@ -287,7 +301,7 @@ def _load_gbbq_from_csv() -> pd.DataFrame | None:
     df.drop(columns=['market'], inplace=True)
     df.columns = ['code', 'date', 'category',
                    'dividend', 'allotment_price', 'bonus_share', 'allotment_share']
-    df['category'] = df['category'].astype(str).map(CATEGORY)
+    df['category'] = df['category'].astype(str).map(_get_tdx_config()["capital_category"])
     df['code'] = df['code'].astype(str)
     return df
 
@@ -299,8 +313,8 @@ def _load_gbbq_from_download() -> pd.DataFrame | None:
 
     zip_path = DOWNLOAD_DIR / "gbbq.zip"
     try:
-        logger.info(f"下载通达信 gbbq 文件: {TDX_GBBQ_ZIP_URL}")
-        resp = download_url(TDX_GBBQ_ZIP_URL)
+        logger.info(f"下载通达信 gbbq 文件: {_get_tdx_config()['gbbq_zip_url']}")
+        resp = download_url(_get_tdx_config()["gbbq_zip_url"])
         zip_path.write_bytes(resp.content)
 
         with zipfile.ZipFile(str(zip_path), "r") as zf:
@@ -312,7 +326,7 @@ def _load_gbbq_from_download() -> pd.DataFrame | None:
 
         logger.info(f"gbbq 文件已下载到 {GBBQ_FILE}")
     except Exception as e:
-        logger.info(f"下载 gbbq 文件失败: {e}")
+        logger.error(f"下载 gbbq 文件失败: {e}")
         return None
 
     return _load_gbbq_from_csv()
@@ -333,7 +347,7 @@ def _load_gbbq_from_server() -> pd.DataFrame | None:
         conn.close()
 
     if not stocks:
-        logger.info("[错误] 数据库中无股票列表，请先运行 sync_stock_info")
+        logger.error("[错误] 数据库中无股票列表，请先运行 sync_stock_info")
         return None
 
     return fetch_xdxr_data(stocks)

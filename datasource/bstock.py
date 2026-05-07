@@ -59,10 +59,13 @@ def _raise_for_query_error(bs_code: str, error_msg: str | None) -> None:
 '''
 def fetch_sync_calendar(start_date:str, end_date:str):
 
-    bs.login()
+    lg = bs.login()
+    if getattr(lg, "error_code", None) != "0":
+        logger.error(f"baostock login failed: {getattr(lg, 'error_msg', '')}")
+        return None
     try:
         rs = bs.query_trade_dates(
-            start_date= start_date, 
+            start_date= start_date,
             end_date  = end_date
             )
         if rs.error_code != '0':

@@ -528,99 +528,6 @@ def find_missing_stock_daily(start_date: str,end_date: str)-> list[tuple]:
             conn.close()
 
 """
-补齐京市停牌无数据
-  参数
-    start_date: 起始日期
-    end_date  : 截止日期
-    codes     : 股票代码列表
-  返回:
-    None
-"""
-def fill_missing_bj_data(start_date: str, end_date: str, codes: list[str]):
-
-    code_filter_sql = ""
-    if codes:
-        formatted_codes = ", ".join(f"'{c}'" for c in set(codes))
-        code_filter_sql = f"AND s.code IN ({formatted_codes})"
-
-    sql = f"""
-        INSERT INTO STOCK_DAILY (
-            code, date, open, high, low, close, pre_close, 
-            tradestatus, volume, amount
-        )
-        WITH params AS (
-            SELECT 
-                CAST('{start_date}' AS DATE) as s_date,
-                CAST('{end_date}' AS DATE) as e_date
-        ),
-        target_stocks AS (
-            SELECT code, list_date, delist_date
-            FROM STOCK_INFO s
-            WHERE exchange = 'BJ' 
-            {code_filter_sql}  -- 动态插入代码过滤条件
-        ),
-        valid_cal AS (
-            SELECT cal_date
-            FROM TRADE_CAL, params
-            WHERE is_open = 1 
-            AND cal_date BETWEEN params.s_date AND params.e_date
-        ),
-        expected_spine AS (
-            SELECT 
-                ts.code, 
-                vc.cal_date as date
-            FROM target_stocks ts
-            CROSS JOIN valid_cal vc
-            WHERE vc.cal_date >= ts.list_date 
-            AND (ts.delist_date IS NULL OR vc.cal_date <= ts.delist_date)
-        ),
-        missing_gaps AS (
-            SELECT 
-                es.code, 
-                es.date
-            FROM expected_spine es
-            ANTI JOIN STOCK_DAILY sd 
-                ON es.code = sd.code AND es.date = sd.date
-        ),
-        filled_values AS (
-            SELECT
-                m.code,
-                m.date,
-                -- ASOF JOIN 抓取停牌日期的前一条记录的收盘价
-                sd.close as prev_close
-            FROM missing_gaps m
-            ASOF LEFT JOIN STOCK_DAILY sd
-                ON m.code = sd.code 
-                AND m.date > sd.date
-        )
-        SELECT 
-            code,
-            date,
-            prev_close as open,        -- 停牌填前收盘
-            prev_close as high,        -- 停牌填前收盘
-            prev_close as low,         -- 停牌填前收盘
-            prev_close as close,       -- 停牌填前收盘
-            prev_close as pre_close,   -- 停牌填前收盘
-            0 as tradestatus,          -- 停牌状态为 0
-            0 as volume,               -- 成交量 0
-            0.0 as amount              -- 成交额 0
-        FROM filled_values
-        WHERE prev_close IS NOT NULL;  -- 剔除找不到前值的情况(如上市首日即停牌)
-    """
-
-    con: duckdb.DuckDBPyConnection | None = None
-    try:
-        con = get_connection(is_read_only=False)
-        con.execute(sql)
-        logger.info("执行成功: 停牌数据已补齐。")
-    except Exception as e:
-        logger.error(f"补齐京市停牌数据失败: {e}")
-    finally:
-        if con:
-            con.close()
-
-
-"""
 计算并更新指定日期区间内的涨跌停价
     :param start_date: 开始日期 'YYYY-MM-DD'
     :param end_date: 结束日期 'YYYY-MM-DD'
@@ -1115,18 +1022,23 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                             exchanges: list[str] | None = None,
                             conn: duckdb.DuckDBPyConnection | None = None) -> None:
 
+    if isinstance(codes, str):
+        codes = [codes]
+
     code_filter = ""
     exchange_filter = ""
+    code_params: list[str] = []
+    exchange_params: list[str] = []
 
     if codes:
-        if isinstance(codes, str):
-            codes = [codes]
-        formatted_codes = ", ".join([f"'{c}'" for c in codes])
-        code_filter = f"AND db.code IN ({formatted_codes})"
+        placeholders = ", ".join(["?"] * len(codes))
+        code_filter = f"AND db.code IN ({placeholders})"
+        code_params = list(codes)
 
     if exchanges:
-        formatted_ex = ", ".join([f"'{x}'" for x in exchanges])
-        exchange_filter = f"AND i.exchange IN ({formatted_ex})"
+        placeholders = ", ".join(["?"] * len(exchanges))
+        exchange_filter = f"AND i.exchange IN ({placeholders})"
+        exchange_params = list(exchanges)
 
     sql = f"""
         WITH capital_events AS (
@@ -1166,8 +1078,7 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
             ASOF JOIN capital_events ce
                 ON db.code = ce.code
                 AND db.trade_date >= ce.date
-            WHERE db.trade_date BETWEEN CAST('{start_date}' AS DATE)
-                                    AND CAST('{end_date}'   AS DATE)
+            WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 AND i.board IN ('MAIN', 'STAR', 'GEM')
                 {code_filter}
                 {exchange_filter}
@@ -1181,6 +1092,8 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
           AND DAILY_BASIC.trade_date = m.trade_date;
     """
 
+    range_params: list = [start_date, end_date, *code_params, *exchange_params]
+
     need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
     try:
@@ -1191,13 +1104,12 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
             SELECT COUNT(*)
             FROM DAILY_BASIC db
             JOIN STOCK_INFO i ON db.code = i.code
-            WHERE db.trade_date BETWEEN CAST('{start_date}' AS DATE)
-                                    AND CAST('{end_date}'   AS DATE)
+            WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 AND i.board IN ('MAIN', 'STAR', 'GEM')
-                {'AND db.code IN (' + ", ".join([f"'{c}'" for c in codes]) + ')' if codes else ''}
-                {exchange_filter.replace('i.exchange', 'i.exchange') if exchanges else ''}
+                {code_filter}
+                {exchange_filter}
         """
-        total_rows = con.execute(count_sql).fetchone()[0]
+        total_rows = con.execute(count_sql, range_params).fetchone()[0]
 
         # 统计 CAPITAL_DETAIL 中有数据的股票数
         cd_count_sql = "SELECT COUNT(DISTINCT code) FROM CAPITAL_DETAIL WHERE category = '股本变化'"
@@ -1205,21 +1117,20 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         logger.info(f"  CAPITAL_DETAIL 中共 {cd_stocks} 只股票有股本变化记录")
         logger.info(f"  DAILY_BASIC 目标区间共 {total_rows} 行待处理")
 
-        con.execute(sql)
+        con.execute(sql, range_params)
 
         # 统计实际更新行数(非NULL)
         verify_sql = f"""
             SELECT COUNT(*)
             FROM DAILY_BASIC db
             JOIN STOCK_INFO i ON db.code = i.code
-            WHERE db.trade_date BETWEEN CAST('{start_date}' AS DATE)
-                                    AND CAST('{end_date}'   AS DATE)
+            WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 AND i.board IN ('MAIN', 'STAR', 'GEM')
                 AND db.total_shares IS NOT NULL
-                {'AND db.code IN (' + ", ".join([f"'{c}'" for c in codes]) + ')' if codes else ''}
-                {exchange_filter.replace('i.exchange', 'i.exchange') if exchanges else ''}
+                {code_filter}
+                {exchange_filter}
         """
-        updated_rows = con.execute(verify_sql).fetchone()[0]
+        updated_rows = con.execute(verify_sql, range_params).fetchone()[0]
         skipped = total_rows - updated_rows
         logger.info(f"  成功更新 {updated_rows} 行, 跳过 {skipped} 行(无股本变化数据)")
 
@@ -1246,18 +1157,23 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
                         exchanges: list[str] | None = None,
                         conn: duckdb.DuckDBPyConnection | None = None) -> None:
 
+    if isinstance(codes, str):
+        codes = [codes]
+
     code_filter = ""
     exchange_filter = ""
+    code_params: list[str] = []
+    exchange_params: list[str] = []
 
     if codes:
-        if isinstance(codes, str):
-            codes = [codes]
-        formatted_codes = ", ".join([f"'{c}'" for c in codes])
-        code_filter = f"AND db.code IN ({formatted_codes})"
+        placeholders = ", ".join(["?"] * len(codes))
+        code_filter = f"AND db.code IN ({placeholders})"
+        code_params = list(codes)
 
     if exchanges:
-        formatted_ex = ", ".join([f"'{x}'" for x in exchanges])
-        exchange_filter = f"AND i.exchange IN ({formatted_ex})"
+        placeholders = ", ".join(["?"] * len(exchanges))
+        exchange_filter = f"AND i.exchange IN ({placeholders})"
+        exchange_params = list(exchanges)
 
     sql = f"""
         UPDATE DAILY_BASIC db
@@ -1267,33 +1183,33 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
         JOIN STOCK_INFO i ON sd.code = i.code
         WHERE db.code       = sd.code
           AND db.trade_date  = sd.date
-          AND db.trade_date BETWEEN CAST('{start_date}' AS DATE)
-                                AND CAST('{end_date}'   AS DATE)
+          AND db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
           AND db.total_shares IS NOT NULL
           AND i.board IN ('MAIN', 'STAR', 'GEM')
           {code_filter}
           {exchange_filter};
     """
 
+    range_params: list = [start_date, end_date, *code_params, *exchange_params]
+
     need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
     try:
         con = conn if conn is not None else get_connection(is_read_only=False)
 
-        con.execute(sql)
+        con.execute(sql, range_params)
 
         verify_sql = f"""
             SELECT COUNT(*)
             FROM DAILY_BASIC db
             JOIN STOCK_INFO i ON db.code = i.code
-            WHERE db.trade_date BETWEEN CAST('{start_date}' AS DATE)
-                                    AND CAST('{end_date}'   AS DATE)
+            WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 AND db.total_mv IS NOT NULL
                 AND i.board IN ('MAIN', 'STAR', 'GEM')
-                {'AND db.code IN (' + ", ".join([f"'{c}'" for c in codes]) + ')' if codes else ''}
-                {exchange_filter if exchanges else ''}
+                {code_filter}
+                {exchange_filter}
         """
-        updated_rows = con.execute(verify_sql).fetchone()[0]
+        updated_rows = con.execute(verify_sql, range_params).fetchone()[0]
         logger.info(f"  成功更新 {updated_rows} 行市值数据(total_mv, float_mv)")
 
     except Exception as e:

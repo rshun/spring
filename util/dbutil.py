@@ -25,13 +25,13 @@ def check_is_trading_day(date_str: str) -> bool:
             ).fetchone()
 
         if result is None:
-            logger.info(f" 警告: 日历表中不存在日期 {date_str} 的记录。")
+            logger.warning(f"日历表中不存在日期 {date_str} 的记录。")
             return False
 
         return True if result[0] == 1 else False
 
     except Exception as e:
-        logger.info(f" 检查日历表失败: {e}")
+        logger.error(f"检查日历表失败: {e}")
         return False
     finally:
         if conn is not None:
@@ -161,6 +161,11 @@ def get_candidate_data(
             
             # 截止日期, 如果有传，则判断退市状态，传入日期和退市日期(当天日期)取最小,如果没传，判断退市状态，取退市日期(当天日期)
             cap_date = today_date if list_status == "L" else delist_date
+            # 退市股但 delist_date 为空（baostock 等数据源未提供退市日）：
+            # 无法确定有效区间，跳过该股，避免 min(date, None) 触发 TypeError 让整批候选清空
+            if cap_date is None:
+                logger.warning(f"{symbol}.{exchange} 已退市但无退市日，跳过")
+                continue
             eff_end = cap_date if req_end_date is None else min(req_end_date, cap_date)
 
             # 只有当开始日期 <= 结束日期，且不退市或者要求包含已退市股票
@@ -175,10 +180,10 @@ def get_candidate_data(
 
         return out
     except FileNotFoundError:
-        logger.info(f"数据库文件不存在，请先运行init_db.py初始化数据库")
+        logger.error("数据库文件不存在，请先运行init_db.py初始化数据库")
         return []
     except Exception as e:
-        logger.info(f"获取数据库连接失败: {e}")
+        logger.error(f"获取候选股票失败: {e}")
         return []
     finally:
         if conn is not None:
@@ -233,7 +238,7 @@ def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
         logger.info(f"[入库] 成功合并 {len(df)} 条每日指标数据")
     except Exception as e:
-        logger.info(f"[错误] 写入 DAILY_BASIC 表失败: {e}")
+        logger.error(f"写入 DAILY_BASIC 表失败: {e}")
 
 def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
     """
@@ -253,7 +258,7 @@ def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None
         """)
         logger.info(f"[入库] 成功合并 {len(df)} 条股本数据到 DAILY_BASIC")
     except Exception as e:
-        logger.info(f"[错误] 写入股本数据到 DAILY_BASIC 失败: {e}")
+        logger.error(f"写入股本数据到 DAILY_BASIC 失败: {e}")
 
 """
 写入股票行情明细数据 stock_daily 表
@@ -298,7 +303,7 @@ def save_daily_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
         logger.info("行情数据入库成功。")
     except Exception as e:
-        logger.info(f"数据库写入失败: {e}")
+        logger.error(f"写入 STOCK_DAILY 表失败: {e}")
 
 """
 将交易日数据写入 trade_cal 表
@@ -330,7 +335,7 @@ def save_calendar_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection):
         count = conn.execute("SELECT COUNT(*) FROM trade_cal").fetchone()[0]
         logger.info(f"入库成功！当前 TRADE_CAL 表总记录数: {count}")
     except Exception as e:
-        logger.info(f"[数据库错误] 写入 TRADE_CAL 执行失败: {e}")
+        logger.error(f"写入 TRADE_CAL 执行失败: {e}")
         raise
     finally:
         try:
@@ -447,11 +452,11 @@ def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
         logger.info(f"  [*] 验证: 'stock_info' 表现在共有 {count_result[0]} 条记录。")
 
     except duckdb.CatalogException as e:
-        logger.info(f"  数据库写入失败: {e}")
-        logger.info("  错误提示：很可能是 'stock_info' 表不存在。")
-        logger.info("  请确认 'init_db.py' 已经成功运行。")
+        logger.error(f"写入 stock_info 失败: {e}")
+        logger.error("  错误提示：很可能是 'stock_info' 表不存在。")
+        logger.error("  请确认 'init_db.py' 已经成功运行。")
     except Exception as e:
-        logger.info(f"  数据库写入失败: {e}")
+        logger.error(f"写入 stock_info 失败: {e}")
     finally:
         try:
             conn.unregister("temp_stock_info")
@@ -513,10 +518,10 @@ def find_missing_stock_daily(start_date: str,end_date: str)-> list[tuple]:
         rows = conn.execute(sql, [start_date, end_date]).fetchall()
         return rows
     except FileNotFoundError:
-        logger.info(f"数据库文件不存在, 请先运行init_db.py初始化数据库")
+        logger.error("数据库文件不存在, 请先运行init_db.py初始化数据库")
         return []
     except Exception as e:
-        logger.info(f"获取数据库连接失败: {e}")
+        logger.error(f"查询缺失行情数据失败: {e}")
         return []
     finally:
         if conn is not None:
@@ -609,7 +614,7 @@ def fill_missing_bj_data(start_date: str, end_date: str, codes: list[str]):
         con.execute(sql)
         logger.info("执行成功: 停牌数据已补齐。")
     except Exception as e:
-        logger.info(f"执行失败: {e}")
+        logger.error(f"补齐京市停牌数据失败: {e}")
     finally:
         if con:
             con.close()
@@ -743,7 +748,7 @@ def update_price_limits_by_range(start_date, end_date, markets=['ALL']):
         logger.info("批量更新完成。")
 
     except Exception as e:
-        logger.info(f"执行失败: {e}")
+        logger.error(f"涨跌停价批量更新失败: {e}")
     finally:
         if con:
             con.close()
@@ -869,7 +874,7 @@ def save_margin_data_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) ->
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条融资融券数据")
     except Exception as e:
-        logger.info(f"[错误] 写入 MARGIN_DATA 表失败: {e}")
+        logger.error(f"写入 MARGIN_DATA 表失败: {e}")
     finally:
         try:
             conn.unregister("temp_margin_data")
@@ -880,7 +885,7 @@ def save_margin_data_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) ->
 """
 获取最新交易日
 """
-def get_newest_trade_date() -> str:
+def get_newest_trade_date() -> str | None:
     con: duckdb.DuckDBPyConnection | None = None
     try:
         con = get_connection(is_read_only=True)
@@ -897,126 +902,11 @@ def get_newest_trade_date() -> str:
         
         return result[0].strftime('%Y-%m-%d') if result and result[0] else None
     except Exception as e:
-        logger.info(f"获取最新交易日失败: {e}")
+        logger.error(f"获取最新交易日失败: {e}")
         return None
     finally:
         if con:
             con.close()
-
-"""
-DEPRECATED: 旧版 SW_INDUSTRY 写入函数。
-  旧表结构使用 sw_code/sw_name，已被新版
-  SW_INDUSTRY(sw_version, industry_code, industry_name, ...) 替代。
-  新流程请使用 save_sw_industry_hierarchy_to_db()。
-UPSERT 申万行业定义到 sw_industry 表
-  参数:
-    df: DataFrame，含 sw_code / sw_name / sw_level / parent_code
-    conn: duckdb连接
-"""
-def save_sw_industry_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
-
-    logger.info(f"正在将 {len(df)} 条申万行业定义写入数据库...")
-    try:
-        conn.register("temp_sw_industry", df)
-        conn.execute("""
-            INSERT INTO sw_industry (sw_code, sw_name, sw_level, parent_code, updated_at)
-            SELECT sw_code, sw_name, sw_level, parent_code, now()
-            FROM temp_sw_industry
-            ON CONFLICT (sw_code) DO UPDATE SET
-                sw_name     = excluded.sw_name,
-                sw_level    = excluded.sw_level,
-                parent_code = excluded.parent_code,
-                updated_at  = now()
-            WHERE
-                sw_industry.sw_name     IS DISTINCT FROM excluded.sw_name OR
-                sw_industry.parent_code IS DISTINCT FROM excluded.parent_code
-        """)
-        count = conn.execute("SELECT COUNT(*) FROM sw_industry").fetchone()[0]
-        logger.info(f"申万行业定义写入成功，当前共 {count} 条记录。")
-    except Exception as e:
-        logger.info(f"写入 sw_industry 失败: {e}")
-    finally:
-        try:
-            conn.unregister("temp_sw_industry")
-        except Exception:
-            pass
-
-"""
-DEPRECATED: 旧版股票-申万行业映射写入函数。
-  旧流程写入 STOCK_SW_INDUSTRY，已被
-  STOCK_INDUSTRY_CLF_HIST_SW_RAW + STOCK_SW_INDUSTRY_VIEW 替代。
-  新流程请使用 save_stock_industry_clf_hist_sw_raw_to_db()。
-比对现有记录，将行业发生变更的股票插入 stock_sw_industry 表
-  参数:
-    new_df : 本次从 akshare 拉取的全量映射，含
-             code / sw_l1_code / sw_l1_name / sw_l2_code / sw_l2_name /
-             sw_l3_code / sw_l3_name / entry_date
-    conn   : duckdb连接
-    today  : 生效日期字符串 YYYY-MM-DD
-"""
-def save_stock_sw_industry_to_db(
-    new_df: pd.DataFrame,
-    conn: duckdb.DuckDBPyConnection,
-    today: str
-) -> None:
-
-    logger.info(f"正在对比申万行业映射，检测变更（基准日期: {today}）...")
-    try:
-        # 查询数据库中每只股票最新一条行业记录
-        latest = conn.execute("""
-            SELECT s.code, s.sw_l1_code, s.sw_l2_code, s.sw_l3_code
-            FROM stock_sw_industry s
-            INNER JOIN (
-                SELECT code, MAX(effective_date) AS max_date
-                FROM stock_sw_industry
-                GROUP BY code
-            ) t ON s.code = t.code AND s.effective_date = t.max_date
-        """).df()
-
-        if latest.empty:
-            # 首次入库：全量插入
-            changed = new_df.copy()
-            logger.info(f"首次入库，全量写入 {len(changed)} 条记录。")
-        else:
-            # 合并新旧数据，只保留 l1_code 发生变化或新增的股票
-            merged = new_df.merge(latest, on="code", how="left", suffixes=("_new", "_old"))
-            mask = (
-                merged["sw_l1_code_old"].isna() |
-                (merged["sw_l1_code_new"] != merged["sw_l1_code_old"])
-            )
-            changed = new_df[mask.values].copy()
-            logger.info(f"检测到 {len(changed)} 条行业变更（含新增股票）。")
-
-        if changed.empty:
-            logger.info("无行业变更，跳过写入。")
-            return
-
-        changed["effective_date"] = today
-        conn.register("temp_stock_sw", changed)
-        conn.execute("""
-            INSERT OR REPLACE INTO stock_sw_industry
-                (code, effective_date, sw_l1_code, sw_l1_name,
-                 sw_l2_code, sw_l2_name, sw_l3_code, sw_l3_name,
-                 entry_date, updated_at)
-            SELECT
-                code,
-                CAST(effective_date AS DATE),
-                sw_l1_code, sw_l1_name,
-                sw_l2_code, sw_l2_name,
-                sw_l3_code, sw_l3_name,
-                CAST(entry_date AS DATE),
-                now()
-            FROM temp_stock_sw
-        """)
-        logger.info(f"[入库] 成功写入 {len(changed)} 条申万行业映射记录。")
-    except Exception as e:
-        logger.error(f"写入 stock_sw_industry 失败: {e}")
-    finally:
-        try:
-            conn.unregister("temp_stock_sw")
-        except (duckdb.Error, RuntimeError) as e:
-            logger.warning(f"清理 temp_stock_sw 注册表失败: {e}")
-
 
 """
 UPSERT 股票申万行业历史原始数据到 STOCK_INDUSTRY_CLF_HIST_SW_RAW 表

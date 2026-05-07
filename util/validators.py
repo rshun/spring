@@ -68,8 +68,8 @@ def v_date_order(begin_field: str, end_field: str, msg: str = "起始日期不�
 
 
 def v_single_day_must_be_trading_day(
-    begin_field: str = None,
-    end_field: str = None,
+    begin_field: str | None = None,
+    end_field: str | None = None,
     *,
     allow_non_trading: bool = False,
     tip_prefix: str = "提示",

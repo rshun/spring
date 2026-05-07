@@ -1,4 +1,5 @@
 import argparse
+import duckdb
 import logging
 from util import dbutil, myutil
 from util import validators as pv
@@ -111,10 +112,9 @@ def main():
     logger.info(f"     股票代码: {codes if codes else '全量'}")
     logger.info("=" * 60)
 
-    from util.dbutil import get_connection
-    con = None
+    con: duckdb.DuckDBPyConnection | None = None
     try:
-        con = get_connection(is_read_only=False)
+        con = dbutil.get_connection(is_read_only=False)
         dbutil.fill_daily_basic_shares(begin_date, end_date, codes, exchanges, conn=con)
         dbutil.fill_daily_basic_mv(begin_date, end_date, codes, exchanges, conn=con)
     finally:

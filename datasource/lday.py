@@ -4,6 +4,7 @@ import os
 import pandas as pd
 from functools import wraps
 from datetime import date, datetime
+from pathlib import Path
 from util import myutil
 
 logger = logging.getLogger("etl.datasource.lday")
@@ -69,7 +70,7 @@ def fetch_stock_data(begin: str, end: str, code_file: str, std_code: str) -> pd.
         return df
         
     except Exception as e:
-        logger.info(f"读取文件 {code_file} 出错: {e}")
+        logger.error(f"读取文件 {code_file} 出错: {e}")
         return pd.DataFrame()
 
 '''
@@ -91,13 +92,13 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
         try:
             code_file = myutil.get_lday_path(market.lower()) / f"{market.lower()}{symbol}.day"
         except Exception as e:
-            logger.info(f" 获取失败: {symbol}.{market} | 原因: 无法定位day文件目录: {e}")
+            logger.warning(f"获取失败: {symbol}.{market} | 原因: 无法定位day文件目录: {e}")
             continue
 
         if not code_file or not code_file.is_file():
-            logger.info(f" 获取失败: {symbol}.{market} | 原因: 文件不存在: {code_file}")
+            logger.warning(f"获取失败: {symbol}.{market} | 原因: 文件不存在: {code_file}")
             continue
-        logger.info(code_file)
+        logger.debug(code_file)
         try:
             df_one = fetch_stock_data(
                 begin     = datetime.strptime(begindate, "%Y-%m-%d").strftime("%Y%m%d"),
@@ -110,15 +111,15 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
             if count % 100 == 0:
                 logger.info(f"   已处理: {count}/{total}")
         except Exception as e:
-            logger.info(f"\n 获取失败: {symbol}.{market} | 原因: {e}")
+            logger.warning(f"获取失败: {symbol}.{market} | 原因: {e}")
             continue
 
     if all_dfs:
         final_df = pd.concat(all_dfs, ignore_index=True)
-        logger.info(f" 批量采集完成，成功获取 {len(final_df)} 条记录")
+        logger.info(f"批量采集完成，成功获取 {len(final_df)} 条记录")
         return final_df,pd.DataFrame()
     else:
-        logger.info("未获取到任何有效数据")
+        logger.warning("未获取到任何有效数据")
         return pd.DataFrame(),pd.DataFrame()
 
 def fetch_batch_index(stock_list: list[tuple]) -> tuple[pd.DataFrame]:

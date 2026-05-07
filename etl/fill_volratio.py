@@ -1,4 +1,5 @@
 import argparse
+import duckdb
 import logging
 from util import dbutil,myutil
 from util import validators as pv
@@ -107,7 +108,13 @@ def main():
     else:
         codes = None
 
-    dbutil.fill_daily_basic_volume_ratio(begin_date,end_date,codes)
+    con: duckdb.DuckDBPyConnection | None = None
+    try:
+        con = dbutil.get_connection(is_read_only=False)
+        dbutil.fill_daily_basic_volume_ratio(begin_date, end_date, codes, conn=con)
+    finally:
+        if con is not None:
+            con.close()
 
 if __name__ == "__main__":
     main()

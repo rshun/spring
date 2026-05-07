@@ -46,18 +46,15 @@ def download_url(url, tries=3, delay=3):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                       '(KHTML, like Gecko) Chrome/87.0.4280.141',
     }
-    last_error = None
     for attempt in range(1, tries + 1):
         try:
             resp = requests.get(url, headers=header, timeout=10)
             resp.raise_for_status()
             return resp
-        except Exception as exc:
-            last_error = exc
+        except Exception:
             if attempt == tries:
                 raise
             time.sleep(delay)
-    raise RuntimeError(f"下载失败: {url}") from last_error
 
 
 class ManyThreadDownload:
@@ -82,40 +79,34 @@ class ManyThreadDownload:
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
 
-        while not ts_queue.empty():
-            start_, end_ = ts_queue.get()
-            headers = {'Range': 'Bytes=%s-%s' % (start_, end_), 'Accept-Encoding': '*'}
-            res = None
-            flag = False
-            retry_count = 0
-            max_retries = 20
-            while not flag and retry_count < max_retries:
+        # 单 session 复用：urllib3.Retry 自动处理 5xx/429 重试与退避
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+
+        try:
+            while not ts_queue.empty():
+                start_, end_ = ts_queue.get()
+                headers = {'Range': 'Bytes=%s-%s' % (start_, end_), 'Accept-Encoding': '*'}
                 try:
-                    session = requests.Session()
-                    retry_strategy = Retry(
-                        total=10,
-                        backoff_factor=1,
-                        status_forcelist=[429, 500, 502, 503, 504],
-                    )
-                    adapter = HTTPAdapter(max_retries=retry_strategy)
-                    session.mount('http://', adapter)
-                    session.mount('https://', adapter)
-                    res = session.get(self.url, headers=headers)
-                    res.close()
-                    session.close()
+                    res = session.get(self.url, headers=headers, timeout=30)
+                    res.raise_for_status()
                 except Exception as e:
-                    logger.warning(f"  下载分片 ({start_}-{end_}) 出错 (第{retry_count+1}次重试): {e}")
-                    time.sleep(1)
-                    retry_count += 1
-                    continue
-                flag = True
-            if not flag:
-                logger.error(f"  下载分片 ({start_}-{end_}) 失败，已达最大重试次数")
-                raise RuntimeError(f"下载分片 ({start_}-{end_}) 失败，超过 {max_retries} 次重试")
-            if res is not None:
+                    logger.error(f"  下载分片 ({start_}-{end_}) 失败: {e}")
+                    raise RuntimeError(f"下载分片 ({start_}-{end_}) 失败") from e
+
                 with open(self.name, "rb+") as fd:
                     fd.seek(start_)
                     fd.write(res.content)
+                res.close()
+        finally:
+            session.close()
 
     def run(self, url, name):
         import requests
@@ -145,8 +136,6 @@ class ManyThreadDownload:
 
 def historyfinancialreader(filepath):
     """读取通达信专业财务 .dat 文件"""
-    import pandas as pd
-
     with open(filepath, 'rb') as cw_file:
         header_pack_format = '<1hI1H3L'
         header_size = struct.calcsize(header_pack_format)
@@ -187,8 +176,6 @@ def list_cw_files(directory, ext_name):
 
 def sync_cw_files():
     """从通达信服务器下载/更新专业财务文件到 download/ 目录"""
-    import pandas as pd
-
     cw_dir = DOWNLOAD_DIR / "cw"
     pkl_dir = DOWNLOAD_DIR / "cw_pkl"
     cw_dir.mkdir(parents=True, exist_ok=True)
@@ -250,7 +237,7 @@ def _extract_and_convert(zip_path, cw_dir, pkl_dir):
     try:
         with zipfile.ZipFile(str(zip_path), 'r') as zf:
             zf.extractall(str(cw_dir))
-    except (zipfile.BadZipFile, Exception) as e:
+    except (zipfile.BadZipFile, OSError) as e:
         logger.error(f"  文件 {zip_path.name} 损坏或解压失败，跳过: {e}")
         if zip_path.exists():
             os.remove(zip_path)
@@ -273,7 +260,10 @@ def _load_gbbq_from_local() -> pd.DataFrame | None:
     import pytdx.reader.gbbq_reader
 
     if os.name == "nt":
-        gbbq_path = Path(r"C:\new_zszq_cf\T0002\hq_cache\gbbq")
+        local_root = get_config().get("local_paths", {}).get("tdx_gbbq")
+        if not local_root:
+            return None
+        gbbq_path = Path(local_root)
     else:
         gbbq_path = Path.home() / "data" / "tdx" / "T0002" / "hq_cache" / "gbbq"
 
@@ -290,8 +280,8 @@ def _load_gbbq_from_local() -> pd.DataFrame | None:
     return df
 
 
-def _load_gbbq_from_csv() -> pd.DataFrame | None:
-    """步骤2: 从 csv/gbbq 二进制文件读取"""
+def _load_gbbq_from_binary_cache() -> pd.DataFrame | None:
+    """步骤2: 从 csv/gbbq 二进制缓存文件读取（注意：文件无后缀名，是 dbf 二进制不是 CSV）"""
     import pytdx.reader.gbbq_reader
 
     if not GBBQ_FILE.exists():
@@ -329,7 +319,7 @@ def _load_gbbq_from_download() -> pd.DataFrame | None:
         logger.error(f"下载 gbbq 文件失败: {e}")
         return None
 
-    return _load_gbbq_from_csv()
+    return _load_gbbq_from_binary_cache()
 
 
 def _load_gbbq_from_server() -> pd.DataFrame | None:
@@ -371,8 +361,8 @@ def sync_gbbq(download: bool = False):
         df_gbbq = _load_gbbq_from_local()
         source = "本地二进制"
     if df_gbbq is None:
-        df_gbbq = _load_gbbq_from_csv()
-        source = "CSV"
+        df_gbbq = _load_gbbq_from_binary_cache()
+        source = "二进制缓存"
     if df_gbbq is None:
         df_gbbq = _load_gbbq_from_server()
         source = "在线服务器"

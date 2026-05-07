@@ -115,7 +115,12 @@ def get_lday_path(market: str | None = None) -> Path:
         if not market or not str(market).strip():
             raise ValueError("Windows 环境下必须传入 market（Vipdoc 下的市场目录名，例如 'sh'/'sz'）。")
         market_dir = str(market).strip()
-        lday_path = Path(r"C:\new_zszq_cf\Vipdoc") / market_dir / "lday"
+        # 延迟导入避免循环依赖（util.config 不依赖 myutil）
+        from util.config import get_config
+        vipdoc_root = get_config().get("local_paths", {}).get("tdx_vipdoc")
+        if not vipdoc_root:
+            raise ValueError("config.yaml 缺少 local_paths.tdx_vipdoc 配置")
+        lday_path = Path(vipdoc_root) / market_dir / "lday"
     else:
         lday_path = Path.home() / "data" / "lday"
 

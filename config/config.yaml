@@ -1,6 +1,13 @@
 # spring 项目全局配置
 # 所有硬编码的固定值统一管理于此文件
 
+# Windows 本机通达信安装路径；非 Windows 系统下忽略此节
+local_paths:
+  # 通达信 Vipdoc 根目录（其下分 sh/sz/.../lday/*.day）
+  tdx_vipdoc: "C:\\new_zszq_cf\\Vipdoc"
+  # 通达信 gbbq 股本变迁二进制文件路径
+  tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
+
 tdx:
   # 通达信行情服务器列表 (IP, 端口)，按经验优先级排序
   servers:

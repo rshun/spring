@@ -22,7 +22,7 @@ logger = logging.getLogger("util.config")
 
 # 项目根目录 = util/ 的上一级
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_CONFIG_PATH = _PROJECT_ROOT / "config" / "tdx.yaml"
+_CONFIG_PATH = _PROJECT_ROOT / "config" / "config.yaml"
 
 # 线程安全缓存
 _lock = threading.Lock()

@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import duckdb
 import pandas as pd
 
+from util import myutil
+
 try:
     # Most common official-style import
     from mcp.server.fastmcp import FastMCP
@@ -24,9 +26,11 @@ except Exception as e:
         "Cannot import FastMCP. Please ensure MCP Python SDK is installed and import path is correct."
     ) from e
 
-DB_PATH = os.environ.get("DUCKDB_PATH", "").strip()
-if not DB_PATH:
+# 强制要求显式设置 DUCKDB_PATH（mcp 服务不走默认路径，防误连本地 db）；
+# 实际路径解析复用 myutil.get_default_dbfile，与 ETL 侧保持一致
+if not os.environ.get("DUCKDB_PATH", "").strip():
     raise RuntimeError("DUCKDB_PATH env is required, but not set.")
+DB_PATH = str(myutil.get_default_dbfile())
 
 # Safety / stability guards
 MAX_ROWS_DEFAULT = int(os.environ.get("MAX_ROWS", "2000"))

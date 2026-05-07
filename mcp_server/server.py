@@ -599,35 +599,91 @@ def get_stock_industry_history(
 
 
 @mcp.tool()
-def get_margin_data(
+def get_margin_detail(
     code: str,
     start_date: str,
     end_date: str,
     max_rows: int = 2000,
 ) -> Dict[str, Any]:
     """
-    MARGIN_DATA(code, trade_date, margin_buy, margin_balance, short_sell_vol, ...)
-    获取融资融券明细数据。
+    MARGIN_DETAIL_DAILY(trade_date, exchange_code, symbol, code, security_name,
+        margin_buy_amount, margin_repay_amount, margin_balance,
+        short_sell_volume, short_repay_volume,
+        short_balance_volume, short_balance_amount, margin_short_balance, ...)
+    获取指定股票的融资融券明细数据。
     """
     _ = parse_code(code)
     start_date = validate_date(start_date)
     end_date = validate_date(end_date)
     ensure_span(start_date, end_date, MAX_DAYS_DEFAULT)
 
-    if not table_exists("MARGIN_DATA"):
-        raise RuntimeError("MARGIN_DATA table not found.")
+    if not table_exists("MARGIN_DETAIL_DAILY"):
+        raise RuntimeError("MARGIN_DETAIL_DAILY table not found.")
 
     max_rows = max(1, min(int(max_rows), 20000))
 
     df = run_sql(
         """
-        SELECT *
-        FROM MARGIN_DATA
+        SELECT trade_date, exchange_code, symbol, code, security_name,
+               margin_buy_amount, margin_repay_amount, margin_balance,
+               short_sell_volume, short_repay_volume,
+               short_balance_volume, short_balance_amount,
+               margin_short_balance, created_at, updated_at
+        FROM MARGIN_DETAIL_DAILY
         WHERE UPPER(code) = UPPER(?)
           AND trade_date BETWEEN ? AND ?
         ORDER BY trade_date
         """,
         [code, start_date, end_date],
+    )
+    return df_to_payload(df, max_rows)
+
+
+@mcp.tool()
+def get_margin_summary(
+    start_date: str,
+    end_date: str,
+    exchange_code: Optional[str] = None,
+    max_rows: int = 2000,
+) -> Dict[str, Any]:
+    """
+    MARGIN_SUMMARY_DAILY(trade_date, exchange_code,
+        margin_buy_amount, margin_repay_amount, margin_balance,
+        short_sell_volume, short_repay_volume,
+        short_balance_volume, short_balance_amount, margin_short_balance, ...)
+    获取交易所级融资融券每日汇总数据。
+    exchange_code 可选: SH / SZ / BJ；不传则返回所有交易所。
+    """
+    start_date = validate_date(start_date)
+    end_date = validate_date(end_date)
+    ensure_span(start_date, end_date, MAX_DAYS_DEFAULT)
+
+    if not table_exists("MARGIN_SUMMARY_DAILY"):
+        raise RuntimeError("MARGIN_SUMMARY_DAILY table not found.")
+
+    filters = ["trade_date BETWEEN ? AND ?"]
+    params: List[Any] = [start_date, end_date]
+    if exchange_code:
+        ex = exchange_code.upper()
+        if ex not in ("SH", "SZ", "BJ"):
+            raise ValueError("exchange_code must be one of SH/SZ/BJ")
+        filters.append("exchange_code = ?")
+        params.append(ex)
+
+    max_rows = max(1, min(int(max_rows), 20000))
+
+    df = run_sql(
+        f"""
+        SELECT trade_date, exchange_code,
+               margin_buy_amount, margin_repay_amount, margin_balance,
+               short_sell_volume, short_repay_volume,
+               short_balance_volume, short_balance_amount,
+               margin_short_balance, created_at, updated_at
+        FROM MARGIN_SUMMARY_DAILY
+        WHERE {' AND '.join(filters)}
+        ORDER BY trade_date, exchange_code
+        """,
+        params,
     )
     return df_to_payload(df, max_rows)
 

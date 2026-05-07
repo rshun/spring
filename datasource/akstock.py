@@ -298,92 +298,198 @@ def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
     return result[cols].reset_index(drop=True)
 
 
+_SUMMARY_OUT_COLS = [
+    'trade_date', 'exchange_code',
+    'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
+    'short_sell_volume', 'short_repay_volume',
+    'short_balance_volume', 'short_balance_amount',
+    'margin_short_balance',
+]
+
+_DETAIL_OUT_COLS = [
+    'trade_date', 'exchange_code', 'symbol', 'code', 'security_name',
+    'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
+    'short_sell_volume', 'short_repay_volume',
+    'short_balance_volume', 'short_balance_amount',
+    'margin_short_balance',
+]
+
+
+def _fetch_summary_sse(begin_date: str, end_date: str) -> pd.DataFrame:
+    """上交所融资融券汇总：单次区间查询。"""
+    try:
+        df = ak.stock_margin_sse(start_date=begin_date, end_date=end_date)
+    except Exception as e:
+        logger.warning(f"  [WARN] 上交所融资融券汇总获取失败: {e}")
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
+
+    df = df.rename(columns={
+        '信用交易日期':   'trade_date',
+        '融资余额':       'margin_balance',
+        '融资买入额':     'margin_buy_amount',
+        '融券余量':       'short_balance_volume',
+        '融券余量金额':   'short_balance_amount',
+        '融券卖出量':     'short_sell_volume',
+        '融资融券余额':   'margin_short_balance',
+    })
+    df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str), format='%Y%m%d', errors='coerce').dt.date
+    df = df.dropna(subset=['trade_date']).copy()
+    df['exchange_code']        = 'SH'
+    df['margin_repay_amount']  = None
+    df['short_repay_volume']   = None
+    return df.reindex(columns=_SUMMARY_OUT_COLS).reset_index(drop=True)
+
+
+def _fetch_summary_szse(trade_dates: list[str]) -> pd.DataFrame:
+    """深交所融资融券汇总：逐日查询，取"融资融券"汇总行。"""
+    rows = []
+    for d in trade_dates:
+        try:
+            df = ak.stock_margin_szse(date=d)
+        except Exception as e:
+            logger.warning(f"  [WARN] 深交所融资融券汇总 {d} 获取失败: {e}")
+            continue
+        if df is None or df.empty:
+            continue
+
+        # 接口返回多行 (融资融券 / 股票融资融券 / 基金融资融券)，取整体汇总行
+        if '项目' in df.columns:
+            df = df[df['项目'].astype(str).str.strip() == '融资融券'].copy()
+            if df.empty:
+                continue
+
+        df = df.rename(columns={
+            '数据日期':       'trade_date',
+            '融资买入额':     'margin_buy_amount',
+            '融资余额':       'margin_balance',
+            '融券卖出量':     'short_sell_volume',
+            '融券余量金额':   'short_balance_amount',
+            '融券余量':       'short_balance_volume',
+            '融资融券余额':   'margin_short_balance',
+        })
+        if 'trade_date' not in df.columns:
+            df['trade_date'] = d
+        df['trade_date']           = pd.to_datetime(df['trade_date'].astype(str), errors='coerce').dt.date
+        df['exchange_code']        = 'SZ'
+        df['margin_repay_amount']  = None
+        df['short_repay_volume']   = None
+        rows.append(df.reindex(columns=_SUMMARY_OUT_COLS))
+
+    if not rows:
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
+    return pd.concat(rows, ignore_index=True)
+
+
 '''
-获取指定交易日沪深两市融资融券明细数据，合并后返回统一格式 DataFrame。
+获取沪深融资融券每日汇总数据 (MARGIN_SUMMARY_DAILY)。
 
 输入:
-  trade_date: 交易日字符串 (格式: YYYYMMDD)
-输出列:
-  code, trade_date, name, exchange,
-  margin_buy, margin_balance, margin_repay,
-  short_sell_vol, short_balance_vol, short_repay_vol,
-  short_balance_amt, total_balance
+  begin_date: 开始日期，格式 YYYYMMDD
+  end_date:   结束日期，格式 YYYYMMDD
+  exchanges:  交易所列表，元素 sh/sz/all
+  trade_dates: 区间内交易日列表 YYYYMMDD，供 SZ 逐日抓取使用
+输出列对齐 MARGIN_SUMMARY_DAILY。
 '''
-def fetch_margin_data(trade_date: str) -> pd.DataFrame:
+def fetch_margin_summary(begin_date: str, end_date: str,
+                         exchanges: list[str],
+                         trade_dates: list[str]) -> pd.DataFrame:
 
-    OUT_COLS = [
-        'code', 'trade_date', 'name', 'exchange',
-        'margin_buy', 'margin_balance', 'margin_repay',
-        'short_sell_vol', 'short_balance_vol', 'short_repay_vol',
-        'short_balance_amt', 'total_balance',
-    ]
+    target = set(e.lower() for e in exchanges)
+    want_sh = ('sh' in target) or ('all' in target)
+    want_sz = ('sz' in target) or ('all' in target)
+
+    parts = []
+    if want_sh:
+        df_sh = _fetch_summary_sse(begin_date, end_date)
+        logger.info(f"  上交所汇总: {len(df_sh)} 条")
+        parts.append(df_sh)
+    if want_sz:
+        df_sz = _fetch_summary_szse(trade_dates)
+        logger.info(f"  深交所汇总: {len(df_sz)} 条")
+        parts.append(df_sz)
+
+    if not parts:
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
+    return pd.concat(parts, ignore_index=True).reset_index(drop=True)
+
+
+'''
+获取指定交易日的沪深融资融券明细 (MARGIN_DETAIL_DAILY)。
+
+输入:
+  trade_date: 交易日字符串 YYYYMMDD
+  exchanges:  交易所列表，元素 sh/sz/all
+输出列对齐 MARGIN_DETAIL_DAILY。
+'''
+def fetch_margin_detail(trade_date: str, exchanges: list[str]) -> pd.DataFrame:
+
+    target = set(e.lower() for e in exchanges)
+    want_sh = ('sh' in target) or ('all' in target)
+    want_sz = ('sz' in target) or ('all' in target)
+
     trade_dt = datetime.strptime(trade_date, '%Y%m%d').date()
-    dfs = []
+    dfs: list[pd.DataFrame] = []
 
-    # ── 深交所 ────────────────────────────────────────────────────────────
-    try:
-        df_sz = ak.stock_margin_detail_szse(date=trade_date)
-        if not df_sz.empty:
-            df_sz = df_sz.rename(columns={
-                '证券代码':     'symbol',
-                '证券简称':     'name',
-                '融资买入额':   'margin_buy',
-                '融资余额':     'margin_balance',
-                '融券卖出量':   'short_sell_vol',
-                '融券余量':     'short_balance_vol',
-                '融券余额':     'short_balance_amt',
-                '融资融券余额': 'total_balance',
-            })
-            # 只保留 A 股 (代码以 0 或 3 开头的 6 位数字)
-            df_sz = df_sz[df_sz['symbol'].astype(str).str.match(r'^[03]\d{5}$')].copy()
-            df_sz['code']       = df_sz['symbol'].astype(str).str.zfill(6) + '.SZ'
-            df_sz['trade_date'] = trade_dt
-            df_sz['exchange']   = 'SZ'
-            df_sz['margin_repay']    = None
-            df_sz['short_repay_vol'] = None
-            dfs.append(df_sz)
-            logger.info(f"  深交所: {len(df_sz)} 条")
-    except Exception as e:
-        logger.warning(f"  [WARN] 深交所融资融券获取失败: {e}")
+    if want_sz:
+        try:
+            df_sz = ak.stock_margin_detail_szse(date=trade_date)
+            if df_sz is not None and not df_sz.empty:
+                df_sz = df_sz.rename(columns={
+                    '证券代码':     'symbol',
+                    '证券简称':     'security_name',
+                    '融资买入额':   'margin_buy_amount',
+                    '融资余额':     'margin_balance',
+                    '融券卖出量':   'short_sell_volume',
+                    '融券余量':     'short_balance_volume',
+                    '融券余额':     'short_balance_amount',
+                    '融资融券余额': 'margin_short_balance',
+                })
+                # 只保留 A 股 (代码以 0 或 3 开头的 6 位数字)
+                df_sz = df_sz[df_sz['symbol'].astype(str).str.match(r'^[03]\d{5}$')].copy()
+                df_sz['symbol']              = df_sz['symbol'].astype(str).str.zfill(6)
+                df_sz['code']                = df_sz['symbol'] + '.SZ'
+                df_sz['trade_date']          = trade_dt
+                df_sz['exchange_code']       = 'SZ'
+                df_sz['margin_repay_amount'] = None
+                df_sz['short_repay_volume']  = None
+                dfs.append(df_sz.reindex(columns=_DETAIL_OUT_COLS))
+                logger.info(f"  深交所明细: {len(df_sz)} 条")
+        except Exception as e:
+            logger.warning(f"  [WARN] 深交所融资融券明细 {trade_date} 获取失败: {e}")
 
-    # ── 上交所 ────────────────────────────────────────────────────────────
-    try:
-        df_sh = ak.stock_margin_detail_sse(date=trade_date)
-        if not df_sh.empty:
-            df_sh = df_sh.rename(columns={
-                '信用交易日期':   'trade_date_raw',
-                '标的证券代码':   'symbol',
-                '标的证券简称':   'name',
-                '融资余额':       'margin_balance',
-                '融资买入额':     'margin_buy',
-                '融资偿还额':     'margin_repay',
-                '融券余量':       'short_balance_vol',
-                '融券卖出量':     'short_sell_vol',
-                '融券偿还量':     'short_repay_vol',
-            })
-            # 只保留 A 股 (代码以 6 开头的 6 位数字)
-            df_sh = df_sh[df_sh['symbol'].astype(str).str.match(r'^6\d{5}$')].copy()
-            df_sh['code']       = df_sh['symbol'].astype(str).str.zfill(6) + '.SH'
-            df_sh['trade_date'] = trade_dt
-            df_sh['exchange']   = 'SH'
-            df_sh['short_balance_amt'] = None
-            df_sh['total_balance']     = None
-            dfs.append(df_sh)
-            logger.info(f"  上交所: {len(df_sh)} 条")
-    except Exception as e:
-        logger.warning(f"  [WARN] 上交所融资融券获取失败: {e}")
+    if want_sh:
+        try:
+            df_sh = ak.stock_margin_detail_sse(date=trade_date)
+            if df_sh is not None and not df_sh.empty:
+                df_sh = df_sh.rename(columns={
+                    '标的证券代码':   'symbol',
+                    '标的证券简称':   'security_name',
+                    '融资余额':       'margin_balance',
+                    '融资买入额':     'margin_buy_amount',
+                    '融资偿还额':     'margin_repay_amount',
+                    '融券余量':       'short_balance_volume',
+                    '融券卖出量':     'short_sell_volume',
+                    '融券偿还量':     'short_repay_volume',
+                })
+                # 只保留 A 股 (代码以 6 开头的 6 位数字)
+                df_sh = df_sh[df_sh['symbol'].astype(str).str.match(r'^6\d{5}$')].copy()
+                df_sh['symbol']               = df_sh['symbol'].astype(str).str.zfill(6)
+                df_sh['code']                 = df_sh['symbol'] + '.SH'
+                df_sh['trade_date']           = trade_dt
+                df_sh['exchange_code']        = 'SH'
+                df_sh['short_balance_amount'] = None
+                df_sh['margin_short_balance'] = None
+                dfs.append(df_sh.reindex(columns=_DETAIL_OUT_COLS))
+                logger.info(f"  上交所明细: {len(df_sh)} 条")
+        except Exception as e:
+            logger.warning(f"  [WARN] 上交所融资融券明细 {trade_date} 获取失败: {e}")
 
     if not dfs:
-        return pd.DataFrame(columns=OUT_COLS)
-
-    result = pd.concat(dfs, ignore_index=True)
-
-    # 确保所有输出列存在，缺失列补 None
-    for col in OUT_COLS:
-        if col not in result.columns:
-            result[col] = None
-
-    return result[OUT_COLS].reset_index(drop=True)
+        return pd.DataFrame(columns=_DETAIL_OUT_COLS)
+    return pd.concat(dfs, ignore_index=True).reset_index(drop=True)
 
 
 '''

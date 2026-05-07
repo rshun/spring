@@ -226,6 +226,7 @@ CREATE TABLE IF NOT EXISTS MARGIN_SUMMARY_DAILY (
     updated_at             TIMESTAMP,
     PRIMARY KEY (trade_date, exchange_code)
 );
+COMMENT ON TABLE  MARGIN_SUMMARY_DAILY                      IS '融资融券每日汇总数据';
 COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.trade_date           IS '交易日期';
 COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.exchange_code        IS '交易所代码，取 STOCK_INFO.exchange：SH、SZ、BJ';
 COMMENT ON COLUMN MARGIN_SUMMARY_DAILY.margin_buy_amount    IS '融资买入额，单位：元';
@@ -259,6 +260,7 @@ CREATE TABLE IF NOT EXISTS MARGIN_DETAIL_DAILY (
     PRIMARY KEY (trade_date, exchange_code, symbol),
     UNIQUE (trade_date, code)
 );
+COMMENT ON TABLE  MARGIN_DETAIL_DAILY                      IS '融资融券每日明细数据';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.trade_date           IS '交易日期';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.exchange_code        IS '交易所代码，取 STOCK_INFO.exchange：SH、SZ、BJ';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.symbol               IS '证券代码，不带交易所后缀';

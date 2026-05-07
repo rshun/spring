@@ -838,48 +838,130 @@ def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
             con.close()
 
 """
-将融资融券明细数据写入 MARGIN_DATA 表
+将融资融券每日汇总数据写入 MARGIN_SUMMARY_DAILY 表
   参数:
-    df  : DataFrame，含 code/trade_date/name/exchange/margin_buy/margin_balance/
-          margin_repay/short_sell_vol/short_balance_vol/short_repay_vol/
-          short_balance_amt/total_balance
+    df  : DataFrame，含 trade_date/exchange_code/margin_buy_amount/margin_repay_amount/
+          margin_balance/short_sell_volume/short_repay_volume/short_balance_volume/
+          short_balance_amount/margin_short_balance
     conn: duckdb 连接
 """
-def save_margin_data_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
+def save_margin_summary_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
-    logger.info(f"正在将 {len(df)} 条融资融券数据写入数据库...")
+    if df is None or df.empty:
+        logger.info("无融资融券汇总数据，跳过写入。")
+        return
+
+    logger.info(f"正在将 {len(df)} 条融资融券汇总数据写入数据库...")
     try:
-        conn.register("temp_margin_data", df)
+        conn.register("temp_margin_summary", df)
         conn.execute("""
-            INSERT OR REPLACE INTO MARGIN_DATA
-                (code, trade_date, name, exchange,
-                 margin_buy, margin_balance, margin_repay,
-                 short_sell_vol, short_balance_vol, short_repay_vol,
-                 short_balance_amt, total_balance, updated_at)
+            INSERT OR REPLACE INTO MARGIN_SUMMARY_DAILY
+                (trade_date, exchange_code,
+                 margin_buy_amount, margin_repay_amount, margin_balance,
+                 short_sell_volume, short_repay_volume,
+                 short_balance_volume, short_balance_amount,
+                 margin_short_balance,
+                 created_at, updated_at)
             SELECT
-                code,
                 CAST(trade_date AS DATE),
-                name,
-                exchange,
-                CAST(margin_buy        AS BIGINT),
-                CAST(margin_balance    AS BIGINT),
-                CAST(margin_repay      AS BIGINT),
-                CAST(short_sell_vol    AS BIGINT),
-                CAST(short_balance_vol AS BIGINT),
-                CAST(short_repay_vol   AS BIGINT),
-                CAST(short_balance_amt AS BIGINT),
-                CAST(total_balance     AS BIGINT),
-                now()
-            FROM temp_margin_data
+                exchange_code,
+                CAST(margin_buy_amount    AS DOUBLE),
+                CAST(margin_repay_amount  AS DOUBLE),
+                CAST(margin_balance       AS DOUBLE),
+                CAST(short_sell_volume    AS DOUBLE),
+                CAST(short_repay_volume   AS DOUBLE),
+                CAST(short_balance_volume AS DOUBLE),
+                CAST(short_balance_amount AS DOUBLE),
+                CAST(margin_short_balance AS DOUBLE),
+                now(), now()
+            FROM temp_margin_summary
         """)
-        logger.info(f"[入库] 成功写入 {len(df)} 条融资融券数据")
+        logger.info(f"[入库] 成功写入 {len(df)} 条融资融券汇总数据")
     except Exception as e:
-        logger.error(f"写入 MARGIN_DATA 表失败: {e}")
+        logger.error(f"写入 MARGIN_SUMMARY_DAILY 表失败: {e}")
     finally:
         try:
-            conn.unregister("temp_margin_data")
+            conn.unregister("temp_margin_summary")
         except Exception:
             pass
+
+
+"""
+将融资融券每日明细数据写入 MARGIN_DETAIL_DAILY 表
+  参数:
+    df  : DataFrame，含 trade_date/exchange_code/symbol/code/security_name/
+          margin_buy_amount/margin_repay_amount/margin_balance/
+          short_sell_volume/short_repay_volume/short_balance_volume/
+          short_balance_amount/margin_short_balance
+    conn: duckdb 连接
+"""
+def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
+
+    if df is None or df.empty:
+        logger.info("无融资融券明细数据，跳过写入。")
+        return
+
+    logger.info(f"正在将 {len(df)} 条融资融券明细数据写入数据库...")
+    try:
+        conn.register("temp_margin_detail", df)
+        conn.execute("""
+            INSERT OR REPLACE INTO MARGIN_DETAIL_DAILY
+                (trade_date, exchange_code, symbol, code, security_name,
+                 margin_buy_amount, margin_repay_amount, margin_balance,
+                 short_sell_volume, short_repay_volume,
+                 short_balance_volume, short_balance_amount,
+                 margin_short_balance,
+                 created_at, updated_at)
+            SELECT
+                CAST(trade_date AS DATE),
+                exchange_code,
+                symbol,
+                code,
+                security_name,
+                CAST(margin_buy_amount    AS DOUBLE),
+                CAST(margin_repay_amount  AS DOUBLE),
+                CAST(margin_balance       AS DOUBLE),
+                CAST(short_sell_volume    AS DOUBLE),
+                CAST(short_repay_volume   AS DOUBLE),
+                CAST(short_balance_volume AS DOUBLE),
+                CAST(short_balance_amount AS DOUBLE),
+                CAST(margin_short_balance AS DOUBLE),
+                now(), now()
+            FROM temp_margin_detail
+        """)
+        logger.info(f"[入库] 成功写入 {len(df)} 条融资融券明细数据")
+    except Exception as e:
+        logger.error(f"写入 MARGIN_DETAIL_DAILY 表失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_margin_detail")
+        except Exception:
+            pass
+
+
+"""
+查询 [start_date, end_date] 内的交易日列表（YYYYMMDD 格式）
+  参数:
+    start_date: YYYY-MM-DD
+    end_date:   YYYY-MM-DD
+"""
+def get_trade_dates(start_date: str, end_date: str) -> list[str]:
+
+    conn: duckdb.DuckDBPyConnection | None = None
+    try:
+        conn = get_connection(is_read_only=True)
+        rows = conn.execute(
+            "SELECT cal_date FROM TRADE_CAL WHERE is_open = 1 "
+            "AND cal_date BETWEEN ? AND ? ORDER BY cal_date",
+            [start_date, end_date],
+        ).fetchall()
+        return [r[0].strftime('%Y%m%d') for r in rows]
+    except Exception as e:
+        logger.error(f"获取交易日列表失败: {e}")
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 """

@@ -1,17 +1,13 @@
-from __future__ import annotations
-
 import os
 import sys
 import re
-import json
-import threading
+from datetime import datetime
+from typing import Any
 
 # Fix Windows GBK encoding issues
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
@@ -19,7 +15,6 @@ import pandas as pd
 from util import myutil
 
 try:
-    # Most common official-style import
     from mcp.server.fastmcp import FastMCP
 except Exception as e:
     raise RuntimeError(
@@ -63,10 +58,10 @@ _DANGEROUS_TABLE_FUNCTION_RE = re.compile(
 def _log(msg: str) -> None:
     # stderr logging is best for stdio MCP servers; but keep it minimal
     if LOG_LEVEL in ("DEBUG", "INFO"):
-        print(f"[{LOG_LEVEL}] {msg}", file=os.sys.stderr)
+        print(f"[{LOG_LEVEL}] {msg}", file=sys.stderr)
 
 
-def parse_code(code: str) -> Tuple[str, str]:
+def parse_code(code: str) -> tuple[str, str]:
     """
     "300085.SZ" -> ("300085","SZ")
     """
@@ -81,7 +76,6 @@ def parse_code(code: str) -> Tuple[str, str]:
 def validate_date(d: str) -> str:
     if not _DATE_RE.match(d or ""):
         raise ValueError("date must be YYYY-MM-DD")
-    # also validate real date
     datetime.strptime(d, "%Y-%m-%d")
     return d
 
@@ -96,7 +90,7 @@ def ensure_span(start: str, end: str, max_days: int) -> None:
         raise ValueError(f"date span too large: {days} days > max_days={max_days}")
 
 
-def df_to_payload(df: pd.DataFrame, max_rows: int) -> Dict[str, Any]:
+def df_to_payload(df: pd.DataFrame, max_rows: int) -> dict[str, Any]:
     truncated = False
     if len(df) > max_rows:
         df = df.iloc[:max_rows].copy()
@@ -111,7 +105,7 @@ def df_to_payload(df: pd.DataFrame, max_rows: int) -> Dict[str, Any]:
     }
 
 
-def run_sql(sql: str, params: Optional[List[Any]] = None) -> pd.DataFrame:
+def run_sql(sql: str, params: list[Any] | None = None) -> pd.DataFrame:
     # Short connection implementation: Open -> Execute -> Close
     _log(f"SQL: {sql} | params={params}")
     with duckdb.connect(DB_PATH, read_only=True) as con:
@@ -132,7 +126,8 @@ def table_exists(table: str) -> bool:
     )
     return len(df) > 0
 
-def resolve_stock(code: str) -> Dict[str, Any]:
+
+def resolve_stock(code: str) -> dict[str, Any]:
     """
     code: '300085.SZ' (primary key in STOCK_INFO)
     """
@@ -196,7 +191,7 @@ def validate_raw_query(sql: str) -> None:
 # Core MCP Tools
 # -----------------------------
 @mcp.tool()
-def list_tables() -> Dict[str, Any]:
+def list_tables() -> dict[str, Any]:
     """
     List all base tables in DuckDB.
     """
@@ -212,7 +207,7 @@ def list_tables() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def describe_table(table: str) -> Dict[str, Any]:
+def describe_table(table: str) -> dict[str, Any]:
     """
     Describe columns for a given table.
     """
@@ -229,8 +224,9 @@ def describe_table(table: str) -> Dict[str, Any]:
     )
     return df_to_payload(df, MAX_ROWS_DEFAULT)
 
+
 @mcp.tool()
-def search_stock(keyword: str, limit: int = 20) -> Dict[str, Any]:
+def search_stock(keyword: str, limit: int = 20) -> dict[str, Any]:
     """
     Returns STOCK_INFO rows; canonical code is STOCK_INFO.code (already has suffix).
     """
@@ -241,7 +237,6 @@ def search_stock(keyword: str, limit: int = 20) -> Dict[str, Any]:
         raise ValueError("keyword is required")
     limit = max(1, min(int(limit), 200))
 
-    # exact code
     if _CODE_RE.match(kw):
         df = run_sql(
             """
@@ -255,7 +250,6 @@ def search_stock(keyword: str, limit: int = 20) -> Dict[str, Any]:
         if len(df) > 0:
             return df_to_payload(df, limit)
 
-    # fuzzy: match code/symbol/name
     df = run_sql(
         """
         SELECT *
@@ -272,17 +266,17 @@ def search_stock(keyword: str, limit: int = 20) -> Dict[str, Any]:
     return df_to_payload(df, limit)
 
 
-
 @mcp.tool()
-def get_stock_info(code: str) -> Dict[str, Any]:
+def get_stock_info(code: str) -> dict[str, Any]:
     """
     Get single stock info by code (e.g., 300085.SZ).
     """
     info = resolve_stock(code)
     return {"stock": info}
 
+
 @mcp.tool()
-def get_trade_days(start_date: str, end_date: str, open_only: bool = True, limit: int = 5000) -> Dict[str, Any]:
+def get_trade_days(start_date: str, end_date: str, open_only: bool = True, limit: int = 5000) -> dict[str, Any]:
     """
     TRADE_CAL(cal_date, is_open)
     """
@@ -319,14 +313,15 @@ def get_trade_days(start_date: str, end_date: str, open_only: bool = True, limit
         )
     return df_to_payload(df, limit)
 
+
 @mcp.tool()
 def get_stock_daily(
     code: str,
     start_date: str,
     end_date: str,
-    fields: Optional[List[str]] = None,
+    fields: list[str] | None = None,
     max_rows: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     STOCK_DAILY(code, date, open, high, low, close, volume, amount)
     """
@@ -361,13 +356,14 @@ def get_stock_daily(
     )
     return df_to_payload(df, max_rows)
 
+
 @mcp.tool()
 def get_daily_basic(
     code: str,
     start_date: str,
     end_date: str,
     max_rows: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     DAILY_BASIC(code, trade_date, turnover_rate, ... is_st)
     """
@@ -393,14 +389,15 @@ def get_daily_basic(
     )
     return df_to_payload(df, max_rows)
 
+
 @mcp.tool()
 def calc_indicators(
     code: str,
     start_date: str,
     end_date: str,
-    ma_windows: Optional[List[int]] = None,
+    ma_windows: list[int] | None = None,
     max_rows: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Calculate simple indicators from STOCK_DAILY:
     - returns (pct)
@@ -410,14 +407,12 @@ def calc_indicators(
     if ma_windows is None or len(ma_windows) == 0:
         ma_windows = [5, 10, 20, 60]
 
-    # fetch base data
     base = get_stock_daily(code, start_date, end_date, fields=["date", "close", "volume"], max_rows=50000)
     rows = base["rows"]
     if not rows:
         return {"columns": [], "rows": [], "rowcount": 0, "truncated": False}
 
     df = pd.DataFrame(rows)
-    # ensure types
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
@@ -444,7 +439,7 @@ def get_adj_factor(
     start_date: str,
     end_date: str,
     max_rows: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     ADJ_FACTOR(code, trade_date, fore_factor, back_factor, adjust_factor)
     获取复权因子，用于计算前/后复权价格。
@@ -475,8 +470,8 @@ def get_adj_factor(
 @mcp.tool()
 def get_stock_industry(
     code: str,
-    trade_date: Optional[str] = None,
-) -> Dict[str, Any]:
+    trade_date: str | None = None,
+) -> dict[str, Any]:
     """
     查询股票的申万行业分类（一/二/三级）。
     如果指定 trade_date，返回该日期生效的行业归属；否则返回最新记录。
@@ -542,10 +537,10 @@ def get_stock_industry(
 @mcp.tool()
 def get_stock_industry_history(
     code: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     max_rows: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     查询股票申万行业分类历史（一/二/三级展开）。
     可选 start_date / end_date 按计入日期过滤。
@@ -565,7 +560,7 @@ def get_stock_industry_history(
     max_rows = max(1, min(int(max_rows), 20000))
 
     filters = ["symbol = ?"]
-    params: List[Any] = [symbol]
+    params: list[Any] = [symbol]
     if start_date:
         filters.append("start_date >= ?")
         params.append(start_date)
@@ -604,7 +599,7 @@ def get_margin_detail(
     start_date: str,
     end_date: str,
     max_rows: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     MARGIN_DETAIL_DAILY(trade_date, exchange_code, symbol, code, security_name,
         margin_buy_amount, margin_repay_amount, margin_balance,
@@ -643,9 +638,9 @@ def get_margin_detail(
 def get_margin_summary(
     start_date: str,
     end_date: str,
-    exchange_code: Optional[str] = None,
+    exchange_code: str | None = None,
     max_rows: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     MARGIN_SUMMARY_DAILY(trade_date, exchange_code,
         margin_buy_amount, margin_repay_amount, margin_balance,
@@ -662,7 +657,7 @@ def get_margin_summary(
         raise RuntimeError("MARGIN_SUMMARY_DAILY table not found.")
 
     filters = ["trade_date BETWEEN ? AND ?"]
-    params: List[Any] = [start_date, end_date]
+    params: list[Any] = [start_date, end_date]
     if exchange_code:
         ex = exchange_code.upper()
         if ex not in ("SH", "SZ", "BJ"):
@@ -691,11 +686,11 @@ def get_margin_summary(
 @mcp.tool()
 def get_capital_detail(
     code: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    category: Optional[str] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    category: str | None = None,
     max_rows: int = 500,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     CAPITAL_DETAIL (GBBQ 股本变动/权息资料)
     获取除权除息、送配股、股本变化等记录。
@@ -710,7 +705,7 @@ def get_capital_detail(
     max_rows = max(1, min(int(max_rows), 20000))
 
     conditions = ["UPPER(code) = UPPER(?)"]
-    params: List[Any] = [code]
+    params: list[Any] = [code]
 
     if start_date:
         start_date = validate_date(start_date)
@@ -744,11 +739,11 @@ def get_capital_detail(
 
 @mcp.tool()
 def get_model_pool(
-    status: Optional[str] = None,
-    code: Optional[str] = None,
-    model_name: Optional[str] = None,
+    status: str | None = None,
+    code: str | None = None,
+    model_name: str | None = None,
     max_rows: int = 500,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     MODEL_STOCK_POOL - 查询模型股票池。
     可按 status(OBSERVE/FOCUS/TRIGGERED/REMOVED)、code、model_name 过滤。
@@ -759,8 +754,8 @@ def get_model_pool(
 
     max_rows = max(1, min(int(max_rows), 20000))
 
-    conditions: List[str] = []
-    params: List[Any] = []
+    conditions: list[str] = []
+    params: list[Any] = []
 
     if code:
         _ = parse_code(code)
@@ -796,7 +791,7 @@ def get_model_pool(
 
 
 @mcp.tool()
-def query(sql: str, max_rows: int = 2000) -> Dict[str, Any]:
+def query(sql: str, max_rows: int = 2000) -> dict[str, Any]:
     """
     Raw SQL query (read-only). DDL/DML is blocked. LIMIT will be appended if missing.
     You can disable this tool by setting env ALLOW_RAW_QUERY=0.
@@ -818,10 +813,6 @@ def query(sql: str, max_rows: int = 2000) -> Dict[str, Any]:
 
 
 def main() -> None:
-    # Optional: set duckdb pragmas for stability (best-effort; may vary by version)
-    # with LOCK:
-    #     CON.execute("PRAGMA threads=4")
-    #     CON.execute("PRAGMA enable_progress_bar=false")
     mcp.run()
 
 

@@ -3,26 +3,20 @@ import duckdb
 import pandas as pd
 from . import myutil
 from datetime import datetime, date
-from typing import List, Tuple,Optional
+from typing import List, Tuple, Optional
 
 logger = logging.getLogger("etl.util.dbutil")
 
-"""
-检查指定日期是否为交易日
-  参数:
-    date_str: 输入格式 YYYY-MM-DD
-  返回:
-    True (交易日), False (非交易日或无记录)
-"""
-def check_is_trading_day(date_str: str) -> bool:
 
+def check_is_trading_day(date_str: str) -> bool:
+    """检查指定日期是否为交易日，参数格式 YYYY-MM-DD，返回 True/False"""
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = get_connection()
         result = conn.execute(
-            "SELECT IS_OPEN FROM TRADE_CAL WHERE CAL_DATE = ?", 
+            "SELECT IS_OPEN FROM TRADE_CAL WHERE CAL_DATE = ?",
             [date_str]
-            ).fetchone()
+        ).fetchone()
 
         if result is None:
             logger.warning(f"日历表中不存在日期 {date_str} 的记录。")
@@ -37,16 +31,7 @@ def check_is_trading_day(date_str: str) -> bool:
         if conn is not None:
             conn.close()
 
-"""
-根据命令行参数，从数据库 stock_info 表中获取符合条件的股票代码列表
-  参数:
-    begindate: 开始日期
-    enddate: 结束日期
-    exchanges_arg: 交易所列表
-    codes_arg: 股票代码列表
-  返回:
-    符合条件的股票代码列表
-"""
+
 def get_candidate_codes(
         begindate: str,
         enddate: str,
@@ -54,20 +39,11 @@ def get_candidate_codes(
         codes_arg: list[str],
         is_delist: bool = False
     ) -> list[tuple]:
-
+    """从 stock_info 表获取符合条件的股票代码列表（不含指数）"""
     sql = "SELECT SYMBOL,EXCHANGE,LIST_DATE,DELIST_DATE,LIST_STATUS FROM STOCK_INFO WHERE BOARD <> 'INDEX'"
-    return get_candidate_data(begindate, enddate, exchanges_arg, codes_arg, is_delist,sql)
+    return get_candidate_data(begindate, enddate, exchanges_arg, codes_arg, is_delist, sql)
 
-"""
-根据命令行参数，从数据库 stock_info 表中获取符合条件的指数代码列表
-  参数:
-    begindate: 开始日期
-    enddate: 结束日期
-    exchanges_arg: 交易所列表
-    index_arg: 指数代码列表
-  返回:
-    符合条件的指数代码列表
-"""
+
 def get_candidate_index(
         begindate: str,
         enddate: str,
@@ -75,25 +51,11 @@ def get_candidate_index(
         index_arg: list[str],
         is_delist: bool = False
     ) -> list[tuple]:
-    
+    """从 stock_info 表获取符合条件的指数代码列表"""
     sql = "SELECT SYMBOL,EXCHANGE,LIST_DATE,DELIST_DATE,LIST_STATUS FROM STOCK_INFO WHERE BOARD = 'INDEX'"
-    return get_candidate_data(begindate, enddate, exchanges_arg, index_arg, is_delist,sql)
+    return get_candidate_data(begindate, enddate, exchanges_arg, index_arg, is_delist, sql)
 
-"""
-获取指定的股票或指数
-  代码优先级最高,如果未传代码,则按交易所过滤, 如果未传交易所,则全市场
-  开始日期如果小于上市日期,则以上市日期为准
 
-  参数:
-    begindate: 开始日期
-    enddate: 结束日期
-    exchanges_arg: 交易所列表
-    codes_arg: 股票代码列表
-    is_delist: 是否包含已退市股票
-    sql: 初始查询语句
-  返回:
-    符合条件的股票代码列表
-"""
 def get_candidate_data(
         begindate: Optional[str],
         enddate: Optional[str],
@@ -102,14 +64,16 @@ def get_candidate_data(
         is_delist: bool,
         sql: str
     ) -> list[tuple]:
-
+    """
+    获取指定的股票或指数。
+    代码优先级最高；未传代码时按交易所过滤；未传交易所则全市场。
+    开始日期小于上市日期时以上市日期为准。
+    """
     params = []
 
-    # 如果指定了具体股票代码，直接忽略交易所参数
     if codes_arg:
         real_codes = []
         for item in codes_arg:
-            # 兼容中文逗号和英文逗号，并去除空格
             clean_item = item.replace('，', ',')
             real_codes.extend([x.strip() for x in clean_item.split(',') if x.strip()])
 
@@ -117,12 +81,9 @@ def get_candidate_data(
             placeholders = ','.join(['?'] * len(real_codes))
             sql += f" AND SYMBOL IN ({placeholders})"
             params.extend(real_codes)
-    
-    # 只有在没传股票代码时，才判断交易所
+
     elif exchanges_arg and 'all' not in exchanges_arg:
-        # 将命令行输入的 sh/sz/bj 转换为数据库存储的大写 SH/SZ/BJ
         target_markets = [e.upper() for e in exchanges_arg]
-        
         placeholders = ','.join(['?'] * len(target_markets))
         sql += f" AND EXCHANGE IN ({placeholders})"
         params.extend(target_markets)
@@ -134,46 +95,33 @@ def get_candidate_data(
     try:
         conn = get_connection()
         sql = sql + " ORDER BY SYMBOL"
-
         rows = conn.execute(sql, params).fetchall()
-        out: List[Tuple[str, str, str, str,str]] = []
+        out: List[Tuple[str, str, str, str, str]] = []
 
-        # 获取当天日期 (用于逻辑3的比较)
         today_date = date.today()
-
-        # 预处理传入的日期字符串为 date 对象，方便后续比较
         req_begin_date = datetime.strptime(begindate, "%Y-%m-%d").date() if begindate else None
         req_end_date = datetime.strptime(enddate, "%Y-%m-%d").date() if enddate else None
 
-        for symbol, exchange, list_date, delist_date,list_status in rows:
-            # 数据库中的 list_date 可能是 None，虽然 schema 没强制，但防守式编程
+        for symbol, exchange, list_date, delist_date, list_status in rows:
             if not list_date:
-                continue 
+                continue
 
-            eff_begin = None
-            eff_end = None
-
-            # 上市大于查询日期，则取上市日期,没有传起始日期，则取上市日期
             if req_begin_date:
                 eff_begin = list_date if list_date > req_begin_date else req_begin_date
             else:
                 eff_begin = list_date
-            
-            # 截止日期, 如果有传，则判断退市状态，传入日期和退市日期(当天日期)取最小,如果没传，判断退市状态，取退市日期(当天日期)
+
             cap_date = today_date if list_status == "L" else delist_date
-            # 退市股但 delist_date 为空（baostock 等数据源未提供退市日）：
-            # 无法确定有效区间，跳过该股，避免 min(date, None) 触发 TypeError 让整批候选清空
             if cap_date is None:
                 logger.warning(f"{symbol}.{exchange} 已退市但无退市日，跳过")
                 continue
             eff_end = cap_date if req_end_date is None else min(req_end_date, cap_date)
 
-            # 只有当开始日期 <= 结束日期，且不退市或者要求包含已退市股票
-            if eff_begin <= eff_end and (is_delist == True or list_status == "L"):
+            if eff_begin <= eff_end and (is_delist or list_status == "L"):
                 out.append((
-                    str(symbol), 
-                    str(exchange), 
-                    eff_begin.strftime("%Y-%m-%d"), 
+                    str(symbol),
+                    str(exchange),
+                    eff_begin.strftime("%Y-%m-%d"),
                     eff_end.strftime("%Y-%m-%d"),
                     str(list_status)
                 ))
@@ -189,35 +137,37 @@ def get_candidate_data(
         if conn is not None:
             conn.close()
 
-"""
-获取数据库连接
-  参数: 
-    is_read_only: 是否只读
-  返回: 
-    数据库连接
-"""
-def get_connection(is_read_only: bool = True) -> duckdb.DuckDBPyConnection:
 
+def get_connection(is_read_only: bool = True) -> duckdb.DuckDBPyConnection:
+    """获取数据库连接"""
     db_path = myutil.get_default_dbfile()
     if is_read_only and not db_path.exists():
         raise FileNotFoundError(f"数据库文件不存在，无法以只读模式连接: {db_path}")
 
     return duckdb.connect(str(db_path), read_only=is_read_only)
 
-"""
-写入每日指标数据 daily_basic 表
-  参数:
-    df: DataFrame
-    conn: duckdb连接
-  返回:
-    None
-"""
+
+def _normalize_daily_df(df: pd.DataFrame) -> pd.DataFrame:
+    """统一补齐 pre_close / tradestatus 缺失字段，原地修改并返回"""
+    if "pre_close" not in df.columns:
+        df["pre_close"] = -1
+    else:
+        df["pre_close"] = df["pre_close"].fillna(-1)
+
+    if "tradestatus" not in df.columns:
+        if "trade_status" in df.columns:
+            df["tradestatus"] = df["trade_status"]
+        else:
+            df["tradestatus"] = -1
+
+    df["tradestatus"] = df["tradestatus"].fillna(-1)
+    return df
+
+
 def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
-    
+    """写入每日指标数据到 DAILY_BASIC 表，使用 ON CONFLICT 避免覆盖其他来源写入的字段"""
     try:
         conn.register("temp_daily_basic", df)
-
-        # 使用 ON CONFLICT DO UPDATE 避免覆盖其他来源(如 sync_basic)写入的字段(如 float_mv, total_mv)
         conn.execute("""
             INSERT INTO DAILY_BASIC
                 (code, trade_date, turnover_rate, pe, pb, is_st)
@@ -235,17 +185,18 @@ def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
                 pb            = EXCLUDED.pb,
                 is_st         = EXCLUDED.is_st
         """)
-
         logger.info(f"[入库] 成功合并 {len(df)} 条每日指标数据")
     except Exception as e:
         logger.error(f"写入 DAILY_BASIC 表失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_daily_basic")
+        except Exception:
+            pass
+
 
 def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
-    """
-    将股本数据(total_shares, float_shares)写入 DAILY_BASIC 表
-    df 需包含列: code, date, total_shares, float_shares
-    使用 ON CONFLICT 仅更新股本字段，不覆盖其他已有数据
-    """
+    """将股本数据(total_shares, float_shares)写入 DAILY_BASIC 表，仅更新股本字段"""
     try:
         conn.register("temp_shares", df)
         conn.execute("""
@@ -259,62 +210,42 @@ def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None
         logger.info(f"[入库] 成功合并 {len(df)} 条股本数据到 DAILY_BASIC")
     except Exception as e:
         logger.error(f"写入股本数据到 DAILY_BASIC 失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_shares")
+        except Exception:
+            pass
 
-"""
-写入股票行情明细数据 stock_daily 表
-  参数:
-    df: DataFrame
-    conn: duckdb连接
-  返回:
-    None
-"""
+
 def save_daily_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
-    
+    """写入股票行情明细数据到 STOCK_DAILY 表"""
     logger.info(f"正在将 {len(df)} 条行情明细写入数据库...")
     try:
-        # 处理字段缺失情况，默认填 -1
-        if "pre_close" not in df.columns:
-            df["pre_close"] = -1
-        else:
-            df["pre_close"] = df["pre_close"].fillna(-1)
-        
-        # 兼容 tradestatus / trade_status
-        if "tradestatus" not in df.columns:
-            if "trade_status" in df.columns:
-                df["tradestatus"] = df["trade_status"]
-            else:
-                df["tradestatus"] = -1
-        
-        df["tradestatus"] = df["tradestatus"].fillna(-1)
-
+        df = _normalize_daily_df(df)
         conn.register("temp_stock_daily", df)
-
         conn.execute("""
             INSERT OR REPLACE INTO STOCK_DAILY
                 (code, date, open, high, low, close, pre_close, tradestatus, volume, amount)
             SELECT
                 code,
                 CAST(date AS DATE),
-                open, high, low, close, 
+                open, high, low, close,
                 pre_close, tradestatus,
                 volume, amount
             FROM temp_stock_daily
         """)
-
         logger.info("行情数据入库成功。")
     except Exception as e:
         logger.error(f"写入 STOCK_DAILY 表失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_stock_daily")
+        except Exception:
+            pass
 
-"""
-将交易日数据写入 trade_cal 表
-  参数:
-    df: DataFrame
-    conn: duckdb连接
-  返回:
-    None
-"""
+
 def save_calendar_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection):
-
+    """将交易日数据写入 trade_cal 表"""
     logger.info(f"正在将 {len(df)} 条日历记录写入数据库...")
 
     temp_name = "temp_trade_cal"
@@ -332,7 +263,8 @@ def save_calendar_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection):
         """
         conn.execute(upsert_sql)
 
-        count = conn.execute("SELECT COUNT(*) FROM trade_cal").fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM trade_cal").fetchone()
+        count = result[0] if result else 0
         logger.info(f"入库成功！当前 TRADE_CAL 表总记录数: {count}")
     except Exception as e:
         logger.error(f"写入 TRADE_CAL 执行失败: {e}")
@@ -343,34 +275,13 @@ def save_calendar_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection):
         except Exception:
             pass
 
-"""
-将指数行情明细数据 stock_daily 表
-  参数:
-    df: DataFrame
-    conn: duckdb连接
-  返回:
-    None
-"""
-def save_index_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
+def save_index_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
+    """将指数行情明细数据写入 STOCK_DAILY 表"""
     logger.info(f"正在将 {len(df)} 条指数明细写入数据库...")
     try:
-        # 处理字段缺失情况，默认填 -1
-        if "pre_close" not in df.columns:
-            df["pre_close"] = -1
-        else:
-            df["pre_close"] = df["pre_close"].fillna(-1)
+        df = _normalize_daily_df(df)
 
-        # 兼容 tradestatus / trade_status
-        if "tradestatus" not in df.columns:
-            if "trade_status" in df.columns:
-                df["tradestatus"] = df["trade_status"]
-            else:
-                df["tradestatus"] = -1
-
-        df["tradestatus"] = df["tradestatus"].fillna(-1)
-
-        # 将空字符串替换为 NaN，并强制转换数值列，记录有问题的代码
         numeric_cols = ["open", "high", "low", "close", "pre_close", "volume", "amount"]
         for col in numeric_cols:
             if col not in df.columns:
@@ -394,17 +305,15 @@ def save_index_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
         logger.info("指数数据入库成功。")
     except Exception as e:
         logger.error(f"数据库写入失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_index_daily")
+        except Exception:
+            pass
 
-"""
-将股票基本信息 DataFrame 批量 UPSERT 到 stock_info 表中
-  参数:
-    df: DataFrame
-    conn: duckdb连接
-  返回:
-    None
-"""
+
 def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
-
+    """将股票基本信息 DataFrame 批量 UPSERT 到 stock_info 表"""
     logger.info("\n--- 数据库加载(L)开始 ---")
     logger.info(f"准备将 {len(df)} 条记录 'UPSERT' 到 'stock_info' 表中...")
 
@@ -449,7 +358,7 @@ def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
         logger.info("  [+] 成功！数据已 'UPSERT' 到 'stock_info' 表。")
 
         count_result = conn.execute("SELECT COUNT(*) FROM stock_info").fetchone()
-        logger.info(f"  [*] 验证: 'stock_info' 表现在共有 {count_result[0]} 条记录。")
+        logger.info(f"  [*] 验证: 'stock_info' 表现在共有 {count_result[0] if count_result else 0} 条记录。")
 
     except duckdb.CatalogException as e:
         logger.error(f"写入 stock_info 失败: {e}")
@@ -463,119 +372,49 @@ def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
         except Exception:
             pass
 
-"""
-获取缺失行情数据的股票列表
-  参数
-    start_date: 起始日期
-    end_date  : 截止日期
-  返回:
-    list[tuple]: 缺失行情数据的股票列表
-"""
-def find_missing_stock_daily(start_date: str,end_date: str)-> list[tuple]:
 
-    sql = """
-    WITH trading_days AS (
-        SELECT cal_date, ROW_NUMBER() OVER(ORDER BY cal_date) as t_rank
-        FROM TRADE_CAL
-        WHERE is_open = 1 AND cal_date BETWEEN ? AND ?
-    ),
-    active_stocks AS (
-        SELECT symbol, code, exchange, list_status, list_date, delist_date
-        FROM STOCK_INFO WHERE board != 'INDEX'
-    ),
-    expected AS (
-        SELECT s.symbol, s.code, s.exchange, t.cal_date, t.t_rank, s.list_status
-        FROM active_stocks s
-        CROSS JOIN trading_days t
-        WHERE t.cal_date >= s.list_date
-          AND (s.delist_date IS NULL OR t.cal_date <= s.delist_date)
-    ),
-    missing_raw AS (
-        SELECT e.*
-        FROM expected e
-        LEFT JOIN STOCK_DAILY d ON e.code = d.code AND e.cal_date = d.date
-        WHERE d.code IS NULL
-    ),
-    gap_groups AS (
-        SELECT *,
-               t_rank - ROW_NUMBER() OVER(PARTITION BY symbol ORDER BY cal_date) as grp
-        FROM missing_raw
-    )
-    SELECT 
-        symbol, 
-        LOWER(exchange), 
-        CAST(MIN(cal_date) AS VARCHAR), 
-        CAST(MAX(cal_date) AS VARCHAR), 
-        list_status
-    FROM gap_groups
-    GROUP BY symbol, exchange, list_status, grp
-    ORDER BY symbol, MIN(cal_date);
-    """
-
-    conn: duckdb.DuckDBPyConnection | None = None
-    try:
-        conn = get_connection()
-        rows = conn.execute(sql, [start_date, end_date]).fetchall()
-        return rows
-    except FileNotFoundError:
-        logger.error("数据库文件不存在, 请先运行init_db.py初始化数据库")
-        return []
-    except Exception as e:
-        logger.error(f"查询缺失行情数据失败: {e}")
-        return []
-    finally:
-        if conn is not None:
-            conn.close()
-
-"""
-计算并更新指定日期区间内的涨跌停价
-    :param start_date: 开始日期 'YYYY-MM-DD'
-    :param end_date: 结束日期 'YYYY-MM-DD'
-"""
-def update_price_limits_by_range(start_date, end_date, markets=['ALL']):
+def update_price_limits_by_range(start_date: str, end_date: str, markets: list[str] | None = None):
+    """计算并批量更新指定日期区间内的涨跌停价"""
     if not markets:
-        markets = ['ALL']
+        markets = ["ALL"]
 
     con: duckdb.DuckDBPyConnection | None = None
 
     try:
         con = get_connection(is_read_only=False)
-        
         logger.info(f"开始批量计算涨跌停价，时间区间: {start_date} 至 {end_date}")
 
-        # 构建市场过滤条件
         market_filter = ""
+        market_params: list = []
         if 'ALL' not in markets:
-            formatted_markets = ", ".join([f"'{m}'" for m in markets])
-            market_filter = f"AND i.exchange IN ({formatted_markets})"
+            placeholders = ", ".join(["?"] * len(markets))
+            market_filter = f"AND i.exchange IN ({placeholders})"
+            market_params = list(markets)
 
-        # 核心计算逻辑：一次性计算所有日期的涨跌停价
-        # 注意：这里直接将 Python 中的 rounding 逻辑移植到了 SQL
-        # BJ: Floor/Ceil logic
-        # Others: Round logic
+        # 0.000001 是浮点加法补偿，确保恰好在临界值时 ROUND 向上进位
         calc_sql = f"""
             WITH base_data AS (
-                SELECT 
-                    d.code, 
-                    d.date, 
+                SELECT
+                    d.code,
+                    d.date,
                     d.close,
-                    d.pre_close, 
+                    d.pre_close,
                     i.board,
                     COALESCE(b.is_st, 0) as is_st,
                     date_diff('day', i.list_date, d.date) + 1 as days_count
                 FROM STOCK_DAILY d
                 JOIN STOCK_INFO i ON d.code = i.code
                 LEFT JOIN DAILY_BASIC b ON d.code = b.code AND d.date = b.trade_date
-                WHERE d.date BETWEEN '{start_date}' AND '{end_date}'
-                  AND d.tradestatus = 1          
-                  AND d.pre_close != -1         
-                  AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ') 
+                WHERE d.date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+                  AND d.tradestatus = 1
+                  AND d.pre_close != -1
+                  AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                   {market_filter}
             ),
             calc_rate AS (
-                SELECT 
+                SELECT
                     *,
-                    CASE 
+                    CASE
                         WHEN board = 'STAR' THEN (CASE WHEN days_count <= 5 THEN 0.0 ELSE 0.2 END)
                         WHEN board = 'GEM' THEN (
                             CASE WHEN date >= '2020-08-24' THEN (CASE WHEN days_count <= 5 THEN 0.0 ELSE 0.2 END)
@@ -588,31 +427,26 @@ def update_price_limits_by_range(start_date, end_date, markets=['ALL']):
                         )
                         ELSE 0.1
                     END as up_rate,
-                    CASE 
+                    CASE
                         WHEN board = 'MAIN' AND date < '2023-04-10' AND days_count = 1 THEN 0.36
-                        WHEN board = 'GEM' AND date < '2020-08-24' AND days_count = 1 THEN 0.36
-                        ELSE NULL 
+                        WHEN board = 'GEM'  AND date < '2020-08-24' AND days_count = 1 THEN 0.36
+                        ELSE NULL
                     END as down_rate
                 FROM base_data
             ),
             final_limits AS (
-                SELECT 
+                SELECT
                     code,
                     date,
                     close,
                     up_rate,
-                    CASE 
-                        -- 无限制
+                    CASE
                         WHEN up_rate = 0 THEN 999999.99
-                        -- 北交所逻辑: 向下取整 (FLOOR)
                         WHEN board = 'BJ' THEN FLOOR(pre_close * (1 + up_rate) * 100 + 0.0001) / 100.0
-                        -- 沪深逻辑: 四舍五入 (ROUND)
                         ELSE ROUND(pre_close * (1 + up_rate) + 0.000001, 2)
                     END as limit_up,
-                    CASE 
-                        -- 无限制
-                        WHEN up_rate = 0 THEN 0.01 -- 这里的0.01是占位，实际无跌幅限制通常意味着跌到底，但业务上通常给个极小值或不做限制
-                        -- 修正逻辑：down_rate 优先使用专用的，如果为 NULL 则使用 up_rate (对称)
+                    CASE
+                        WHEN up_rate = 0 THEN 0.01
                         WHEN board = 'BJ' THEN CEIL(pre_close * (1 - COALESCE(down_rate, up_rate)) * 100 - 0.0001) / 100.0
                         ELSE ROUND(pre_close * (1 - COALESCE(down_rate, up_rate)) + 0.000001, 2)
                     END as limit_down
@@ -636,22 +470,19 @@ def update_price_limits_by_range(start_date, end_date, markets=['ALL']):
                     END as is_limit_down
                 FROM final_limits
             )
-            -- 批量更新
-            UPDATE DAILY_BASIC 
-            SET limit_up = t.limit_up, 
-                limit_down = t.limit_down,
-                is_limit_up = t.is_limit_up,
+            UPDATE DAILY_BASIC
+            SET limit_up      = t.limit_up,
+                limit_down    = t.limit_down,
+                is_limit_up   = t.is_limit_up,
                 is_limit_down = t.is_limit_down
             FROM final_marks t
-            WHERE DAILY_BASIC.code = t.code 
+            WHERE DAILY_BASIC.code       = t.code
               AND DAILY_BASIC.trade_date = t.date;
         """
 
+        params: list = [start_date, end_date, *market_params]
         logger.info("正在执行批量更新 SQL (这可能需要几秒钟)...")
-        con.execute(calc_sql)
-        
-        # 获取受影响行数 (虽然 DuckDB UPDATE 不直接返回行数，但我们可以查下匹配数)
-        # 这里为了性能，只打印完成
+        con.execute(calc_sql, params)
         logger.info("批量更新完成。")
 
     except Exception as e:
@@ -660,83 +491,80 @@ def update_price_limits_by_range(start_date, end_date, markets=['ALL']):
         if con:
             con.close()
 
-"""
-补齐量比数据
-"""
+
 def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
                                   codes: list[str],
                                   conn: duckdb.DuckDBPyConnection | None = None) -> None:
-
+    """补齐量比数据（前5交易日均量之比）"""
     code_filter = ""
     update_code_filter = ""
+    code_params: list[str] = []
 
     if codes:
-        # 如果传入的是单个字符串，转为列表
         if isinstance(codes, str):
             codes = [codes]
-        
-        # 给每个代码加上单引号，并用逗号连接 ['300085.SZ', '600519.SH']  -->  "'300085.SZ', '600519.SH'"
-        formatted_codes = ", ".join([f"'{c}'" for c in codes])
-        
-        # 使用 IN 语法
-        code_filter = f"AND d.code IN ({formatted_codes})"
-        update_code_filter = f"AND DAILY_BASIC.code IN ({formatted_codes})"
+
+        placeholders = ", ".join(["?"] * len(codes))
+        code_filter = f"AND d.code IN ({placeholders})"
+        update_code_filter = f"AND DAILY_BASIC.code IN ({placeholders})"
+        code_params = list(codes)
 
     sql = f"""
         WITH valid_daily_data AS (
-            SELECT 
+            SELECT
                 d.code,
                 d.date,
                 d.volume
             FROM STOCK_DAILY d
             JOIN STOCK_INFO i ON d.code = i.code
-            WHERE 
-                i.board NOT IN ('INDEX','BOND','ETF') 
+            WHERE
+                i.board NOT IN ('INDEX','BOND','ETF')
                 AND d.tradestatus = 1
                 {code_filter}
         ),
-        
+
         calc_ma AS (
-            SELECT 
+            SELECT
                 code,
                 date,
                 volume,
-                -- 计算前5个交易日均量 (不含当日)
                 AVG(volume) OVER (
-                    PARTITION BY code 
-                    ORDER BY date ASC 
+                    PARTITION BY code
+                    ORDER BY date ASC
                     ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
                 ) as ma5_volume
             FROM valid_daily_data
         ),
-        
+
         ratio_result AS (
-            -- 计算量比并过滤出目标区间
-            SELECT 
+            SELECT
                 code,
                 date,
-                CASE 
-                    WHEN ma5_volume IS NULL OR ma5_volume = 0 THEN NULL 
+                CASE
+                    WHEN ma5_volume IS NULL OR ma5_volume = 0 THEN NULL
                     ELSE ROUND(volume / ma5_volume, 2)
                 END as v_ratio
             FROM calc_ma
-            WHERE date BETWEEN CAST('{start_date}' AS DATE) AND CAST('{end_date}' AS DATE)
+            WHERE date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
         )
 
         UPDATE DAILY_BASIC
         SET volume_ratio = src.v_ratio
         FROM ratio_result src
-        WHERE DAILY_BASIC.code = src.code
-        AND DAILY_BASIC.trade_date = src.date
-        AND DAILY_BASIC.trade_date BETWEEN CAST('{start_date}' AS DATE) AND CAST('{end_date}' AS DATE)
-        {update_code_filter};
-        """
-    
+        WHERE DAILY_BASIC.code       = src.code
+          AND DAILY_BASIC.trade_date = src.date
+          AND DAILY_BASIC.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+          {update_code_filter};
+    """
+
+    # params 顺序: ratio_result 的 date 过滤 × 1组, UPDATE 的 date 过滤 × 1组, 各自带 code_params
+    params: list = [*code_params, start_date, end_date, start_date, end_date, *code_params]
+
     need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
     try:
         con = conn if conn is not None else get_connection(is_read_only=False)
-        con.execute(sql)
+        con.execute(sql, params)
         logger.info("更新成功")
     except Exception as e:
         logger.error(f"量比更新失败: {e}")
@@ -744,16 +572,9 @@ def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
         if need_close and con is not None:
             con.close()
 
-"""
-将融资融券每日汇总数据写入 MARGIN_SUMMARY_DAILY 表
-  参数:
-    df  : DataFrame，含 trade_date/exchange_code/margin_buy_amount/margin_repay_amount/
-          margin_balance/short_sell_volume/short_repay_volume/short_balance_volume/
-          short_balance_amount/margin_short_balance
-    conn: duckdb 连接
-"""
-def save_margin_summary_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
+def save_margin_summary_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
+    """将融资融券每日汇总数据写入 MARGIN_SUMMARY_DAILY 表"""
     if df is None or df.empty:
         logger.info("无融资融券汇总数据，跳过写入。")
         return
@@ -793,17 +614,8 @@ def save_margin_summary_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
             pass
 
 
-"""
-将融资融券每日明细数据写入 MARGIN_DETAIL_DAILY 表
-  参数:
-    df  : DataFrame，含 trade_date/exchange_code/symbol/code/security_name/
-          margin_buy_amount/margin_repay_amount/margin_balance/
-          short_sell_volume/short_repay_volume/short_balance_volume/
-          short_balance_amount/margin_short_balance
-    conn: duckdb 连接
-"""
 def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
-
+    """将融资融券每日明细数据写入 MARGIN_DETAIL_DAILY 表"""
     if df is None or df.empty:
         logger.info("无融资融券明细数据，跳过写入。")
         return
@@ -846,14 +658,8 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
             pass
 
 
-"""
-查询 [start_date, end_date] 内的交易日列表（YYYYMMDD 格式）
-  参数:
-    start_date: YYYY-MM-DD
-    end_date:   YYYY-MM-DD
-"""
 def get_trade_dates(start_date: str, end_date: str) -> list[str]:
-
+    """查询 [start_date, end_date] 内的交易日列表，返回 YYYYMMDD 格式"""
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = get_connection(is_read_only=True)
@@ -871,47 +677,15 @@ def get_trade_dates(start_date: str, end_date: str) -> list[str]:
             conn.close()
 
 
-"""
-获取最新交易日
-"""
-def get_newest_trade_date() -> str | None:
-    con: duckdb.DuckDBPyConnection | None = None
-    try:
-        con = get_connection(is_read_only=True)
-        # 获取当前日期
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        # 查询 <= 今天的最大交易日 (确保只查开盘日)
-        sql = """
-        SELECT MAX(cal_date) 
-        FROM TRADE_CAL 
-        WHERE is_open = 1 AND cal_date <= CAST(? AS DATE)
-        """
-        result = con.execute(sql, [today]).fetchone()
-        
-        return result[0].strftime('%Y-%m-%d') if result and result[0] else None
-    except Exception as e:
-        logger.error(f"获取最新交易日失败: {e}")
-        return None
-    finally:
-        if con:
-            con.close()
-
-"""
-UPSERT 股票申万行业历史原始数据到 STOCK_INDUSTRY_CLF_HIST_SW_RAW 表
-  参数:
-    df: DataFrame，含 symbol / start_date / industry_code / update_time
-    conn: duckdb连接
-"""
 def save_stock_industry_clf_hist_sw_raw_to_db(
     df: pd.DataFrame,
     conn: duckdb.DuckDBPyConnection
 ) -> None:
-
-    logger.info(f"正在将 {len(df)} 条股票申万行业历史原始数据写入数据库...")
+    """UPSERT 股票申万行业历史原始数据到 STOCK_INDUSTRY_CLF_HIST_SW_RAW 表"""
     if df is None or df.empty:
         logger.info("无股票申万行业历史原始数据，跳过写入。")
         return
+    logger.info(f"正在将 {len(df)} 条股票申万行业历史原始数据写入数据库...")
 
     required_cols = ['symbol', 'start_date', 'industry_code', 'update_time']
     missing = [c for c in required_cols if c not in df.columns]
@@ -936,7 +710,8 @@ def save_stock_industry_clf_hist_sw_raw_to_db(
                 update_time = excluded.update_time,
                 updated_at = now()
         """)
-        count = conn.execute("SELECT COUNT(*) FROM STOCK_INDUSTRY_CLF_HIST_SW_RAW").fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM STOCK_INDUSTRY_CLF_HIST_SW_RAW").fetchone()
+        count = result[0] if result else 0
         logger.info(f"股票申万行业历史原始数据写入成功，当前共 {count} 条记录。")
     except Exception as e:
         logger.error(f"写入 STOCK_INDUSTRY_CLF_HIST_SW_RAW 失败: {e}")
@@ -947,21 +722,15 @@ def save_stock_industry_clf_hist_sw_raw_to_db(
             logger.warning(f"清理 temp_stock_industry_clf_hist_sw_raw 注册表失败: {e}")
 
 
-"""
-UPSERT 申万行业层级定义到 SW_INDUSTRY 表
-  参数:
-    df: DataFrame，含 sw_version / industry_code / industry_name / sw_level / parent_code
-    conn: duckdb连接
-"""
 def save_sw_industry_hierarchy_to_db(
     df: pd.DataFrame,
     conn: duckdb.DuckDBPyConnection
 ) -> None:
-
-    logger.info(f"正在将 {len(df)} 条申万行业层级定义写入数据库...")
+    """UPSERT 申万行业层级定义到 SW_INDUSTRY 表"""
     if df is None or df.empty:
         logger.info("无申万行业层级定义，跳过写入。")
         return
+    logger.info(f"正在将 {len(df)} 条申万行业层级定义写入数据库...")
 
     required_cols = ['sw_version', 'industry_code', 'industry_name', 'sw_level', 'parent_code']
     missing = [c for c in required_cols if c not in df.columns]
@@ -993,7 +762,8 @@ def save_sw_industry_hierarchy_to_db(
                 SW_INDUSTRY.sw_level      IS DISTINCT FROM excluded.sw_level OR
                 SW_INDUSTRY.parent_code   IS DISTINCT FROM excluded.parent_code
         """)
-        count = conn.execute("SELECT COUNT(*) FROM SW_INDUSTRY").fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM SW_INDUSTRY").fetchone()
+        count = result[0] if result else 0
         logger.info(f"申万行业层级定义写入成功，当前共 {count} 条记录。")
     except Exception as e:
         logger.error(f"写入 SW_INDUSTRY 失败: {e}")
@@ -1004,24 +774,14 @@ def save_sw_industry_hierarchy_to_db(
             logger.warning(f"清理 temp_sw_industry_hierarchy 注册表失败: {e}")
 
 
-"""
-根据 CAPITAL_DETAIL 表的股本变化记录，回填 DAILY_BASIC 表的 total_shares 和 float_shares
-  逻辑:
-    1. 对每只股票的每个交易日，找 CAPITAL_DETAIL 中该日期当天或之前最近一条'股本变化'记录
-    2. 取 allotment_share(后总股本,万股) × 10000 => total_shares(股)
-    3. 取 bonus_share(后流通盘,万股) × 10000 => float_shares(股)
-    4. 对于交易日早于第一条股本变化记录的情况，使用第一条记录的"前"值回填
-  参数:
-    start_date: 开始日期 YYYY-MM-DD
-    end_date:   结束日期 YYYY-MM-DD
-    codes:      股票代码列表(可选)，格式如 ['600519.SH', '000001.SZ']
-    exchanges:  交易所列表(可选)，格式如 ['SH', 'SZ']
-"""
 def fill_daily_basic_shares(start_date: str, end_date: str,
                             codes: list[str] | None = None,
                             exchanges: list[str] | None = None,
                             conn: duckdb.DuckDBPyConnection | None = None) -> None:
-
+    """
+    根据 CAPITAL_DETAIL 股本变化记录回填 DAILY_BASIC 的 total_shares / float_shares。
+    params 顺序: [start_date, end_date, *code_params, *exchange_params]，三处 SQL 均相同。
+    """
     if isinstance(codes, str):
         codes = [codes]
 
@@ -1042,8 +802,6 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
 
     sql = f"""
         WITH capital_events AS (
-            -- 实际股本变化事件：取"后"值
-            -- CAPITAL_DETAIL.code 为纯 symbol(如 600519)，通过 STOCK_INFO 转为完整 code(如 600519.SH)
             SELECT i.code, cd.date,
                    cd.bonus_share     AS float_shares_wan,
                    cd.allotment_share AS total_shares_wan
@@ -1053,8 +811,6 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
 
             UNION ALL
 
-            -- 虚拟事件：每只股票第一条记录的"前"值，日期设为极早
-            -- 用于回填第一次股本变化之前的交易日
             SELECT i.code, DATE '1990-01-01' AS date,
                    t.dividend         AS float_shares_wan,
                    t.allotment_price  AS total_shares_wan
@@ -1099,7 +855,6 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
     try:
         con = conn if conn is not None else get_connection(is_read_only=False)
 
-        # 先统计待更新行数
         count_sql = f"""
             SELECT COUNT(*)
             FROM DAILY_BASIC db
@@ -1109,17 +864,17 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                 {code_filter}
                 {exchange_filter}
         """
-        total_rows = con.execute(count_sql, range_params).fetchone()[0]
+        total_result = con.execute(count_sql, range_params).fetchone()
+        total_rows = total_result[0] if total_result else 0
 
-        # 统计 CAPITAL_DETAIL 中有数据的股票数
         cd_count_sql = "SELECT COUNT(DISTINCT code) FROM CAPITAL_DETAIL WHERE category = '股本变化'"
-        cd_stocks = con.execute(cd_count_sql).fetchone()[0]
+        cd_result = con.execute(cd_count_sql).fetchone()
+        cd_stocks = cd_result[0] if cd_result else 0
         logger.info(f"  CAPITAL_DETAIL 中共 {cd_stocks} 只股票有股本变化记录")
         logger.info(f"  DAILY_BASIC 目标区间共 {total_rows} 行待处理")
 
         con.execute(sql, range_params)
 
-        # 统计实际更新行数(非NULL)
         verify_sql = f"""
             SELECT COUNT(*)
             FROM DAILY_BASIC db
@@ -1130,7 +885,8 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                 {code_filter}
                 {exchange_filter}
         """
-        updated_rows = con.execute(verify_sql, range_params).fetchone()[0]
+        updated_result = con.execute(verify_sql, range_params).fetchone()
+        updated_rows = updated_result[0] if updated_result else 0
         skipped = total_rows - updated_rows
         logger.info(f"  成功更新 {updated_rows} 行, 跳过 {skipped} 行(无股本变化数据)")
 
@@ -1141,22 +897,14 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
             con.close()
 
 
-"""
-根据 DAILY_BASIC 的 total_shares/float_shares 和 STOCK_DAILY 的 close 回填市值
-  total_mv = total_shares × close
-  float_mv = float_shares × close
-  前置条件: total_shares 和 float_shares 已回填
-  参数:
-    start_date: 开始日期 YYYY-MM-DD
-    end_date:   结束日期 YYYY-MM-DD
-    codes:      股票代码列表(可选)
-    exchanges:  交易所列表(可选)
-"""
 def fill_daily_basic_mv(start_date: str, end_date: str,
                         codes: list[str] | None = None,
                         exchanges: list[str] | None = None,
                         conn: duckdb.DuckDBPyConnection | None = None) -> None:
-
+    """
+    根据 DAILY_BASIC 的 total_shares/float_shares 和 STOCK_DAILY 的 close 回填市值。
+    前置条件: total_shares 和 float_shares 已回填。
+    """
     if isinstance(codes, str):
         codes = [codes]
 
@@ -1196,7 +944,6 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
     con: duckdb.DuckDBPyConnection | None = None
     try:
         con = conn if conn is not None else get_connection(is_read_only=False)
-
         con.execute(sql, range_params)
 
         verify_sql = f"""
@@ -1209,7 +956,8 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
                 {code_filter}
                 {exchange_filter}
         """
-        updated_rows = con.execute(verify_sql, range_params).fetchone()[0]
+        updated_result = con.execute(verify_sql, range_params).fetchone()
+        updated_rows = updated_result[0] if updated_result else 0
         logger.info(f"  成功更新 {updated_rows} 行市值数据(total_mv, float_mv)")
 
     except Exception as e:

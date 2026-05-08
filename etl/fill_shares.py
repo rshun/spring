@@ -1,12 +1,4 @@
-import argparse
-import duckdb
-import logging
-from util import dbutil, myutil
-from util import validators as pv
-
-logger = logging.getLogger("etl.fill_shares")
-
-'''
+"""
 根据 CAPITAL_DETAIL 表回填 DAILY_BASIC 的 total_shares 和 float_shares
   前置条件:
   1、先执行 import_daily.py, 以确保日线数据已导入
@@ -15,9 +7,16 @@ logger = logging.getLogger("etl.fill_shares")
   注意:
   - 京市(BJ)暂时不更新
   - 新股如果 CAPITAL_DETAIL 无数据则跳过
-'''
+"""
+import argparse
+import duckdb
+import logging
+from util import dbutil, myutil
+from util import validators as pv
 
-# 解析命令行参数
+logger = logging.getLogger("etl.fill_shares")
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="根据CAPITAL_DETAIL回填DAILY_BASIC的总股本和流通股本"
@@ -54,7 +53,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-f', '--forcerun',
         action='store_true',
-        default=False,
         help='强制运行, 即使当前日期不是交易日'
     )
 
@@ -68,14 +66,13 @@ def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
         pv.v_yyyymmdd("begin"),
         pv.v_yyyymmdd("end"),
         pv.v_date_order("begin", "end"),
-
     ]
     if not forcerun:
         validators.append(pv.v_single_day_must_be_trading_day("begin", "end"))
     return pv.run(ctx, validators)
 
 
-def main():
+def main() -> None:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
@@ -86,13 +83,11 @@ def main():
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
 
-    # 处理交易所参数
     if 'all' in args.exchanges:
         exchanges = None
     else:
         exchanges = [x.upper() for x in args.exchanges]
 
-    # 处理股票代码参数
     codes = None
     if args.codes is not None:
         candidate_codes = dbutil.get_candidate_codes(
@@ -114,14 +109,16 @@ def main():
     logger.info(f"     股票代码: {codes if codes else '全量'}")
     logger.info("=" * 60)
 
-    con: duckdb.DuckDBPyConnection | None = None
+    conn: duckdb.DuckDBPyConnection | None = None
     try:
-        con = dbutil.get_connection(is_read_only=False)
-        dbutil.fill_daily_basic_shares(begin_date, end_date, codes, exchanges, conn=con)
-        dbutil.fill_daily_basic_mv(begin_date, end_date, codes, exchanges, conn=con)
+        conn = dbutil.get_connection(is_read_only=False)
+        dbutil.fill_daily_basic_shares(begin_date, end_date, codes, exchanges, conn=conn)
+        dbutil.fill_daily_basic_mv(begin_date, end_date, codes, exchanges, conn=conn)
+    except Exception as e:
+        logger.error(f"回填股本数据时发生错误：{e}")
     finally:
-        if con is not None:
-            con.close()
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":

@@ -1,12 +1,3 @@
-import argparse
-import csv
-import logging
-import os
-from util import dbutil, myutil
-from util import validators as pv
-
-logger = logging.getLogger("tools.check_daily")
-
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
       对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
@@ -25,6 +16,17 @@ logger = logging.getLogger("tools.check_daily")
   python -m tools.check_daily -b 20260325 -x sh sz
   python -m tools.check_daily -b 20260325 -i
 """
+import argparse
+import csv
+import logging
+from pathlib import Path
+
+import duckdb
+
+from util import dbutil, myutil
+from util import validators as pv
+
+logger = logging.getLogger("tools.check_daily")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -76,13 +78,13 @@ def check_parameters(begin: str, end: str) -> bool:
         pv.v_yyyymmdd("begin"),
         pv.v_yyyymmdd("end"),
         pv.v_date_order("begin", "end"),
+        pv.v_single_day_must_be_trading_day("begin", "end"),
     ]
-    validators.append(pv.v_single_day_must_be_trading_day("begin", "end"))
     return pv.run(ctx, validators)
 
 
 def _build_exchange_filter(exchanges: list[str]) -> str:
-    """根据交易所参数生成 SQL WHERE 片段"""
+    """根据交易所参数生成 SQL WHERE 片段（交易所经 argparse choices 校验，无注入风险）"""
     exs = [e.lower() for e in exchanges]
     if "all" in exs:
         return ""
@@ -90,23 +92,24 @@ def _build_exchange_filter(exchanges: list[str]) -> str:
     return f"AND i.exchange IN ({quoted})"
 
 
-def _build_code_filter(codes: list[str] | None) -> str:
-    """根据代码参数生成 SQL WHERE 片段"""
+def _build_code_filter(codes: list[str] | None) -> tuple[str, list[str]]:
+    """根据代码参数生成 SQL WHERE 片段和对应参数列表，使用占位符避免注入"""
     if not codes:
-        return ""
+        return "", []
     real_codes: list[str] = []
     for item in codes:
         clean = item.replace('，', ',')
         real_codes.extend([x.strip() for x in clean.split(',') if x.strip()])
     if not real_codes:
-        return ""
-    quoted = ", ".join(f"'{c}'" for c in real_codes)
-    return f"AND i.symbol IN ({quoted})"
+        return "", []
+    placeholders = ", ".join(["?"] * len(real_codes))
+    return f"AND i.symbol IN ({placeholders})", real_codes
 
 
-def _find_gap_dates(conn, table: str, date_col: str,
+def _find_gap_dates(conn: duckdb.DuckDBPyConnection,
+                    table: str, date_col: str,
                     begin_date: str, end_date: str,
-                    ex_filter: str, code_filter: str,
+                    ex_filter: str, code_filter: str, code_params: list[str],
                     is_self_table: bool = False,
                     board_sql: str = "board NOT IN ('INDEX', 'BJ')") -> list[tuple]:
     """
@@ -163,14 +166,17 @@ def _find_gap_dates(conn, table: str, date_col: str,
     WHERE e.cnt - {'0' if is_self_table else 'COALESCE(p.cnt, 0)'} > COALESCE(a.cnt, 0)
     ORDER BY e.cal_date
     """
-    return conn.execute(sql, [begin_date, end_date,
-                              begin_date, end_date,
-                              begin_date, end_date]).fetchall()
+    # params 顺序: trading_days日期, active_stocks代码过滤, suspended_cnt日期, actual_cnt日期
+    params = [begin_date, end_date, *code_params,
+              begin_date, end_date,
+              begin_date, end_date]
+    return conn.execute(sql, params).fetchall()
 
 
-def _find_missing_codes(conn, table: str, date_col: str,
+def _find_missing_codes(conn: duckdb.DuckDBPyConnection,
+                        table: str, date_col: str,
                         gap_date: str,
-                        ex_filter: str, code_filter: str,
+                        ex_filter: str, code_filter: str, code_params: list[str],
                         board_sql: str = "board NOT IN ('INDEX', 'BJ')") -> list[tuple]:
     """
     第二阶段: 对单个缺口日期，找出具体缺失的股票
@@ -195,17 +201,21 @@ def _find_missing_codes(conn, table: str, date_col: str,
       AND p.code IS NULL
     ORDER BY s.code
     """
-    return conn.execute(sql, [gap_date, gap_date, gap_date, gap_date]).fetchall()
+    # params 顺序: active_stocks日期过滤, active_stocks代码过滤, JOIN日期 ×2
+    params = [gap_date, gap_date, *code_params, gap_date, gap_date]
+    return conn.execute(sql, params).fetchall()
 
 
-def _check_table(conn, label: str, table: str, date_col: str,
+def _check_table(conn: duckdb.DuckDBPyConnection,
+                 label: str, table: str, date_col: str,
                  begin_date: str, end_date: str,
-                 ex_filter: str, code_filter: str,
+                 ex_filter: str, code_filter: str, code_params: list[str],
                  is_self_table: bool = False,
                  board_sql: str = "board NOT IN ('INDEX', 'BJ')") -> int:
     """通用检查: 先按日汇总找缺口日期，再逐日展开明细，全量写 CSV"""
     gap_dates = _find_gap_dates(conn, table, date_col,
-                                begin_date, end_date, ex_filter, code_filter,
+                                begin_date, end_date,
+                                ex_filter, code_filter, code_params,
                                 is_self_table=is_self_table, board_sql=board_sql)
     if not gap_dates:
         logger.info(f"[{label}]    完整 OK")
@@ -216,19 +226,23 @@ def _check_table(conn, label: str, table: str, date_col: str,
     csv_rows: list[tuple] = []
     for cal_date, expected, actual in gap_dates:
         dt = str(cal_date)
-        rows = _find_missing_codes(conn, table, date_col, dt, ex_filter, code_filter, board_sql=board_sql)
+        rows = _find_missing_codes(conn, table, date_col, dt,
+                                   ex_filter, code_filter, code_params,
+                                   board_sql=board_sql)
         csv_rows.extend((dt, code, name) for code, name in rows)
 
     if csv_rows:
-        csv_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "csv")
-        os.makedirs(csv_dir, exist_ok=True)
+        csv_dir = Path(__file__).parent.parent / "csv"
+        csv_dir.mkdir(parents=True, exist_ok=True)
         tag = table.lower().replace("_", "")
-        csv_file = os.path.join(csv_dir, f"check_{tag}_missing_{begin_date}_{end_date}.csv")
+        csv_file = csv_dir / f"check_{tag}_missing_{begin_date}_{end_date}.csv"
         with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerow(["date", "code", "name"])
             writer.writerows(csv_rows)
-        logger.warning(f"[{label}]    完整明细已写入: {csv_file}")
+        logger.warning(f"[{label}]    发现 {total_missing} 条缺失，明细已写入: {csv_file}")
+    else:
+        logger.warning(f"[{label}]    发现 {total_missing} 条缺失记录，但未能定位具体代码，请手动核查")
 
     return total_missing
 
@@ -253,7 +267,7 @@ def main() -> int:
     logger.info("=" * 60)
 
     ex_filter = _build_exchange_filter(args.exchanges)
-    code_filter = _build_code_filter(args.codes)
+    code_filter, code_params = _build_code_filter(args.codes)
 
     conn = None
     try:
@@ -261,15 +275,15 @@ def main() -> int:
 
         total_missing = 0
         total_missing += _check_table(conn, "日线数据    ", "STOCK_DAILY", "date",
-                                      begin_date, end_date, ex_filter, code_filter,
+                                      begin_date, end_date, ex_filter, code_filter, code_params,
                                       is_self_table=True)
         total_missing += _check_table(conn, "复权因子数据", "ADJ_FACTOR", "trade_date",
-                                      begin_date, end_date, ex_filter, code_filter)
+                                      begin_date, end_date, ex_filter, code_filter, code_params)
         total_missing += _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
-                                      begin_date, end_date, ex_filter, code_filter)
+                                      begin_date, end_date, ex_filter, code_filter, code_params)
         if args.include_index:
             total_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
-                                          begin_date, end_date, ex_filter, code_filter,
+                                          begin_date, end_date, ex_filter, code_filter, code_params,
                                           is_self_table=True, board_sql="board = 'INDEX'")
 
         logger.info("-" * 60)

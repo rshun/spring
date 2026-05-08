@@ -68,8 +68,10 @@ def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
         pv.v_yyyymmdd("begin"),
         pv.v_yyyymmdd("end"),
         pv.v_date_order("begin", "end"),
-        pv.v_single_day_must_be_trading_day("begin", "end", allow_non_trading=bool(forcerun)),
+
     ]
+    if not forcerun:
+        validators.append(pv.v_single_day_must_be_trading_day("begin", "end"))
     return pv.run(ctx, validators)
 
 

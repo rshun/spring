@@ -47,8 +47,10 @@ def check_parameters(forcerun: bool) -> bool:
     ctx = {"forcerun": forcerun}
     validators = [
         pv.v_dbfile_exists(),
-        pv.v_single_day_must_be_trading_day(allow_non_trading=bool(forcerun)),
+
     ]
+    if not forcerun:
+        validators.append(pv.v_single_day_must_be_trading_day())
     return pv.run(ctx, validators)
 
 def main():

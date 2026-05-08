@@ -1,9 +1,10 @@
-'''
+"""
 同步申万行业数据
   1、默认通过 ak.stock_industry_clf_hist_sw() 获取股票申万三级行业历史原始数据
   2、指定 --input 时读取 tmp/swclasscode.csv，写入申万行业一/二/三级层级定义
-'''
+"""
 import argparse
+import duckdb
 import logging
 from datetime import date
 from pathlib import Path
@@ -20,7 +21,7 @@ DEFAULT_INPUT_DIR = PROJECT_ROOT / "tmp"
 DEFAULT_INPUT_FILE = "swclasscode.csv"
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="申万行业数据同步工具")
     parser.add_argument(
         '-s', '--source',
@@ -45,7 +46,6 @@ def parse_arguments():
     parser.add_argument(
         '-f', '--forcerun',
         action='store_true',
-        default=False,
         help='强制运行，即使当前日期不是交易日'
     )
     return parser.parse_args()
@@ -55,7 +55,6 @@ def check_parameters(forcerun: bool) -> bool:
     ctx = {"forcerun": forcerun}
     validators = [
         pv.v_dbfile_exists(),
-
     ]
     if not forcerun:
         validators.append(pv.v_single_day_must_be_trading_day())
@@ -146,7 +145,7 @@ def read_swclasscode_csv(input_file: Path, sw_version: str) -> pd.DataFrame:
     return result[['sw_version', 'industry_code', 'industry_name', 'sw_level', 'parent_code']]
 
 
-def main():
+def main() -> None:
     myutil.configure_etl_logging()
     args = parse_arguments()
 
@@ -163,7 +162,7 @@ def main():
     logger.info(f"  同步模式: {'行业层级定义' if is_input_mode else '股票行业历史原始数据'}")
     logger.info("=" * 60)
 
-    conn = None
+    conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = dbutil.get_connection(is_read_only=False)
 
@@ -179,7 +178,7 @@ def main():
         else:
             module = myutil.import_source_module(args.source)
             if not hasattr(module, 'fetch_stock_industry_clf_hist_sw'):
-                logger.error(f"错误: 模块 '{args.source}' 中没有定义 'fetch_stock_industry_clf_hist_sw' 方法。")
+                logger.error(f"模块 '{args.source}' 中没有定义 'fetch_stock_industry_clf_hist_sw' 方法。")
                 return
 
             logger.info("\n[Step 1] 获取股票申万行业历史原始数据...")
@@ -190,17 +189,17 @@ def main():
                 logger.info(f"  共获取 {len(raw_df)} 条股票申万行业历史原始数据。")
                 dbutil.save_stock_industry_clf_hist_sw_raw_to_db(raw_df, conn)
 
+        logger.info("\n" + "=" * 60)
+        logger.info("申万行业数据同步完成")
+        logger.info("=" * 60)
+
     except ImportError as e:
-        logger.error(f"错误: 依赖或模块导入失败。{e}")
+        logger.error(f"依赖或模块导入失败。{e}")
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
     finally:
         if conn is not None:
             conn.close()
-
-    logger.info("\n" + "=" * 60)
-    logger.info("申万行业数据同步完成")
-    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,4 @@
-import argparse
-import duckdb
-import logging
-from util import dbutil, myutil
-from util import validators as pv
-
-logger = logging.getLogger("etl.sync_margin")
-
-'''
+"""
 功能: 获取沪深两市融资融券汇总和明细数据
 输入参数:
   起始日期 (可选，默认今天)
@@ -15,7 +7,14 @@ logger = logging.getLogger("etl.sync_margin")
   同步范围 (可选，summary/detail/all，默认 all)
   数据源   (可选，默认 akstock)
   强制运行 (可选，非交易日跳过的开关)
-'''
+"""
+import argparse
+import duckdb
+import logging
+from util import dbutil, myutil
+from util import validators as pv
+
+logger = logging.getLogger("etl.sync_margin")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -64,7 +63,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-f', '--forcerun',
         action='store_true',
-        default=False,
         help='强制运行, 即使当前日期不是交易日'
     )
 
@@ -78,15 +76,13 @@ def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
         pv.v_yyyymmdd("begin"),
         pv.v_yyyymmdd("end"),
         pv.v_date_order("begin", "end"),
-
     ]
     if not forcerun:
         validators.append(pv.v_single_day_must_be_trading_day("begin", "end"))
     return pv.run(ctx, validators)
 
 
-def main():
-
+def main() -> None:
     myutil.configure_etl_logging()
     args = parse_arguments()
     if not check_parameters(args.begin, args.end, args.forcerun):
@@ -120,7 +116,7 @@ def main():
         # ── 汇总 ──────────────────────────────────────────
         if args.only in ('summary', 'all'):
             if not hasattr(module, 'fetch_margin_summary'):
-                logger.error(f"错误: 模块 '{args.source}' 中没有定义 'fetch_margin_summary' 方法。")
+                logger.error(f"模块 '{args.source}' 中没有定义 'fetch_margin_summary' 方法。")
             else:
                 logger.info("\n[Step] 获取融资融券汇总数据...")
                 df_summary = module.fetch_margin_summary(
@@ -134,7 +130,7 @@ def main():
         # ── 明细 ──────────────────────────────────────────
         if args.only in ('detail', 'all'):
             if not hasattr(module, 'fetch_margin_detail'):
-                logger.error(f"错误: 模块 '{args.source}' 中没有定义 'fetch_margin_detail' 方法。")
+                logger.error(f"模块 '{args.source}' 中没有定义 'fetch_margin_detail' 方法。")
             else:
                 logger.info("\n[Step] 逐日获取融资融券明细数据...")
                 for i, d in enumerate(trade_dates, 1):
@@ -146,7 +142,7 @@ def main():
                         logger.warning(f"  {d} 未获取到融资融券明细数据，跳过。")
 
     except ImportError as e:
-        logger.error(f"错误: 无法导入模块 {args.source}，请检查文件名是否存在。{e}")
+        logger.error(f"无法导入模块 {args.source}，请检查文件名是否存在。{e}")
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
     finally:

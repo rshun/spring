@@ -1,12 +1,12 @@
+"""初始化duckdb, 并且创建sql/schema.sql中定义的表结构"""
 import logging
-from util import dbutil,myutil
+import duckdb
+from util import dbutil, myutil
 
 logger = logging.getLogger("etl.init_db")
 
-'''
-初始化duckdb, 并且创建sql/schema.sql中定义的表结构
-'''
-def create_database_schema():
+
+def create_database_schema() -> None:
     myutil.configure_etl_logging()
 
     try:
@@ -16,7 +16,7 @@ def create_database_schema():
         return
 
     sql = sql_file.read_text(encoding="utf-8")
-    conn = None
+    conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = dbutil.get_connection(is_read_only=False)
         logger.info("--- 正在创建表结构 ---")
@@ -28,6 +28,7 @@ def create_database_schema():
     finally:
         if conn is not None:
             conn.close()
+
 
 if __name__ == "__main__":
     create_database_schema()

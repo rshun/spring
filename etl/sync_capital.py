@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 同步股本变迁数据 (CAPITAL_DETAIL)
 
@@ -11,6 +9,7 @@ from __future__ import annotations
     python -m etl.sync_capital --help
 """
 import argparse
+import duckdb
 import logging
 import os
 import struct
@@ -31,6 +30,7 @@ DOWNLOAD_DIR = PROJECT_ROOT / "download"
 CSV_DIR      = PROJECT_ROOT / "csv"
 
 GBBQ_FILE    = CSV_DIR / "gbbq"
+
 
 def _get_tdx_config():
     """从 config.yaml 读取通达信财务相关配置"""
@@ -114,7 +114,8 @@ class ManyThreadDownload:
         self.url = url
         self.name = name
         self.total = int(requests.head(url).headers['Content-Length'])
-        if os.path.exists(name) and os.path.getsize(name) >= self.total:
+        name_path = Path(name)
+        if name_path.exists() and name_path.stat().st_size >= self.total:
             return self.total
 
         with open(name, "wb") as fd:
@@ -161,15 +162,14 @@ def historyfinancialreader(filepath):
     return pd.DataFrame(results)
 
 
-def list_cw_files(directory, ext_name):
+def list_cw_files(directory: Path, ext_name: str) -> list[str]:
     """列出目录中 gpcw????????.ext 格式的文件"""
     if not directory.exists():
         return []
-    result = []
-    for f in os.listdir(directory):
-        if len(f) == 16 and f[:4] == "gpcw" and f.endswith("." + ext_name):
-            result.append(f)
-    return result
+    return [
+        f.name for f in directory.iterdir()
+        if len(f.name) == 16 and f.name.startswith("gpcw") and f.suffix == f".{ext_name}"
+    ]
 
 
 # ── 下载财务文件 ──────────────────────────────────────────
@@ -201,17 +201,17 @@ def sync_cw_files():
                 continue
             logger.info(f"  {filename} 完成 用时 {time.time() - tick:.2f}s")
 
-    # 2) 更新 md5 不一致的 zip 文件
+    # 2) 更新 md5 不一致的 zip 文件（服务器 md5 统一转小写，与 hexdigest() 对齐）
     local_zips = list_cw_files(cw_dir, 'zip')
-    server_md5_set = set(server_df['md5'].tolist())
+    server_md5_map = dict(zip(server_df['filename'], server_df['md5'].str.lower()))
     for filename in local_zips:
         zip_path = cw_dir / filename
         with open(zip_path, 'rb') as f:
             file_md5 = hashlib.md5(f.read()).hexdigest()
-        if file_md5 not in server_md5_set:
+        if file_md5 != server_md5_map.get(filename, ''):
             tick = time.time()
             logger.info(f"  {filename} 需要更新，开始下载")
-            os.remove(zip_path)
+            zip_path.unlink()
             downloader.run(_get_tdx_config()["cw_file_url"] + filename, str(zip_path))
             if not _extract_and_convert(zip_path, cw_dir, pkl_dir):
                 continue
@@ -219,7 +219,7 @@ def sync_cw_files():
 
     # 3) 补齐缺失的 pkl 导出
     local_dats = list_cw_files(cw_dir, 'dat')
-    existing_pkls = set(os.listdir(pkl_dir)) if pkl_dir.exists() else set()
+    existing_pkls = {p.name for p in pkl_dir.iterdir()} if pkl_dir.exists() else set()
     for datname in local_dats:
         pkl_name = datname[:-4] + '.pkl'
         if pkl_name not in existing_pkls:
@@ -232,15 +232,14 @@ def sync_cw_files():
     logger.info("专业财务文件同步完成")
 
 
-def _extract_and_convert(zip_path, cw_dir, pkl_dir):
+def _extract_and_convert(zip_path: Path, cw_dir: Path, pkl_dir: Path) -> bool:
     """解压 zip 并转换 dat -> pkl，失败返回 False"""
     try:
         with zipfile.ZipFile(str(zip_path), 'r') as zf:
             zf.extractall(str(cw_dir))
     except (zipfile.BadZipFile, OSError) as e:
         logger.error(f"  文件 {zip_path.name} 损坏或解压失败，跳过: {e}")
-        if zip_path.exists():
-            os.remove(zip_path)
+        zip_path.unlink(missing_ok=True)
         return False
 
     dat_path = zip_path.with_suffix('.dat')
@@ -250,8 +249,6 @@ def _extract_and_convert(zip_path, cw_dir, pkl_dir):
         df.to_pickle(str(pkl_path), compression=None)
     return True
 
-
-# ── 解密 gbbq 并入库 ─────────────────────────────────────
 
 # ── 数据源：三步获取 gbbq ─────────────────────────────────
 
@@ -272,7 +269,7 @@ def _load_gbbq_from_local() -> pd.DataFrame | None:
 
     logger.info("解密通达信 gbbq 股本变迁文件...")
     df = pytdx.reader.gbbq_reader.GbbqReader().get_df(str(gbbq_path))
-    df.drop(columns=['market'], inplace=True)
+    df = df.drop(columns=['market'])
     df.columns = ['code', 'date', 'category',
                    'dividend', 'allotment_price', 'bonus_share', 'allotment_share']
     df['category'] = df['category'].astype(str).map(_get_tdx_config()["capital_category"])
@@ -288,7 +285,7 @@ def _load_gbbq_from_binary_cache() -> pd.DataFrame | None:
         return None
     logger.info(f"从 {GBBQ_FILE} 读取 gbbq 数据")
     df = pytdx.reader.gbbq_reader.GbbqReader().get_df(str(GBBQ_FILE))
-    df.drop(columns=['market'], inplace=True)
+    df = df.drop(columns=['market'])
     df.columns = ['code', 'date', 'category',
                    'dividend', 'allotment_price', 'bonus_share', 'allotment_share']
     df['category'] = df['category'].astype(str).map(_get_tdx_config()["capital_category"])
@@ -327,7 +324,6 @@ def _load_gbbq_from_server() -> pd.DataFrame | None:
     from datasource.tdx import fetch_xdxr_data
     from util import dbutil
 
-    # 从数据库获取股票列表
     conn = dbutil.get_connection(is_read_only=True)
     try:
         stocks = conn.execute(
@@ -337,7 +333,7 @@ def _load_gbbq_from_server() -> pd.DataFrame | None:
         conn.close()
 
     if not stocks:
-        logger.error("[错误] 数据库中无股票列表，请先运行 sync_stock_info")
+        logger.error("数据库中无股票列表，请先运行 sync_stock_info")
         return None
 
     return fetch_xdxr_data(stocks)
@@ -397,7 +393,7 @@ def save_capital_detail_to_db(df: pd.DataFrame):
     from util import dbutil
 
     logger.info(f"正在将 {len(df)} 条股本变迁数据写入数据库...")
-    conn = None
+    conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = dbutil.get_connection(is_read_only=False)
         conn.register("temp_capital_detail", df)
@@ -421,9 +417,13 @@ def save_capital_detail_to_db(df: pd.DataFrame):
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条股本变迁数据")
     except Exception as e:
-        logger.error(f"[错误] 写入 CAPITAL_DETAIL 表失败: {e}")
+        logger.error(f"写入 CAPITAL_DETAIL 表失败: {e}")
     finally:
         if conn is not None:
+            try:
+                conn.unregister("temp_capital_detail")
+            except Exception:
+                pass
             conn.close()
 
 
@@ -466,7 +466,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     configure_etl_logging()
     args = parse_arguments()
 
@@ -476,10 +476,7 @@ def main():
     logger.info('=' * 60)
 
     sync_cw_files()
-
-
     sync_gbbq(download=args.download)
-
     cleanup_gbbq_file()
 
     logger.info('=' * 60)

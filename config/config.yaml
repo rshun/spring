@@ -23,6 +23,9 @@ tdx:
   # 每次最多拉取 800 条日K，分页次数（10 页 ≈ 8000 个交易日）
   max_pages: 10
 
+  # 连续失败超过此次数时触发重连
+  max_fail: 20
+
   # 专业财务文件校验信息下载地址
   cw_txt_url: "http://down.tdx.com.cn:8001/tdxfin/gpcw.txt"
 

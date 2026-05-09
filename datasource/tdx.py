@@ -28,6 +28,11 @@ def _get_max_pages():
     return get_config()["tdx"]["max_pages"]
 
 
+def _get_max_fail():
+    """从 config.yaml 读取最大连续失败数"""
+    return get_config()["tdx"]["max_fail"]
+
+
 def _connect_api() -> TdxHq_API:
     """尝试多个服务器，返回已连接的 API 实例"""
     api = TdxHq_API(raise_exception=False)
@@ -41,8 +46,13 @@ def _connect_api() -> TdxHq_API:
 
 
 def _to_market(exchange: str) -> int:
-    """交易所转 pytdx market 参数: SH=1, SZ/BJ=0"""
-    return 1 if exchange.upper() == 'SH' else 0
+    """交易所转 pytdx market 参数: SH=1, SZ=0, BJ=2（pytdx 不支持，调用方需跳过）"""
+    ex = exchange.upper()
+    if ex == 'SH':
+        return 1
+    if ex == 'BJ':
+        return 2
+    return 0
 
 
 def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
@@ -57,12 +67,21 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
     begin_date / end_date : YYYY-MM-DD
     """
     mkt = _to_market(market)
+    if mkt == 2:
+        return pd.DataFrame()
+
     dfs = []
     for page in range(_get_max_pages()):
         raw = api.get_security_bars(9, mkt, symbol, page * 800, 800)
         if not raw:
             break
-        dfs.append(api.to_df(raw))
+        df_page = api.to_df(raw)
+        if df_page.empty:
+            break
+        dfs.append(df_page)
+        # pytdx 按时间倒序分页，若当前页最早日期已早于 begin_date，后续页无需再取
+        if df_page['datetime'].iloc[0][:10] < begin_date:
+            break
 
     if not dfs:
         return pd.DataFrame()
@@ -89,20 +108,19 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
     })
 
 
-'''
-批量获取股票数据
-输入参数:
-   stock_list: 元组---股票代码(6位数字), 交易所(SH,SZ,BJ),起始和结束日期
-返回参数:
-   pd--明细
-'''
 @timer
 def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """批量获取个股日K线数据
 
+    Parameters
+    ----------
+    stock_list : list of (symbol, market, begin_date, end_date, status) tuples
+    Returns (daily_df, empty_df)，empty_df 始终为空（pytdx 不提供指标数据）
+    """
     total = len(stock_list)
     all_daily_data: list[pd.DataFrame] = []
     fail_count = 0
-    MAX_FAIL = 20
+    max_fail = _get_max_fail()
 
     api = _connect_api()
 
@@ -122,8 +140,8 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
             except Exception as e:
                 fail_count += 1
                 logger.warning(f"  获取失败: {symbol}.{market} | 原因: {e}")
-                if fail_count >= MAX_FAIL:
-                    logger.warning(f"  连续失败 {MAX_FAIL} 次，尝试重连...")
+                if fail_count >= max_fail:
+                    logger.warning(f"  连续失败 {max_fail} 次，尝试重连...")
                     try:
                         api.disconnect()
                         api = _connect_api()
@@ -148,16 +166,14 @@ def _get_category():
     return get_config()["tdx"]["capital_category"]
 
 
-'''
-从通达信服务器在线拉取全市场 xdxr (除权除息/股本变迁) 数据
-输入参数:
-    stocks: list[tuple] -- (symbol, exchange) 列表
-返回参数:
-    pd.DataFrame -- 包含 code/date/category/dividend/allotment_price/bonus_share/allotment_share
-    如果拉取失败返回 None
-'''
 def fetch_xdxr_data(stocks: list[tuple]) -> pd.DataFrame | None:
+    """从通达信服务器在线拉取全市场 xdxr (除权除息/股本变迁) 数据
 
+    Parameters
+    ----------
+    stocks : list of (symbol, exchange) tuples
+    Returns DataFrame 含 code/date/category/dividend/allotment_price/bonus_share/allotment_share，失败返回 None
+    """
     if not stocks:
         logger.warning("[pytdx] 股票列表为空，跳过 xdxr 拉取")
         return None
@@ -170,31 +186,54 @@ def fetch_xdxr_data(stocks: list[tuple]) -> pd.DataFrame | None:
         logger.error(f"连接通达信服务器失败: {e}")
         return None
 
+    category_map = _get_category()
+    max_fail = _get_max_fail()
+    fail_count = 0
     all_dfs = []
     try:
         for i, (symbol, exchange) in enumerate(stocks):
             market = _to_market(exchange)
-            raw = api.get_xdxr_info(market, symbol)
-            if not raw:
+            if market == 2:
                 continue
-            df = api.to_df(raw)
-            df = df.assign(
-                date=(df['year'].astype(int) * 10000
-                      + df['month'].astype(int) * 100
-                      + df['day'].astype(int)),
-                code=symbol,
-            )
-            df['category'] = df['category'].astype(str).map(_get_category())
-            df = df.rename(columns={
-                'fenhong':     'dividend',
-                'peigujia':    'allotment_price',
-                'songzhuangu': 'bonus_share',
-                'peigu':       'allotment_share',
-            })
-            all_dfs.append(df[['code', 'date', 'category',
-                               'dividend', 'allotment_price', 'bonus_share', 'allotment_share']])
+            try:
+                raw = api.get_xdxr_info(market, symbol)
+                fail_count = 0
+                if not raw:
+                    continue
+                df = api.to_df(raw)
+                df = df.assign(
+                    date=(df['year'].astype(str).str.zfill(4) + '-'
+                          + df['month'].astype(str).str.zfill(2) + '-'
+                          + df['day'].astype(str).str.zfill(2)),
+                    code=symbol,
+                )
+                mapped = df['category'].astype(str).map(category_map)
+                unknown = df['category'].astype(str)[mapped.isna()].unique()
+                if len(unknown):
+                    logger.warning(f"  未知 xdxr category 码: {unknown.tolist()}")
+                df['category'] = mapped
+                df = df.rename(columns={
+                    'fenhong':     'dividend',
+                    'peigujia':    'allotment_price',
+                    'songzhuangu': 'bonus_share',
+                    'peigu':       'allotment_share',
+                })
+                all_dfs.append(df[['code', 'date', 'category',
+                                   'dividend', 'allotment_price', 'bonus_share', 'allotment_share']])
+            except Exception as e:
+                fail_count += 1
+                logger.warning(f"  获取失败: {symbol}.{exchange} | 原因: {e}")
+                if fail_count >= max_fail:
+                    logger.warning(f"  连续失败 {max_fail} 次，尝试重连...")
+                    try:
+                        api.disconnect()
+                        api = _connect_api()
+                        fail_count = 0
+                    except ConnectionError:
+                        logger.error("  重连失败，终止采集")
+                        break
 
-            if (i + 1) % 500 == 0:
+            if (i + 1) % 1000 == 0:
                 logger.info(f"  已拉取 {i + 1}/{len(stocks)}...")
     finally:
         api.disconnect()

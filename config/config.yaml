@@ -8,6 +8,14 @@ local_paths:
   # 通达信 gbbq 股本变迁二进制文件路径
   tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
 
+baostock:
+  # 单只股票最多重试次数
+  max_fetch_attempts: 3
+  # 登录会话失效后重新登录的等待时间（秒）
+  retry_delay_login: 0.2
+  # Broken pipe 断管后重新登录的等待时间（秒）
+  retry_delay_pipe: 0.5
+
 tdx:
   # 通达信行情服务器列表 (IP, 端口)，按经验优先级排序
   servers:

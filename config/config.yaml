@@ -8,6 +8,12 @@ local_paths:
   # 通达信 gbbq 股本变迁二进制文件路径
   tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
 
+akshare:
+  # 单只股票连续失败超过此次数时终止采集
+  max_fail: 20
+  # 单次行情接口请求超时时间（秒）
+  request_timeout: 30
+
 baostock:
   # 单只股票最多重试次数
   max_fetch_attempts: 3

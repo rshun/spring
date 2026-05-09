@@ -9,22 +9,16 @@ from util import myutil
 
 logger = logging.getLogger("etl.datasource.lday")
 
-'''
-批量读取data/lday/目录下的day文件
-需要注意的是, 如果文件非常多(超过1800个), 内存就会被撑满
-'''
 
-'''
-  读取文件获取指定区间明细数据
-输入参数:
-   begin: 起始日期 "2025-01-01"
-   end:   结束日期 "2025-12-31"
-   code_file: day文件路径
-   std_code: 标准代码 "600000.SH"
-返回参数:
-    pd--明细
-'''
 def fetch_stock_data(begin: str, end: str, code_file: str, std_code: str) -> pd.DataFrame:
+    """读取 .day 文件，返回指定日期区间的日K数据
+
+    Parameters
+    ----------
+    begin / end : YYYYMMDD 格式字符串，如 "20251224"
+    code_file   : .day 文件路径
+    std_code    : 标准代码，如 "600000.SH"
+    """
 
     record_struct = struct.Struct("<IIIIIfII")
     all_records = []
@@ -73,20 +67,23 @@ def fetch_stock_data(begin: str, end: str, code_file: str, std_code: str) -> pd.
         logger.error(f"读取文件 {code_file} 出错: {e}")
         return pd.DataFrame()
 
-'''
-批量获取股票数据
-输入参数: 
-   stock_list: 元组---代码代码(6位数字), 交易所(SH,SZ,BJ),起始和结束日期
-返回参数:
-   pd--明细
-'''
+@myutil.timer
 def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """批量读取本地 .day 文件日K数据
+
+    Parameters
+    ----------
+    stock_list : list of (symbol, market, begin_date, end_date, status) tuples
+    Returns (daily_df, empty_df)
+    """
     all_dfs = []
     total = len(stock_list)
     count = 0
 
     logger.info(f"[本地] 开始获取数据，共计 {total} 只股票...")
-    for symbol, market,begindate,enddate,status in stock_list:
+    for symbol, market, begindate, enddate, status in stock_list:
+        if status == "D":
+            continue
         count += 1
         code_file: Path | None = None
         try:
@@ -122,7 +119,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
         logger.warning("未获取到任何有效数据")
         return pd.DataFrame(),pd.DataFrame()
 
-def fetch_batch_index(stock_list: list[tuple]) -> tuple[pd.DataFrame]:
+def fetch_batch_index(stock_list: list[tuple]) -> pd.DataFrame:
     final_df, _ = fetch_batch_data(stock_list)
     if not final_df.empty:
         final_df["tradestatus"] = 1

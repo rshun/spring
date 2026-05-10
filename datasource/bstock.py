@@ -1,6 +1,7 @@
 import baostock as bs
 import logging
 import pandas as pd
+import socket
 import time
 from util.myutil import timer
 from util.config import get_config
@@ -267,6 +268,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     all_daily_data: list[pd.DataFrame] = []
     all_basic_data: list[pd.DataFrame] = []
 
+    socket.setdefaulttimeout(30)
     lg = bs.login()
     if lg.error_code != "0":
         logger.error(f"[Baostock] 登录失败: {lg.error_msg}")
@@ -309,7 +311,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
                     break
 
                 except Exception as e:
-                    if _is_broken_pipe_error(e) and attempt < MAX_FETCH_ATTEMPTS - 1:
+                    if _is_broken_pipe_error(e) and attempt < _get_max_fetch_attempts() - 1:
                         logger.warning(f"[Baostock] 连接中断({bs_code}): {e}，重新登录后重试...")
                         relogin()
                         time.sleep(_get_retry_delay_pipe())
@@ -348,6 +350,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
     total_stocks = len(stock_list)
     count = 0
 
+    socket.setdefaulttimeout(30)
     lg = bs.login()
     if lg.error_code != "0":
         logger.error(f"[Baostock] 登录失败: {lg.error_msg}")
@@ -405,7 +408,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
                     break
 
                 except Exception as e:
-                    if _is_broken_pipe_error(e) and attempt < MAX_FETCH_ATTEMPTS - 1:
+                    if _is_broken_pipe_error(e) and attempt < _get_max_fetch_attempts() - 1:
                         logger.warning(f"[Baostock] 连接中断({bs_code}): {e}，重新登录后重试...")
                         relogin()
                         time.sleep(_get_retry_delay_pipe())
@@ -494,6 +497,7 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
     processed = 0
     all_daily_data: list[pd.DataFrame] = []
 
+    socket.setdefaulttimeout(30)
     lg = bs.login()
     if lg.error_code != "0":
         logger.error(f"[Baostock] 登录失败: {lg.error_msg}")
@@ -534,7 +538,7 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
                     break
 
                 except Exception as e:
-                    if _is_broken_pipe_error(e) and attempt < MAX_FETCH_ATTEMPTS - 1:
+                    if _is_broken_pipe_error(e) and attempt < _get_max_fetch_attempts() - 1:
                         logger.warning(f"[Baostock] 连接中断({bs_code}): {e}，重新登录后重试...")
                         relogin()
                         time.sleep(_get_retry_delay_pipe())

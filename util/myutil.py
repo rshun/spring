@@ -52,10 +52,11 @@ def get_default_dbfile() -> Path:
     返回:
         数据库的文件名
     """
-    db_path = os.environ.get("DUCKDB_PATH", "").strip()
-    if db_path:
-        return Path(db_path).expanduser()
-    return Path.home() / "data" / "quant.db"
+    from util.config import get_config
+    db_path = get_config().get("local_paths", {}).get("db", "").strip()
+    if not db_path:
+        db_path = str(Path.home() / "data" / "quant.db")
+    return Path(db_path).expanduser()
 
 
 def get_lday_path(market: str | None = None) -> Path:

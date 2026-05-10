@@ -7,6 +7,8 @@ local_paths:
   tdx_vipdoc: "C:\\new_zszq_cf\\Vipdoc"
   # 通达信 gbbq 股本变迁二进制文件路径
   tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
+  # DuckDB 数据库文件路径（~ 会展开为用户主目录）
+  db: "~/data/spring.db"
 
 akshare:
   # 单只股票连续失败超过此次数时终止采集

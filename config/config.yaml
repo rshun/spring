@@ -49,6 +49,20 @@ tdx:
   # 股本变迁 zip 下载地址
   gbbq_zip_url: "http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
 
+  download:
+    # download_url() 简单重试参数
+    tries: 3
+    retry_delay: 3
+    request_timeout: 10
+    # 多线程分片下载线程数
+    thread_count: 10
+    # 分片下载超时（秒）
+    chunk_timeout: 30
+    # HTTPAdapter Retry 策略
+    http_retry_total: 5
+    http_retry_backoff: 1
+    http_retry_status_codes: [429, 500, 502, 503, 504]
+
   # 股本变迁类别码 → 中文名称 映射表
   capital_category:
     "1": "除权除息"

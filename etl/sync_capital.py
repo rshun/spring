@@ -31,6 +31,9 @@ CSV_DIR      = PROJECT_ROOT / "csv"
 
 GBBQ_FILE    = CSV_DIR / "gbbq"
 
+# 通达信财务文件名格式: "gpcw" + "YYYYMMDD" + ".ext" = 4+8+4 = 16 字符
+_CW_FILENAME_LEN = 16
+
 
 def _get_tdx_config():
     """从 config.yaml 读取通达信财务相关配置"""
@@ -39,16 +42,20 @@ def _get_tdx_config():
 
 # ── 工具函数 ──────────────────────────────────────────────
 
-def download_url(url, tries=3, delay=3):
+def download_url(url):
     import requests
 
+    cfg = _get_tdx_config()["download"]
+    tries   = cfg["tries"]
+    delay   = cfg["retry_delay"]
+    timeout = cfg["request_timeout"]
     header = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                       '(KHTML, like Gecko) Chrome/87.0.4280.141',
     }
     for attempt in range(1, tries + 1):
         try:
-            resp = requests.get(url, headers=header, timeout=10)
+            resp = requests.get(url, headers=header, timeout=timeout)
             resp.raise_for_status()
             return resp
         except Exception:
@@ -58,8 +65,8 @@ def download_url(url, tries=3, delay=3):
 
 
 class ManyThreadDownload:
-    def __init__(self, num=10):
-        self.num = num
+    def __init__(self):
+        self.num = _get_tdx_config()["download"]["thread_count"]
         self.url = ''
         self.name = ''
         self.total = 0
@@ -80,11 +87,12 @@ class ManyThreadDownload:
         from urllib3.util.retry import Retry
 
         # 单 session 复用：urllib3.Retry 自动处理 5xx/429 重试与退避
+        cfg = _get_tdx_config()["download"]
         session = requests.Session()
         retry_strategy = Retry(
-            total=5,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=cfg["http_retry_total"],
+            backoff_factor=cfg["http_retry_backoff"],
+            status_forcelist=cfg["http_retry_status_codes"],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount('http://', adapter)
@@ -95,7 +103,7 @@ class ManyThreadDownload:
                 start_, end_ = ts_queue.get()
                 headers = {'Range': 'Bytes=%s-%s' % (start_, end_), 'Accept-Encoding': '*'}
                 try:
-                    res = session.get(self.url, headers=headers, timeout=30)
+                    res = session.get(self.url, headers=headers, timeout=cfg["chunk_timeout"])
                     res.raise_for_status()
                 except Exception as e:
                     logger.error(f"  下载分片 ({start_}-{end_}) 失败: {e}")
@@ -168,7 +176,7 @@ def list_cw_files(directory: Path, ext_name: str) -> list[str]:
         return []
     return [
         f.name for f in directory.iterdir()
-        if len(f.name) == 16 and f.name.startswith("gpcw") and f.suffix == f".{ext_name}"
+        if len(f.name) == _CW_FILENAME_LEN and f.name.startswith("gpcw") and f.suffix == f".{ext_name}"
     ]
 
 

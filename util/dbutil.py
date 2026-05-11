@@ -180,10 +180,10 @@ def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
                 is_st
             FROM temp_daily_basic
             ON CONFLICT (code, trade_date) DO UPDATE
-            SET turnover_rate = EXCLUDED.turnover_rate,
-                pe            = EXCLUDED.pe,
-                pb            = EXCLUDED.pb,
-                is_st         = EXCLUDED.is_st
+            SET turnover_rate = COALESCE(EXCLUDED.turnover_rate, DAILY_BASIC.turnover_rate),
+                pe            = COALESCE(EXCLUDED.pe,            DAILY_BASIC.pe),
+                pb            = COALESCE(EXCLUDED.pb,            DAILY_BASIC.pb),
+                is_st         = COALESCE(EXCLUDED.is_st,         DAILY_BASIC.is_st)
         """)
         logger.info(f"[入库] 成功合并 {len(df)} 条每日指标数据")
     except Exception as e:

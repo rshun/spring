@@ -67,8 +67,6 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
     begin_date / end_date : YYYY-MM-DD
     """
     mkt = _to_market(market)
-    if mkt == 2:
-        return pd.DataFrame()
 
     dfs = []
     for page in range(_get_max_pages()):
@@ -156,9 +154,19 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     finally:
         api.disconnect()
 
-    final_daily = pd.concat(all_daily_data, ignore_index=True) if all_daily_data else pd.DataFrame()
+    if all_daily_data:
+        final_daily = pd.concat(all_daily_data, ignore_index=True)
+        basic_df = (
+            final_daily[['code', 'date']]
+            .rename(columns={'date': 'trade_date'})
+            .assign(turnover_rate=None, pe=None, pb=None, is_st=None)
+        )
+    else:
+        final_daily = pd.DataFrame()
+        basic_df = pd.DataFrame()
+
     logger.info(f"[pytdx] 采集完成，成功获取 {len(final_daily)} 条记录")
-    return final_daily, pd.DataFrame()
+    return final_daily, basic_df
 
 
 def _get_category():

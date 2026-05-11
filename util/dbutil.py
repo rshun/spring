@@ -674,7 +674,7 @@ def get_trade_dates(start_date: str, end_date: str) -> list[str]:
     """查询 [start_date, end_date] 内的交易日列表，返回 YYYYMMDD 格式"""
     conn: duckdb.DuckDBPyConnection | None = None
     try:
-        conn = get_connection(is_read_only=True)
+        conn = get_connection(is_read_only=False)
         rows = conn.execute(
             "SELECT cal_date FROM TRADE_CAL WHERE is_open = 1 "
             "AND cal_date BETWEEN ? AND ? ORDER BY cal_date",

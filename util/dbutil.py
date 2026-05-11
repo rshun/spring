@@ -624,7 +624,7 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
     try:
         conn.register("temp_margin_detail", df)
         conn.execute("""
-            INSERT OR REPLACE INTO MARGIN_DETAIL_DAILY
+            INSERT INTO MARGIN_DETAIL_DAILY
                 (trade_date, exchange_code, symbol, code, security_name,
                  margin_buy_amount, margin_repay_amount, margin_balance,
                  short_sell_volume, short_repay_volume,
@@ -647,6 +647,18 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
                 CAST(margin_short_balance AS DOUBLE),
                 now(), now()
             FROM temp_margin_detail
+            ON CONFLICT (trade_date, exchange_code, symbol) DO UPDATE SET
+                code                  = EXCLUDED.code,
+                security_name         = EXCLUDED.security_name,
+                margin_buy_amount     = EXCLUDED.margin_buy_amount,
+                margin_repay_amount   = EXCLUDED.margin_repay_amount,
+                margin_balance        = EXCLUDED.margin_balance,
+                short_sell_volume     = EXCLUDED.short_sell_volume,
+                short_repay_volume    = EXCLUDED.short_repay_volume,
+                short_balance_volume  = EXCLUDED.short_balance_volume,
+                short_balance_amount  = EXCLUDED.short_balance_amount,
+                margin_short_balance  = EXCLUDED.margin_short_balance,
+                updated_at            = now()
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条融资融券明细数据")
     except Exception as e:

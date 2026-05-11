@@ -24,6 +24,7 @@ def fetch_stock_data(begin: str, end: str, code_file: str, std_code: str) -> pd.
     all_records = []
     begin_int = int(begin)
     end_int = int(end)
+    prev_close = None  # begin 前最后一个收盘，用作首日 pre_close
 
     try:
         with open(code_file, 'rb') as f:
@@ -33,22 +34,25 @@ def fetch_stock_data(begin: str, end: str, code_file: str, std_code: str) -> pd.
                     break
 
                 raw = record_struct.unpack(chunk)
-                date_int = raw[0] # 获取整数日期，例如 20251224
-                if date_int < begin_int or date_int > end_int:
+                date_int = raw[0]  # 整数日期，例如 20251224
+                close = raw[4] / 100.0
+
+                if date_int > end_int:
+                    break  # .day 文件按日期升序，超出 end 可直接停
+
+                if date_int < begin_int:
+                    prev_close = close  # 记录 begin 前最后一个收盘价
                     continue
 
-                # 将整数日期 (20251224) 转为字符串 "2025-12-24"
                 d_str = str(date_int)
                 clean_date = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
-
-                # 构造单条记录
                 record = {
                     "code":   std_code,
                     "date":   clean_date,
                     "open":   raw[1] / 100.0,
                     "high":   raw[2] / 100.0,
                     "low":    raw[3] / 100.0,
-                    "close":  raw[4] / 100.0,
+                    "close":  close,
                     "volume": int(raw[6]),
                     "amount": float(raw[5])
                 }
@@ -56,12 +60,16 @@ def fetch_stock_data(begin: str, end: str, code_file: str, std_code: str) -> pd.
 
         if not all_records:
             return pd.DataFrame()
-            
+
         df = pd.DataFrame(all_records)
-        
-        cols = ["code", "date", "open", "high", "low", "close", "volume", "amount"]
-        df = df[cols]
-        return df
+        # .day 文件有实际记录即为正常交易日
+        df['tradestatus'] = 1
+        # pre_close：首日用扫描过程中记录的前收，后续各天用前一行 close
+        df['pre_close'] = df['close'].shift(1)
+        if prev_close is not None:
+            df.loc[df.index[0], 'pre_close'] = prev_close
+        cols = ["code", "date", "open", "high", "low", "close", "pre_close", "tradestatus", "volume", "amount"]
+        return df[cols]
         
     except Exception as e:
         logger.error(f"读取文件 {code_file} 出错: {e}")
@@ -113,11 +121,16 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
 
     if all_dfs:
         final_df = pd.concat(all_dfs, ignore_index=True)
+        basic_df = (
+            final_df[['code', 'date']]
+            .rename(columns={'date': 'trade_date'})
+            .assign(turnover_rate=None, pe=None, pb=None, is_st=None)
+        )
         logger.info(f"批量采集完成，成功获取 {len(final_df)} 条记录")
-        return final_df,pd.DataFrame()
+        return final_df, basic_df
     else:
         logger.warning("未获取到任何有效数据")
-        return pd.DataFrame(),pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
 def fetch_batch_index(stock_list: list[tuple]) -> pd.DataFrame:
     final_df, _ = fetch_batch_data(stock_list)

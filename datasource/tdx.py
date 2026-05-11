@@ -100,15 +100,16 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
 
     std_code = f"{symbol}.{market.upper()}"
     return pd.DataFrame({
-        'code':      std_code,
-        'date':      df['date'].values,
-        'open':      df['open'].values,
-        'high':      df['high'].values,
-        'low':       df['low'].values,
-        'close':     df['close'].values,
-        'pre_close': df['pre_close'].values,  # 上一交易日收盘价，首日可能为 NaN→由 dbutil 补 -1
-        'volume':    (df['vol'] * 100).astype(int).values,  # pytdx vol单位是手，转为股
-        'amount':    df['amount'].values,
+        'code':        std_code,
+        'date':        df['date'].values,
+        'open':        df['open'].values,
+        'high':        df['high'].values,
+        'low':         df['low'].values,
+        'close':       df['close'].values,
+        'pre_close':   df['pre_close'].values,  # 上一交易日收盘价，首日可能为 NaN→由 dbutil 补 -1
+        'tradestatus': 1,                        # pytdx 停牌日无记录，有记录即为正常交易
+        'volume':      (df['vol'] * 100).astype(int).values,  # pytdx vol单位是手，转为股
+        'amount':      df['amount'].values,
     })
 
 

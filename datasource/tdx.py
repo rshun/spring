@@ -3,10 +3,11 @@
 
 注意事项:
   1. pytdx 是纯行情接口，不提供 turnover_rate/pe/pb/is_st 等指标，
-     fetch_batch_data 返回的第二个 DataFrame 始终为空
-  2. 停牌股票不会返回任何数据（该日期行直接缺失），
+     fetch_batch_data 返回的 basic_df 中这些字段均为 None（仅用于在 DAILY_BASIC 建行）
+  2. pre_close 通过对已拉取数据排序后 shift(1) 推算；该股上市首日无前收，入库时补 -1
+  3. 停牌股票不会返回任何数据（该日期行直接缺失），
      如需停牌记录(tradestatus=0)，需用 baostock 等其他数据源补充
-  3. 成交量(vol)单位为手，已在代码中 ×100 转换为股
+  4. 成交量(vol)单位为手，已在代码中 ×100 转换为股
 """
 import pandas as pd
 import logging
@@ -88,6 +89,10 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
 
     # datetime 列格式: "2026-03-12" 或 "2026-03-12 15:00"
     df['date'] = pd.to_datetime(df['datetime']).dt.strftime('%Y-%m-%d')
+    # 先排序再 shift，使 pre_close 能利用过滤前的历史数据（循环多取了至少一天）
+    df = df.sort_values('date').reset_index(drop=True)
+    df['pre_close'] = df['close'].shift(1)
+
     df = df[(df['date'] >= begin_date) & (df['date'] <= end_date)]
 
     if df.empty:
@@ -95,14 +100,15 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
 
     std_code = f"{symbol}.{market.upper()}"
     return pd.DataFrame({
-        'code':   std_code,
-        'date':   df['date'].values,
-        'open':   df['open'].values,
-        'high':   df['high'].values,
-        'low':    df['low'].values,
-        'close':  df['close'].values,
-        'volume': (df['vol'] * 100).astype(int).values,  # pytdx vol单位是手，转为股
-        'amount': df['amount'].values,
+        'code':      std_code,
+        'date':      df['date'].values,
+        'open':      df['open'].values,
+        'high':      df['high'].values,
+        'low':       df['low'].values,
+        'close':     df['close'].values,
+        'pre_close': df['pre_close'].values,  # 上一交易日收盘价，首日可能为 NaN→由 dbutil 补 -1
+        'volume':    (df['vol'] * 100).astype(int).values,  # pytdx vol单位是手，转为股
+        'amount':    df['amount'].values,
     })
 
 
@@ -113,7 +119,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     Parameters
     ----------
     stock_list : list of (symbol, market, begin_date, end_date, status) tuples
-    Returns (daily_df, empty_df)，empty_df 始终为空（pytdx 不提供指标数据）
+    Returns (daily_df, basic_df)，basic_df 仅含 code/trade_date，指标列均为 None
     """
     total = len(stock_list)
     all_daily_data: list[pd.DataFrame] = []

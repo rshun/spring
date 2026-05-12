@@ -5,8 +5,8 @@
   1. pytdx 是纯行情接口，不提供 turnover_rate/pe/pb/is_st 等指标，
      fetch_batch_data 返回的 basic_df 中这些字段均为 None（仅用于在 DAILY_BASIC 建行）
   2. pre_close 通过对已拉取数据排序后 shift(1) 推算；该股上市首日无前收，入库时补 -1
-  3. tradestatus 判断：vol=0 且 amount=0 且四价相同则为停牌(0)，否则为正常交易(1)；
-     完全缺失的停牌日仍无法捕获，如需补全需用 baostock 等其他数据源
+  3. tradestatus 判断：vol=0 且四价相同（round(3) 避免浮点误差）则为停牌(0)，否则为正常交易(1)；
+     pytdx 未返回的交易日（全天停牌）会按 lday 同样逻辑补占位行（tradestatus=0，四价填前收，量额=0）
   4. 成交量(vol)单位为手，已在代码中 ×100 转换为股
 """
 import pandas as pd
@@ -14,6 +14,7 @@ import logging
 from pytdx.hq import TdxHq_API
 from util.myutil import timer
 from util.config import get_config
+from util import dbutil
 
 logger = logging.getLogger("etl.datasource.tdx")
 
@@ -57,15 +58,17 @@ def _to_market(exchange: str) -> int:
 
 
 def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
-                     begin_date: str, end_date: str) -> pd.DataFrame:
-    """拉取单只股票的历史日K线
+                     begin_date: str, end_date: str,
+                     trade_dates: list[str]) -> pd.DataFrame:
+    """拉取单只股票的历史日K线，对 pytdx 未返回的交易日补停牌占位行
 
     Parameters
     ----------
-    api : 已连接的 TdxHq_API
-    symbol : 6位股票代码
-    market : 交易所 SH/SZ/BJ
+    api         : 已连接的 TdxHq_API
+    symbol      : 6位股票代码
+    market      : 交易所 SH/SZ/BJ
     begin_date / end_date : YYYY-MM-DD
+    trade_dates : 区间内所有交易日（YYYYMMDD 升序），用于生成停牌占位行
     """
     mkt = _to_market(market)
 
@@ -82,38 +85,87 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
         if df_page['datetime'].iloc[0][:10] < begin_date:
             break
 
-    if not dfs:
-        return pd.DataFrame()
+    # 将 pytdx 返回的数据索引为 {YYYYMMDD: row}，便于逐交易日查找
+    raw_records: dict[str, dict] = {}
+    prev_close: float | None = None
 
-    df = pd.concat(dfs, ignore_index=True)
+    if dfs:
+        df = pd.concat(dfs, ignore_index=True)
+        df['date'] = pd.to_datetime(df['datetime']).dt.strftime('%Y-%m-%d')
+        df = df.sort_values('date').reset_index(drop=True)
 
-    # datetime 列格式: "2026-03-12" 或 "2026-03-12 15:00"
-    df['date'] = pd.to_datetime(df['datetime']).dt.strftime('%Y-%m-%d')
-    # 先排序再 shift，使 pre_close 能利用过滤前的历史数据（循环多取了至少一天）
-    df = df.sort_values('date').reset_index(drop=True)
-    df['pre_close'] = df['close'].shift(1)
+        # 取 begin_date 前最后一条作为首日 pre_close 的来源
+        before = df[df['date'] < begin_date]
+        if not before.empty:
+            prev_close = float(before.iloc[-1]['close'])
 
-    df = df[(df['date'] >= begin_date) & (df['date'] <= end_date)]
+        in_range = df[(df['date'] >= begin_date) & (df['date'] <= end_date)]
+        for _, row in in_range.iterrows():
+            key = row['date'].replace('-', '')
+            is_suspended = (
+                row['vol'] == 0 and
+                round(float(row['open']), 3) == round(float(row['close']), 3) and
+                round(float(row['high']), 3) == round(float(row['low']),   3) and
+                round(float(row['open']), 3) == round(float(row['high']),  3)
+            )
+            raw_records[key] = {
+                'open':        float(row['open']),
+                'high':        float(row['high']),
+                'low':         float(row['low']),
+                'close':       float(row['close']),
+                'volume':      int(row['vol']) * 100,  # 手→股
+                'amount':      float(row['amount']),
+                'tradestatus': 0 if is_suspended else 1,
+            }
 
-    if df.empty:
+    target_dates = [d for d in trade_dates
+                    if begin_date.replace('-', '') <= d <= end_date.replace('-', '')]
+    if not target_dates:
         return pd.DataFrame()
 
     std_code = f"{symbol}.{market.upper()}"
-    return pd.DataFrame({
-        'code':        std_code,
-        'date':        df['date'].values,
-        'open':        df['open'].values,
-        'high':        df['high'].values,
-        'low':         df['low'].values,
-        'close':       df['close'].values,
-        'pre_close':   df['pre_close'].values,  # 上一交易日收盘价，首日可能为 NaN→由 dbutil 补 -1
-        'tradestatus': (
-            (df['vol'] == 0) & (df['amount'] == 0) &
-            (df['open'] == df['close']) & (df['high'] == df['low']) & (df['open'] == df['high'])
-        ).map({True: 0, False: 1}).values,
-        'volume':      (df['vol'] * 100).astype(int).values,  # pytdx vol单位是手，转为股
-        'amount':      df['amount'].values,
-    })
+    all_records = []
+    last_close = prev_close
+
+    for td in target_dates:
+        clean_date = f"{td[:4]}-{td[4:6]}-{td[6:]}"
+        if td in raw_records:
+            r = raw_records[td]
+            all_records.append({
+                'code':        std_code,
+                'date':        clean_date,
+                'open':        r['open'],
+                'high':        r['high'],
+                'low':         r['low'],
+                'close':       r['close'],
+                'pre_close':   last_close if last_close is not None else float('nan'),
+                'tradestatus': r['tradestatus'],
+                'volume':      r['volume'],
+                'amount':      r['amount'],
+            })
+            last_close = r['close']
+        elif last_close is not None:
+            # pytdx 未返回该交易日 → 全天停牌占位行
+            all_records.append({
+                'code':        std_code,
+                'date':        clean_date,
+                'open':        last_close,
+                'high':        last_close,
+                'low':         last_close,
+                'close':       last_close,
+                'pre_close':   last_close,
+                'tradestatus': 0,
+                'volume':      0,
+                'amount':      0.0,
+            })
+        # last_close is None: 上市首日即停牌，无前收，跳过
+
+    if not all_records:
+        return pd.DataFrame()
+
+    return pd.DataFrame(all_records)[
+        ['code', 'date', 'open', 'high', 'low', 'close', 'pre_close', 'tradestatus', 'volume', 'amount']
+    ]
 
 
 @timer
@@ -130,6 +182,13 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     fail_count = 0
     max_fail = _get_max_fail()
 
+    active = [(b, e) for _, _, b, e, st in stock_list if st != 'D']
+    if not active:
+        return pd.DataFrame(), pd.DataFrame()
+    min_begin = min(b for b, _ in active)
+    max_end   = max(e for _, e in active)
+    trade_dates = dbutil.get_trade_dates(min_begin, max_end)  # YYYYMMDD 升序
+
     api = _connect_api()
 
     try:
@@ -140,7 +199,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
                 continue
 
             try:
-                df_daily = fetch_stock_data(api, str(symbol), str(market), begindate, enddate)
+                df_daily = fetch_stock_data(api, str(symbol), str(market), begindate, enddate, trade_dates)
                 if not df_daily.empty:
                     all_daily_data.append(df_daily)
                 fail_count = 0

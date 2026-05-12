@@ -153,7 +153,7 @@ python -m etl.sync_industry --input industry.csv
 
 #### 同步融资融券数据 (akshare 数据源, 暂无北交所接口)
 ```bash
-# 每天运行(获取当天的汇总和明细)
+# 每天运行(获取T-1日的汇总和明细)
 python -m etl.sync_margin
 
 # 获取从 2025-01-01 到 2025-05-07 的沪市融资融券数据

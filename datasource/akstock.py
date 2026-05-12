@@ -16,7 +16,7 @@ _SUMMARY_OUT_COLS = [
 ]
 
 _DETAIL_OUT_COLS = [
-    'trade_date', 'exchange_code', 'symbol', 'code', 'security_name',
+    'trade_date', 'exchange_code', 'symbol', 'code',
     'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
     'short_sell_volume', 'short_repay_volume',
     'short_balance_volume', 'short_balance_amount',
@@ -419,7 +419,6 @@ def fetch_margin_detail(trade_date: str, exchanges: list[str]) -> pd.DataFrame:
             if df_sz is not None and not df_sz.empty:
                 df_sz = df_sz.rename(columns={
                     '证券代码':     'symbol',
-                    '证券简称':     'security_name',
                     '融资买入额':   'margin_buy_amount',
                     '融资余额':     'margin_balance',
                     '融券卖出量':   'short_sell_volume',
@@ -445,7 +444,6 @@ def fetch_margin_detail(trade_date: str, exchanges: list[str]) -> pd.DataFrame:
             if df_sh is not None and not df_sh.empty:
                 df_sh = df_sh.rename(columns={
                     '标的证券代码':   'symbol',
-                    '标的证券简称':   'security_name',
                     '融资余额':       'margin_balance',
                     '融资买入额':     'margin_buy_amount',
                     '融资偿还额':     'margin_repay_amount',

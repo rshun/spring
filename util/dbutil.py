@@ -625,7 +625,7 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
         conn.register("temp_margin_detail", df)
         conn.execute("""
             INSERT INTO MARGIN_DETAIL_DAILY
-                (trade_date, exchange_code, symbol, code, security_name,
+                (trade_date, exchange_code, symbol, code,
                  margin_buy_amount, margin_repay_amount, margin_balance,
                  short_sell_volume, short_repay_volume,
                  short_balance_volume, short_balance_amount,
@@ -636,7 +636,6 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
                 exchange_code,
                 symbol,
                 code,
-                security_name,
                 CAST(margin_buy_amount    AS DOUBLE),
                 CAST(margin_repay_amount  AS DOUBLE),
                 CAST(margin_balance       AS DOUBLE),
@@ -649,7 +648,6 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
             FROM temp_margin_detail
             ON CONFLICT (trade_date, exchange_code, symbol) DO UPDATE SET
                 code                  = EXCLUDED.code,
-                security_name         = EXCLUDED.security_name,
                 margin_buy_amount     = EXCLUDED.margin_buy_amount,
                 margin_repay_amount   = EXCLUDED.margin_repay_amount,
                 margin_balance        = EXCLUDED.margin_balance,

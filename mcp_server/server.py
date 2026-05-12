@@ -597,7 +597,7 @@ def get_margin_detail(
     max_rows: int = 2000,
 ) -> dict[str, Any]:
     """
-    MARGIN_DETAIL_DAILY(trade_date, exchange_code, symbol, code, security_name,
+    MARGIN_DETAIL_DAILY(trade_date, exchange_code, symbol, code,
         margin_buy_amount, margin_repay_amount, margin_balance,
         short_sell_volume, short_repay_volume,
         short_balance_volume, short_balance_amount, margin_short_balance, ...)
@@ -615,7 +615,7 @@ def get_margin_detail(
 
     df = run_sql(
         """
-        SELECT trade_date, exchange_code, symbol, code, security_name,
+        SELECT trade_date, exchange_code, symbol, code,
                margin_buy_amount, margin_repay_amount, margin_balance,
                short_sell_volume, short_repay_volume,
                short_balance_volume, short_balance_amount,

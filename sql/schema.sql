@@ -246,7 +246,6 @@ CREATE TABLE IF NOT EXISTS MARGIN_DETAIL_DAILY (
     exchange_code          VARCHAR(4) NOT NULL CHECK (exchange_code IN ('SH', 'SZ', 'BJ')),
     symbol                 VARCHAR(20) NOT NULL,
     code                   VARCHAR(20) NOT NULL,
-    security_name          VARCHAR(64),
     margin_buy_amount      NUMERIC(20, 4),
     margin_repay_amount    NUMERIC(20, 4),
     margin_balance         NUMERIC(20, 4),
@@ -265,7 +264,6 @@ COMMENT ON COLUMN MARGIN_DETAIL_DAILY.trade_date           IS '交易日期';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.exchange_code        IS '交易所代码，取 STOCK_INFO.exchange：SH、SZ、BJ';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.symbol               IS '证券代码，不带交易所后缀';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.code                 IS '带交易所后缀的证券代码，对齐 STOCK_INFO.code，如 600000.SH、000001.SZ、430047.BJ';
-COMMENT ON COLUMN MARGIN_DETAIL_DAILY.security_name        IS '证券简称，按交易所披露名称保存快照';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.margin_buy_amount    IS '融资买入额，单位：元';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.margin_repay_amount  IS '融资偿还额，单位：元；若交易所未披露则为空';
 COMMENT ON COLUMN MARGIN_DETAIL_DAILY.margin_balance       IS '融资余额，单位：元';

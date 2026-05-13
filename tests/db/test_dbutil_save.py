@@ -1,6 +1,5 @@
 import pytest
 import pandas as pd
-from datetime import date
 
 from util.dbutil import (
     save_daily_to_db,

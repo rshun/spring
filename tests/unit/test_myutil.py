@@ -8,6 +8,7 @@ from util.myutil import (
     get_today,
     get_yesterday,
     import_source_module,
+    get_lday_path,
 )
 
 
@@ -103,21 +104,18 @@ def test_import_error_lists_available_modules():
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
 def test_get_lday_path_none_raises_value_error():
-    from util.myutil import get_lday_path
     with pytest.raises(ValueError):
         get_lday_path(None)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
 def test_get_lday_path_empty_string_raises_value_error():
-    from util.myutil import get_lday_path
     with pytest.raises(ValueError):
         get_lday_path("")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
 def test_get_lday_path_nonexistent_dir_raises_file_not_found():
-    from util.myutil import get_lday_path
     with patch("util.config.get_config", return_value={"local_paths": {"tdx_vipdoc": "C:\\nonexistent_xyz_dir"}}):
         with pytest.raises(FileNotFoundError):
             get_lday_path("sh")

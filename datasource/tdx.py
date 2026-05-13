@@ -91,7 +91,8 @@ def fetch_stock_data(api: TdxHq_API, symbol: str, market: str,
 
     if dfs:
         df = pd.concat(dfs, ignore_index=True)
-        df['date'] = pd.to_datetime(df['datetime']).dt.strftime('%Y-%m-%d')
+        df['date'] = pd.to_datetime(df['datetime'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df = df.dropna(subset=['date'])
         df = df.sort_values('date').reset_index(drop=True)
 
         # 取 begin_date 前最后一条作为首日 pre_close 的来源

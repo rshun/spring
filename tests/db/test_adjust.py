@@ -1,6 +1,5 @@
 import pytest
 import pandas as pd
-from unittest.mock import patch, MagicMock
 
 from etl.adjust import process_and_save_adjust_factors
 from tests.conftest import insert_trade_cal

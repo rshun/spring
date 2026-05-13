@@ -44,9 +44,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-s', '--source',
         type=str,
-        choices=['lday', 'bstock', 'akstock'],
+        choices=['lday', 'bstock'],
         default='bstock',
-        help='指定数据源类型: lday (本地day文件)  bstock数据源, akstock数据源 (默认 bstock数据源)'
+        help='指定数据源类型: lday (本地day文件)  bstock数据源 (默认 bstock数据源)'
     )
 
     return parser.parse_args()

@@ -10,3 +10,6 @@ akshare==1.18.21
 baostock==0.9.1
 pytdx==1.72
 pyyaml==6.0.3
+
+pytest>=8.0
+pytest-mock>=3.14

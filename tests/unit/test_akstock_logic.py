@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from datasource.akstock import (
     fetch_bj_stock_data,
@@ -78,10 +78,9 @@ def test_fetch_stock_info_all_triggers_bj_fetch():
 
 
 def test_fetch_stock_info_sh_only_returns_empty():
-    # SH is not supported; the function returns empty DataFrames immediately
-    # without calling any AkShare API.
     df_info, df_basic = fetch_stock_info(["SH"])
     assert df_info.empty
+    assert df_basic.empty
 
 
 # ── fetch_stock_data 列映射 ───────────────────────────────────────────────────

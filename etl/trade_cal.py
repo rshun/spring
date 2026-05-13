@@ -17,9 +17,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-s', '--source',
         type=str,
-        choices=['bstock', 'akstock'],
+        choices=['bstock'],
         default='bstock',
-        help='指定数据源类型: bstock数据源, akstock数据源 (默认 bstock数据源)'
+        help='指定数据源类型: bstock数据源 (默认 bstock数据源)'
     )
 
     parser.add_argument(

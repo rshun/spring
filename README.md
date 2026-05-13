@@ -101,10 +101,7 @@ python -m etl.import_daily -b 20000101
 # 从lday数据源中获取从2000-01-01到2025-12-31的京市的日线数据
 python -m etl.import_daily -b 20000101 -e 20251231 -x bj -s lday 
 
-# 从akstock数据源中获取从2026-01-01开始的京市的日线数据
-python -m etl.import_daily -b 20260101 -x bj -s akstock
-
-- akstock和tdx数据源返回的成交量不精确，是成交手数*100
+- tdx数据源返回的成交量不精确，是成交手数*100
 - 若当日停牌,tdx,lday,bstock均会插入数据到STOCK_DAILY和DAILY_BASIC表
 - 建议优先使用bstock这个数据源, lday作为补充
 

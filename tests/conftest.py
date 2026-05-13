@@ -1,7 +1,6 @@
 import pytest
 import duckdb
 from pathlib import Path
-from datetime import date
 
 
 @pytest.fixture

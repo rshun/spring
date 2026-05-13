@@ -9,3 +9,4 @@ csv/
 tmp/
 download/
 log/
+__init__.py

@@ -1,5 +1,4 @@
 import pytest
-import pandas as pd
 
 pytestmark = pytest.mark.integration
 

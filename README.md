@@ -12,44 +12,44 @@ Spring 是一个专为 AI 驱动的量化交易和金融分析设计的 A 股数
 
 ```text
 spring/
-├── etl/                # 数据获取与清洗脚本
-│   ├── init_db.py      # 数据库初始化
-│   ├── fetch_index.py  # 获取指数数据
-│   ├── import_daily.py # 导入日线行情数据
-│   ├── sync_basic.py   # 同步每日基础指标（市值、换手率、市盈率等）
-│   ├── sync_capital.py # 同步股本变动与权息资料
+├── etl/                 # 数据获取与清洗脚本
+│   ├── init_db.py       # 数据库初始化
+│   ├── fetch_index.py   # 获取指数数据
+│   ├── import_daily.py  # 导入日线行情数据
+│   ├── sync_basic.py    # 同步每日基础指标（市值、换手率、市盈率等）
+│   ├── sync_capital.py  # 同步股本变动与权息资料
 │   ├── sync_industry.py # 同步申万行业分类
-│   ├── sync_margin.py  # 同步融资融券汇总和明细数据
-│   ├── trade_cal.py    # 交易日历同步
-│   └── adjust.py, ...  # 其他复权因子及数据处理脚本
-├── mcp_server/         # MCP 服务端代码
-│   └── server.py       # DuckDB 供大模型调用的 FastMCP 核心服务
-├── sql/                # 数据库定义与管理
-│   └── schema.sql      # DuckDB 核心表结构定义（如 STOCK_INFO, STOCK_DAILY 等）
-├── tools/              # 工具类
-│   └── check_daily.py  # 校验数据是否完整
-├── util/               # 核心工具包
-│   ├── dbutil.py       # 数据库连接与执行工具
-│   ├── myutil.py       # 通用辅助函数
-│   └── validators.py   # 数据校验逻辑
-└── requirements.txt    # Python 依赖清单
+│   ├── sync_margin.py   # 同步融资融券汇总和明细数据
+│   ├── trade_cal.py     # 交易日历同步
+│   └── adjust.py, ...   # 其他复权因子及数据处理脚本
+├── mcp_server/          # MCP 服务端代码
+│   └── server.py        # DuckDB 供大模型调用的 FastMCP 核心服务
+├── sql/                 # 数据库定义与管理
+│   └── schema.sql       # DuckDB 核心表结构定义（如 STOCK_INFO, STOCK_DAILY 等）
+├── tools/               # 工具类
+│   └── check_daily.py   # 校验数据是否完整
+├── util/                # 核心工具包
+│   ├── dbutil.py        # 数据库连接与执行工具
+│   ├── myutil.py        # 通用辅助函数
+│   └── validators.py    # 数据校验逻辑
+└── requirements.txt     # Python 依赖清单
 ```
 
 ## 🛠️ 安装与配置
 
 ### **环境准备**
    确保已安装 Python 3.9+，并安装所需依赖：
-   ```bash
+```bash
    pip install -r requirements.txt
-   ```
+```
 
 ### **数据库初始化**
    配置环境变量 `DUCKDB_PATH` 指向你的本地数据库文件路径，然后执行初始化脚本建表：
-   ```bash
+```bash
    # Windows (PowerShell)
    $env:DUCKDB_PATH="C:\path\to\your\quant.duckdb"
    python etl/init_db.py
-   ```
+```
 
 **校验数据是否完整**
 ```base
@@ -84,7 +84,7 @@ python -m etl.sync_basic
 python -m etl.sync_basic -x bj -s akstock -f
 ```
 
-#### 同步股本股息资料gbbq (默认优先级: 从本地目录读取  csv/gbbq 通达信服务器上下载)  
+#### 同步股本股息资料gbbq (默认优先级: 从本地目录读取,csv/gbbq,通达信服务器上下载)  
 ```bash
 # 每天运行
 python -m etl.sync_capital 
@@ -96,7 +96,7 @@ python -m etl.sync_capital --download
 #### 同步股票日线数据  
 ```bash
 # 每天运行(获取当天)
-python -m etl.import_daily -b 20000101
+python -m etl.import_daily
 
 # 从lday数据源中获取从2000-01-01到2025-12-31的京市的日线数据
 python -m etl.import_daily -b 20000101 -e 20251231 -x bj -s lday 
@@ -104,7 +104,6 @@ python -m etl.import_daily -b 20000101 -e 20251231 -x bj -s lday
 - tdx数据源返回的成交量不精确，是成交手数*100
 - 若当日停牌,tdx,lday,bstock均会插入数据到STOCK_DAILY和DAILY_BASIC表
 - 建议优先使用bstock这个数据源, lday作为补充
-
 ```
 
 #### 同步指数日线数据  

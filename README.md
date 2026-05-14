@@ -185,6 +185,26 @@ python -m etl.sync_margin --only summary
 - `MARGIN_SUMMARY_DAILY`: 融资融券每日汇总数据（按交易所）
 - `MARGIN_DETAIL_DAILY`: 融资融券每日明细数据（按个股）
 
+## 🧪 测试
+
+```bash
+# 运行所有测试
+pytest
+
+# 仅运行某一层
+pytest tests/unit/
+pytest tests/db/
+pytest tests/integration/
+```
+
+测试分三层：
+
+| 层级 | 目录 | 说明 |
+|------|------|------|
+| Unit | `tests/unit/` | 纯逻辑测试，无外部依赖 |
+| DB | `tests/db/` | SQL 逻辑测试，使用 in-memory DuckDB |
+| Integration | `tests/integration/` | 真实网络请求，断网时自动 skip |
+
 ## 📝 开发协议
 
 1. **只读保护**：MCP 服务默认处于只读模式 (`duckdb-quant-readonly`)，拦截所有的 DDL/DML 操作以保障本地数据安全。

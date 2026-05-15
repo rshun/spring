@@ -1,7 +1,7 @@
 """
 同步申万行业数据
   1、默认通过 ak.stock_industry_clf_hist_sw() 获取股票申万三级行业历史原始数据
-  2、指定 --input 时读取 tmp/swclasscode.csv，写入申万行业一/二/三级层级定义
+  2、指定 --input 时读取 csv/swclasscode.csv，写入申万行业一/二/三级层级定义
 """
 import argparse
 import duckdb
@@ -17,7 +17,7 @@ from util import validators as pv
 logger = logging.getLogger("etl.sync_industry")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT_DIR = PROJECT_ROOT / "tmp"
+DEFAULT_INPUT_DIR = PROJECT_ROOT / "csv"
 DEFAULT_INPUT_FILE = "swclasscode.csv"
 
 
@@ -35,7 +35,7 @@ def parse_arguments() -> argparse.Namespace:
         nargs='?',
         const=DEFAULT_INPUT_FILE,
         default=None,
-        help='读取 CSV 文件同步申万行业一/二/三级层级定义；不指定文件名时默认 tmp/swclasscode.csv'
+        help='读取 CSV 文件同步申万行业一/二/三级层级定义；不指定文件名时默认 csv/swclasscode.csv'
     )
     parser.add_argument(
         '--version',
@@ -62,10 +62,15 @@ def check_parameters(forcerun: bool) -> bool:
 
 
 def resolve_input_file(input_arg: str) -> Path:
-    input_path = Path(input_arg)
+    input_path = Path(input_arg).expanduser()
     if input_path.is_absolute():
         return input_path
-    return DEFAULT_INPUT_DIR / input_path
+
+    # 优先读 config.yaml 中 local_paths.tmp; 未配置则回退到项目 tmp/
+    from util.config import get_config
+    configured = (get_config().get("local_paths") or {}).get("tmp", "").strip()
+    base_dir = Path(configured).expanduser() if configured else DEFAULT_INPUT_DIR
+    return base_dir / input_path
 
 
 def _cell_text(value) -> str:

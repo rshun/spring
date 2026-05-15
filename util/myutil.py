@@ -59,6 +59,13 @@ def get_default_dbfile() -> Path:
     return Path(db_path).expanduser()
 
 
+def ensure_dbfile_dir() -> Path:
+    """确保数据库文件所在目录存在，返回数据库文件路径"""
+    db_path = get_default_dbfile()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return db_path
+
+
 def get_lday_path(market: str | None = None) -> Path:
     """获取lday路径
 

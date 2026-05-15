@@ -16,6 +16,7 @@ def create_database_schema() -> None:
         return
 
     sql = sql_file.read_text(encoding="utf-8")
+    myutil.ensure_dbfile_dir()
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = dbutil.get_connection(is_read_only=False)

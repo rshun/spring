@@ -154,7 +154,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
             )
             if not df_one.empty:
                 all_dfs.append(df_one)
-            if count % 100 == 0:
+            if count % 1000 == 0:
                 logger.info(f"   已处理: {count}/{total}")
         except Exception as e:
             logger.warning(f"获取失败: {symbol}.{market} | 原因: {e}")

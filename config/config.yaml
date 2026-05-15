@@ -9,9 +9,9 @@ local_paths:
   tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
   # DuckDB 数据库文件路径（~ 会展开为用户主目录）
   db: "~/data/quant.db"
-  # 输入/临时文件目录（如 sync_industry 的 swclasscode.csv）；
-  # 未配置或留空时回退到项目根目录下的 csv/
-  tmp: ""
+  # 基础/输入数据目录（如 sync_industry 的 SwClassCode_2021.csv）；
+  # 未配置或留空时回退到项目根目录下的 data/
+  data_dir: ""
 
 akshare:
   # 单只股票连续失败超过此次数时终止采集

@@ -38,11 +38,14 @@ def test_save_daily_inserts_row(mem_db):
     assert count == 1
 
 
-def test_save_daily_replace_on_duplicate(mem_db):
+def test_save_daily_upsert_on_duplicate(mem_db):
+    """同一 (code, date) 重复入库时 UPSERT：不产生重复行，且新值生效。"""
     save_daily_to_db(_daily_df(tradestatus=1), mem_db)
     save_daily_to_db(_daily_df(tradestatus=0), mem_db)  # 同一 (code, date)
     count = mem_db.execute("SELECT COUNT(*) FROM STOCK_DAILY").fetchone()[0]
-    assert count == 1  # INSERT OR REPLACE，不产生重复
+    assert count == 1
+    row = mem_db.execute("SELECT tradestatus FROM STOCK_DAILY").fetchone()
+    assert row[0] == 0  # ON CONFLICT DO UPDATE 已生效
 
 
 def test_save_daily_normalizes_tradestatus_nan(mem_db):
@@ -122,6 +125,23 @@ def test_save_shares_only_updates_share_fields(mem_db):
     row = mem_db.execute("SELECT pe, total_shares FROM DAILY_BASIC").fetchone()
     assert row[0] == 35.0           # pe 未变
     assert row[1] == 1260000000     # total_shares 已更新
+
+
+def test_save_shares_coalesce_existing_not_overwritten(mem_db):
+    """黑盒：先写非空 shares，再写 None shares，既有值应保持不变（COALESCE 保护）。"""
+    save_shares_to_db(pd.DataFrame({
+        "code": ["600519.SH"], "date": ["2023-01-03"],
+        "total_shares": [1260000000], "float_shares": [1200000000],
+    }), mem_db)
+    save_shares_to_db(pd.DataFrame({
+        "code": ["600519.SH"], "date": ["2023-01-03"],
+        "total_shares": [None], "float_shares": [None],
+    }), mem_db)
+    row = mem_db.execute(
+        "SELECT total_shares, float_shares FROM DAILY_BASIC"
+    ).fetchone()
+    assert row[0] == 1260000000
+    assert row[1] == 1200000000
 
 
 # ── save_margin_summary_to_db ─────────────────────────────────────────────────

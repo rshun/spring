@@ -9,6 +9,7 @@ from util.myutil import (
     get_yesterday,
     import_source_module,
     get_lday_path,
+    get_default_dbfile,
 )
 
 
@@ -119,3 +120,20 @@ def test_get_lday_path_nonexistent_dir_raises_file_not_found():
     with patch("util.config.get_config", return_value={"local_paths": {"tdx_vipdoc": "C:\\nonexistent_xyz_dir"}}):
         with pytest.raises(FileNotFoundError):
             get_lday_path("sh")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_get_lday_path_local_paths_null_raises_value_error():
+    """YAML 中 `local_paths:`（值为 null）时应抛 ValueError，而不是 AttributeError。"""
+    with patch("util.config.get_config", return_value={"local_paths": None}):
+        with pytest.raises(ValueError, match="tdx_vipdoc"):
+            get_lday_path("sh")
+
+
+# ── get_default_dbfile ────────────────────────────────────────────────────────
+
+def test_get_default_dbfile_local_paths_null_fallback():
+    """YAML 中 `local_paths:`（值为 null）时回退到默认路径，不抛 AttributeError。"""
+    with patch("util.config.get_config", return_value={"local_paths": None}):
+        result = get_default_dbfile()
+    assert result.name == "quant.db"

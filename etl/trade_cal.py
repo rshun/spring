@@ -11,15 +11,7 @@ logger = logging.getLogger("etl.trade_cal")
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="获取交易日 (支持多源)"
-    )
-
-    parser.add_argument(
-        '-s', '--source',
-        type=str,
-        choices=['bstock'],
-        default='bstock',
-        help='指定数据源类型: bstock数据源 (默认 bstock数据源)'
+        description="获取交易日"
     )
 
     parser.add_argument(
@@ -34,6 +26,14 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         default=f"{datetime.now().year + 1}1231",
         help='结束日期 (格式: YYYYMMDD),默认次年最后一天'
+    )
+
+    parser.add_argument(
+        '-s', '--source',
+        type=str,
+        choices=['bstock'],
+        default='bstock',
+        help='指定数据源类型: bstock数据源 (默认 bstock数据源)'
     )
 
     return parser.parse_args()

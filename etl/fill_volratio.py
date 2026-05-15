@@ -20,15 +20,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-b', '--begin',
         type=str,
-        default=myutil.get_yesterday(),
-        help='指定交易日期 (格式: YYYYMMDD)，默认为T-1'
+        default=None,
+        help='指定起始日期 (格式: YYYYMMDD)，默认为T-1'
     )
 
     parser.add_argument(
         '-e', '--end',
         type=str,
-        default=myutil.get_yesterday(),
-        help='指定交易日期 (格式: YYYYMMDD)，默认为T-1'
+        default=None,
+        help='指定结束日期 (格式: YYYYMMDD)，默认: 仅传 -b 时为今天，否则为T-1'
     )
 
     parser.add_argument(
@@ -51,7 +51,17 @@ def parse_arguments() -> argparse.Namespace:
         help='强制运行, 即使当前日期不是交易日'
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # 默认日期: 仅指定 -b 时, -e 取今天; 否则两端都默认 T-1
+    if args.begin is None:
+        args.begin = myutil.get_yesterday()
+        if args.end is None:
+            args.end = myutil.get_yesterday()
+    elif args.end is None:
+        args.end = myutil.get_today()
+
+    return args
 
 
 def check_parameters(begin: str, end: str, forcerun: bool) -> bool:

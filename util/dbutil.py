@@ -204,8 +204,8 @@ def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None
             SELECT code, CAST(date AS DATE), total_shares, float_shares
             FROM temp_shares
             ON CONFLICT (code, trade_date) DO UPDATE
-            SET total_shares = EXCLUDED.total_shares,
-                float_shares = EXCLUDED.float_shares
+            SET total_shares = COALESCE(EXCLUDED.total_shares, DAILY_BASIC.total_shares),
+                float_shares = COALESCE(EXCLUDED.float_shares, DAILY_BASIC.float_shares)
         """)
         logger.info(f"[入库] 成功合并 {len(df)} 条股本数据到 DAILY_BASIC")
     except Exception as e:
@@ -224,7 +224,7 @@ def save_daily_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
         df = _normalize_daily_df(df)
         conn.register("temp_stock_daily", df)
         conn.execute("""
-            INSERT OR REPLACE INTO STOCK_DAILY
+            INSERT INTO STOCK_DAILY
                 (code, date, open, high, low, close, pre_close, tradestatus, volume, amount)
             SELECT
                 code,
@@ -233,6 +233,15 @@ def save_daily_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
                 pre_close, tradestatus,
                 volume, amount
             FROM temp_stock_daily
+            ON CONFLICT (code, date) DO UPDATE SET
+                open        = EXCLUDED.open,
+                high        = EXCLUDED.high,
+                low         = EXCLUDED.low,
+                close       = EXCLUDED.close,
+                pre_close   = EXCLUDED.pre_close,
+                tradestatus = EXCLUDED.tradestatus,
+                volume      = EXCLUDED.volume,
+                amount      = EXCLUDED.amount
         """)
         logger.info("行情数据入库成功。")
     except Exception as e:
@@ -298,9 +307,18 @@ def save_index_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
         conn.register("temp_index_daily", df)
         conn.execute("""
-            INSERT OR REPLACE INTO STOCK_DAILY (code, date, open, high, low, close, pre_close, tradestatus, volume, amount)
+            INSERT INTO STOCK_DAILY (code, date, open, high, low, close, pre_close, tradestatus, volume, amount)
             SELECT code, CAST(date AS DATE), open, high, low, close, pre_close, tradestatus, volume, amount
             FROM temp_index_daily
+            ON CONFLICT (code, date) DO UPDATE SET
+                open        = EXCLUDED.open,
+                high        = EXCLUDED.high,
+                low         = EXCLUDED.low,
+                close       = EXCLUDED.close,
+                pre_close   = EXCLUDED.pre_close,
+                tradestatus = EXCLUDED.tradestatus,
+                volume      = EXCLUDED.volume,
+                amount      = EXCLUDED.amount
         """)
         logger.info("指数数据入库成功。")
     except Exception as e:

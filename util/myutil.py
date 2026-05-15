@@ -53,7 +53,7 @@ def get_default_dbfile() -> Path:
         数据库的文件名
     """
     from util.config import get_config
-    db_path = get_config().get("local_paths", {}).get("db", "").strip()
+    db_path = (get_config().get("local_paths") or {}).get("db", "").strip()
     if not db_path:
         db_path = str(Path.home() / "data" / "quant.db")
     return Path(db_path).expanduser()
@@ -71,7 +71,7 @@ def get_lday_path(market: str | None = None) -> Path:
         market_dir = str(market).strip()
         # 延迟导入避免循环依赖（util.config 不依赖 myutil）
         from util.config import get_config
-        vipdoc_root = get_config().get("local_paths", {}).get("tdx_vipdoc")
+        vipdoc_root = (get_config().get("local_paths") or {}).get("tdx_vipdoc")
         if not vipdoc_root:
             raise ValueError("config.yaml 缺少 local_paths.tdx_vipdoc 配置")
         lday_path = Path(vipdoc_root) / market_dir / "lday"

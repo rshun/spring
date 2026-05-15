@@ -171,7 +171,7 @@ def historyfinancialreader(filepath):
 
 
 def list_cw_files(directory: Path, ext_name: str) -> list[str]:
-    """列出目录中 gpcw????????.ext 格式的文件"""
+    """列出目录中 gpcwYYYYMMDD.<ext_name> 格式的通达信财务文件"""
     if not directory.exists():
         return []
     return [

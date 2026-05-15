@@ -391,7 +391,9 @@ def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
             pass
 
 
-def update_price_limits_by_range(start_date: str, end_date: str, markets: list[str] | None = None):
+def update_price_limits_by_range(start_date: str, end_date: str,
+                                 markets: list[str] | None = None,
+                                 codes: list[str] | None = None):
     """计算并批量更新指定日期区间内的涨跌停价"""
     if not markets:
         markets = ["ALL"]
@@ -408,6 +410,15 @@ def update_price_limits_by_range(start_date: str, end_date: str, markets: list[s
             placeholders = ", ".join(["?"] * len(markets))
             market_filter = f"AND i.exchange IN ({placeholders})"
             market_params = list(markets)
+
+        code_filter = ""
+        code_params: list = []
+        if codes:
+            if isinstance(codes, str):
+                codes = [codes]
+            placeholders = ", ".join(["?"] * len(codes))
+            code_filter = f"AND d.code IN ({placeholders})"
+            code_params = list(codes)
 
         # 0.000001 是浮点加法补偿，确保恰好在临界值时 ROUND 向上进位
         calc_sql = f"""
@@ -428,6 +439,7 @@ def update_price_limits_by_range(start_date: str, end_date: str, markets: list[s
                   AND d.pre_close != -1
                   AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                   {market_filter}
+                  {code_filter}
             ),
             calc_rate AS (
                 SELECT
@@ -498,7 +510,7 @@ def update_price_limits_by_range(start_date: str, end_date: str, markets: list[s
               AND DAILY_BASIC.trade_date = t.date;
         """
 
-        params: list = [start_date, end_date, *market_params]
+        params: list = [start_date, end_date, *market_params, *code_params]
         logger.info("正在执行批量更新 SQL (这可能需要几秒钟)...")
         con.execute(calc_sql, params)
         logger.info("批量更新完成。")
@@ -863,7 +875,7 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                 ON db.code = ce.code
                 AND db.trade_date >= ce.date
             WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-                AND i.board IN ('MAIN', 'STAR', 'GEM')
+                AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                 {code_filter}
                 {exchange_filter}
         )
@@ -888,7 +900,7 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
             FROM DAILY_BASIC db
             JOIN STOCK_INFO i ON db.code = i.code
             WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-                AND i.board IN ('MAIN', 'STAR', 'GEM')
+                AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                 {code_filter}
                 {exchange_filter}
         """
@@ -908,7 +920,7 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
             FROM DAILY_BASIC db
             JOIN STOCK_INFO i ON db.code = i.code
             WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-                AND i.board IN ('MAIN', 'STAR', 'GEM')
+                AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                 AND db.total_shares IS NOT NULL
                 {code_filter}
                 {exchange_filter}
@@ -961,7 +973,7 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
           AND db.trade_date  = sd.date
           AND db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
           AND db.total_shares IS NOT NULL
-          AND i.board IN ('MAIN', 'STAR', 'GEM')
+          AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
           {code_filter}
           {exchange_filter};
     """
@@ -980,7 +992,7 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
             JOIN STOCK_INFO i ON db.code = i.code
             WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 AND db.total_mv IS NOT NULL
-                AND i.board IN ('MAIN', 'STAR', 'GEM')
+                AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                 {code_filter}
                 {exchange_filter}
         """

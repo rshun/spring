@@ -5,7 +5,6 @@
   2、CAPITAL_DETAIL 表已有股本变化数据
 
   注意:
-  - 京市(BJ)暂时不更新
   - 新股如果 CAPITAL_DETAIL 无数据则跳过
 """
 import argparse
@@ -25,15 +24,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-b', '--begin',
         type=str,
-        default=myutil.get_yesterday(),
+        default=None,
         help='起始日期 (格式: YYYYMMDD)，默认为T-1'
     )
 
     parser.add_argument(
         '-e', '--end',
         type=str,
-        default=myutil.get_yesterday(),
-        help='结束日期 (格式: YYYYMMDD)，默认为T-1'
+        default=None,
+        help='结束日期 (格式: YYYYMMDD)，默认: 仅传 -b 时为今天，否则为T-1'
     )
 
     parser.add_argument(
@@ -44,10 +43,10 @@ def parse_arguments() -> argparse.Namespace:
 
     parser.add_argument(
         '-x', '--exchanges', nargs='+',
-        default=['sh', 'sz'],
+        default=['all'],
         type=str.lower,
         choices=['sh', 'sz', 'bj', 'all'],
-        help='指定交易所范围: sh (沪), sz (深), bj (北), all (全部)，默认 sh sz (排除北交所)'
+        help='指定交易所范围: sh (沪), sz (深), bj (北), all (默认全部)'
     )
 
     parser.add_argument(
@@ -56,7 +55,17 @@ def parse_arguments() -> argparse.Namespace:
         help='强制运行, 即使当前日期不是交易日'
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # 默认日期: 仅指定 -b 时, -e 取今天; 否则两端都默认 T-1
+    if args.begin is None:
+        args.begin = myutil.get_yesterday()
+        if args.end is None:
+            args.end = myutil.get_yesterday()
+    elif args.end is None:
+        args.end = myutil.get_today()
+
+    return args
 
 
 def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
@@ -105,7 +114,7 @@ def main() -> None:
     logger.info("回填股本数据任务启动")
     logger.info(f"     开始日期: {begin_date}")
     logger.info(f"     结束日期: {end_date}")
-    logger.info(f"     交易所:   {exchanges if exchanges else '全部(排除北交所由SQL控制)'}")
+    logger.info(f"     交易所:   {exchanges if exchanges else '全部'}")
     logger.info(f"     股票代码: {codes if codes else '全量'}")
     logger.info("=" * 60)
 

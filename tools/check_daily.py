@@ -206,6 +206,57 @@ def _find_missing_codes(conn: duckdb.DuckDBPyConnection,
     return conn.execute(sql, params).fetchall()
 
 
+def _check_is_st_null(conn: duckdb.DuckDBPyConnection,
+                      begin_date: str, end_date: str,
+                      ex_filter: str, code_filter: str, code_params: list[str]) -> int:
+    """检查 DAILY_BASIC.is_st 字段为 NULL 的记录，停牌股票不计入"""
+    label = "is_st字段   "
+    sql = f"""
+    WITH trading_days AS (
+        SELECT cal_date FROM TRADE_CAL
+        WHERE is_open = 1 AND cal_date BETWEEN ? AND ?
+    ),
+    active_stocks AS (
+        SELECT code, name FROM STOCK_INFO i
+        WHERE board NOT IN ('INDEX', 'BJ')
+          AND list_status = 'L'
+          {ex_filter}
+          {code_filter}
+    ),
+    suspended AS (
+        SELECT code, date FROM STOCK_DAILY
+        WHERE tradestatus = 0
+          AND date BETWEEN ? AND ?
+    )
+    SELECT b.trade_date, s.code, s.name
+    FROM DAILY_BASIC b
+    INNER JOIN active_stocks s ON b.code = s.code
+    INNER JOIN trading_days t ON b.trade_date = t.cal_date
+    LEFT JOIN suspended p ON p.code = b.code AND p.date = b.trade_date
+    WHERE b.is_st IS NULL
+      AND p.code IS NULL
+    ORDER BY b.trade_date, s.code
+    """
+    params = [begin_date, end_date, *code_params, begin_date, end_date]
+    rows = conn.execute(sql, params).fetchall()
+
+    if not rows:
+        logger.info(f"[{label}]    完整 OK")
+        return 0
+
+    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = csv_dir / f"check_isst_null_{begin_date}_{end_date}.csv"
+    with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "code", "name"])
+        for trade_date, code, name in rows:
+            writer.writerow([str(trade_date), code, name])
+
+    logger.warning(f"[{label}]    发现 {len(rows)} 条 is_st 为 NULL，明细已写入: {csv_file}")
+    return len(rows)
+
+
 def _check_table(conn: duckdb.DuckDBPyConnection,
                  label: str, table: str, date_col: str,
                  begin_date: str, end_date: str,
@@ -281,6 +332,8 @@ def main() -> int:
                                       begin_date, end_date, ex_filter, code_filter, code_params)
         total_missing += _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
                                       begin_date, end_date, ex_filter, code_filter, code_params)
+        total_missing += _check_is_st_null(conn, begin_date, end_date,
+                                           ex_filter, code_filter, code_params)
         if args.include_index:
             total_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
                                           begin_date, end_date, ex_filter, code_filter, code_params,

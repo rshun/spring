@@ -317,6 +317,7 @@ def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
     WHERE COALESCE(tradestatus, 1) <> 0
       AND close_prev IS NOT NULL
       AND pre_close IS NOT NULL
+      -- 四舍五入到 4 位后比较,过滤浮点尾差;有效阈值≈0.01 元(A股报价精度为分)
       AND ROUND(ABS(pre_close - theory), 4) > 0.01
     ORDER BY xdr_date, code
     """

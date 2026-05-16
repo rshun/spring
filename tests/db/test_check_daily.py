@@ -1,6 +1,6 @@
 import pytest
 
-from tools.check_daily import _query_xdr_preclose_mismatches, _count_xdr_uncomputable
+from tools.check_daily import _query_xdr_preclose_mismatches, _count_xdr_uncomputable, _check_xdr_preclose
 from tests.conftest import insert_stock_info, insert_trade_cal
 
 
@@ -130,4 +130,71 @@ def test_count_uncomputable_excludes_suspended(mem_db):
     n = _count_xdr_uncomputable(
         mem_db, "2023-05-09", "2023-05-09", "", "", []
     )
+    assert n == 0
+
+
+def test_pure_bonus_share_formula(mem_db):
+    """纯送股:close_prev=10, bonus_share=10(每10股送10) →
+    theory=10/(1+1)=5.0。pre_close=10 → 命中,theory=5.0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-06-01", "2023-06-02"])
+    _ins_daily(mem_db, "600519.SH", "2023-06-01", close=10.0, pre_close=10.0)
+    _ins_daily(mem_db, "600519.SH", "2023-06-02", close=5.0, pre_close=10.0)
+    _ins_xdr(mem_db, "600519.SH", "2023-06-02", bonus_share=10)
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2023-06-02", "2023-06-02", "", "", []
+    )
+    assert len(rows) == 1
+    assert abs(rows[0][5] - 5.0) < 1e-9
+
+
+def test_allotment_formula(mem_db):
+    """含配股:close_prev=10, allotment_price=5, allotment_share=5(每10股配5) →
+    theory=(10 + 5*0.5)/(1+0.5)=12.5/1.5≈8.3333。pre_close=10 → 命中。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-07-03", "2023-07-04"])
+    _ins_daily(mem_db, "600519.SH", "2023-07-03", close=10.0, pre_close=10.0)
+    _ins_daily(mem_db, "600519.SH", "2023-07-04", close=8.3, pre_close=10.0)
+    _ins_xdr(mem_db, "600519.SH", "2023-07-04",
+             allotment_price=5, allotment_share=5)
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2023-07-04", "2023-07-04", "", "", []
+    )
+    assert len(rows) == 1
+    assert abs(rows[0][5] - (12.5 / 1.5)) < 1e-9
+
+
+def test_check_xdr_preclose_wrapper_writes_csv_and_returns_count(mem_db, tmp_path, monkeypatch):
+    """包装函数:有不一致 → 返回条数并写 CSV;表头与精度正确。"""
+    import tools.check_daily as cd
+
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-08-01", "2023-08-02"])
+    _ins_daily(mem_db, "600519.SH", "2023-08-01", close=10.0, pre_close=10.0)
+    _ins_daily(mem_db, "600519.SH", "2023-08-02", close=5.0, pre_close=10.0)
+    _ins_xdr(mem_db, "600519.SH", "2023-08-02", bonus_share=10)
+
+    # 把 csv 目录重定向到 tmp_path,避免污染项目 csv/
+    fake_file = tmp_path / "csv" / "x"
+    monkeypatch.setattr(cd, "__file__", str(fake_file))
+
+    n = _check_xdr_preclose(mem_db, "2023-08-02", "2023-08-02", "", "", [])
+    assert n == 1
+
+    out = tmp_path / "csv" / "check_preclose_xdr_2023-08-02_2023-08-02.csv"
+    assert out.exists()
+    content = out.read_text(encoding="utf-8-sig").splitlines()
+    assert content[0] == "date,code,name,close_prev,pre_close,theory_preclose,diff"
+    assert "600519.SH" in content[1]
+
+
+def test_check_xdr_preclose_wrapper_clean_returns_zero(mem_db):
+    """包装函数:无不一致且无无法计算 → 返回 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-09-01", "2023-09-04"])
+    _ins_daily(mem_db, "600519.SH", "2023-09-01", close=10.0, pre_close=10.0)
+    # 除权日 pre_close 恰为理论价(纯送股 theory=5.0)
+    _ins_daily(mem_db, "600519.SH", "2023-09-04", close=5.0, pre_close=5.0)
+    _ins_xdr(mem_db, "600519.SH", "2023-09-04", bonus_share=10)
+    n = _check_xdr_preclose(mem_db, "2023-09-04", "2023-09-04", "", "", [])
     assert n == 0

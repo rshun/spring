@@ -51,3 +51,57 @@ def test_mismatch_detected_with_bonus_and_dividend(mem_db):
     assert close_prev == 11.0
     assert pre_close == 11.0
     assert abs(theory - 5.25) < 1e-9
+
+
+def test_tolerance_boundary(mem_db):
+    """纯现金分红场景:close_prev=10, dividend=1(每10股=0.1/股) →
+    theory=(10-0.1)/1=9.9。pre_close=9.91 → diff=0.01 不报;
+    pre_close=9.92 → diff=0.02 报。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-02-01", "2023-02-02"])
+    _ins_daily(mem_db, "600519.SH", "2023-02-01", close=10.0, pre_close=10.0)
+
+    # 边界内:diff = 0.01,不报
+    _ins_daily(mem_db, "600519.SH", "2023-02-02", close=9.9, pre_close=9.91)
+    _ins_xdr(mem_db, "600519.SH", "2023-02-02", dividend=1)
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2023-02-02", "2023-02-02", "", "", []
+    )
+    assert rows == []
+
+    # 改成 diff = 0.02,应报
+    mem_db.execute(
+        "UPDATE STOCK_DAILY SET pre_close = 9.92 "
+        "WHERE code = '600519.SH' AND date = '2023-02-02'"
+    )
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2023-02-02", "2023-02-02", "", "", []
+    )
+    assert len(rows) == 1
+
+
+def test_suspended_skipped(mem_db):
+    """除权日停牌(tradestatus=0)不参与校验。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-03-01", "2023-03-02"])
+    _ins_daily(mem_db, "600519.SH", "2023-03-01", close=10.0, pre_close=10.0)
+    _ins_daily(mem_db, "600519.SH", "2023-03-02", close=10.0,
+               pre_close=10.0, tradestatus=0)
+    _ins_xdr(mem_db, "600519.SH", "2023-03-02", dividend=20)  # theory≠10
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2023-03-02", "2023-03-02", "", "", []
+    )
+    assert rows == []
+
+
+def test_prev_close_missing_not_returned(mem_db):
+    """上一交易日无收盘记录 → 无法计算,不在不一致结果中返回。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-04-03", "2023-04-04"])
+    # 不写 04-03 的 STOCK_DAILY(close_prev 缺失)
+    _ins_daily(mem_db, "600519.SH", "2023-04-04", close=9.0, pre_close=9.0)
+    _ins_xdr(mem_db, "600519.SH", "2023-04-04", dividend=20)
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2023-04-04", "2023-04-04", "", "", []
+    )
+    assert rows == []

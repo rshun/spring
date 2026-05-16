@@ -257,6 +257,69 @@ def _check_is_st_null(conn: duckdb.DuckDBPyConnection,
     return len(rows)
 
 
+# 除权参考价公式(通达信口径,每10股字段折算为每股)
+_XDR_THEORY_SQL = (
+    "(close_prev - dividend/10 + allotment_price * allotment_share/10) "
+    "/ (1 + bonus_share/10 + allotment_share/10)"
+)
+
+
+def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
+                                   begin_date: str, end_date: str,
+                                   ex_filter: str, code_filter: str,
+                                   code_params: list[str]) -> list[tuple]:
+    """
+    查询除权日 pre_close 与理论除权参考价不一致(绝对差 > 0.01 元)的记录。
+    仅 category='除权除息'、A股(board NOT IN ('INDEX','BJ'))、list_status='L';
+    停牌(tradestatus=0)、上一交易日收盘缺失、当日 pre_close 缺失的记录不在此返回。
+    返回 [(xdr_date, code, name, close_prev, pre_close, theory), ...]
+    """
+    sql = f"""
+    WITH xdr_events AS (
+        SELECT c.code, c.date AS xdr_date, i.name,
+               COALESCE(c.dividend, 0)        AS dividend,
+               COALESCE(c.allotment_price, 0) AS allotment_price,
+               COALESCE(c.bonus_share, 0)     AS bonus_share,
+               COALESCE(c.allotment_share, 0) AS allotment_share
+        FROM CAPITAL_DETAIL c
+        INNER JOIN STOCK_INFO i ON i.code = c.code
+        WHERE c.category = '除权除息'
+          AND c.date BETWEEN ? AND ?
+          AND i.board NOT IN ('INDEX', 'BJ')
+          AND i.list_status = 'L'
+          {ex_filter}
+          {code_filter}
+    ),
+    prev_day AS (
+        SELECT e.code, e.xdr_date,
+               (SELECT MAX(t.cal_date) FROM TRADE_CAL t
+                 WHERE t.is_open = 1 AND t.cal_date < e.xdr_date) AS prev_date
+        FROM xdr_events e
+    ),
+    joined AS (
+        SELECT e.code, e.xdr_date, e.name,
+               e.dividend, e.allotment_price, e.bonus_share, e.allotment_share,
+               pd1.close       AS close_prev,
+               cur.pre_close   AS pre_close,
+               cur.tradestatus AS tradestatus
+        FROM xdr_events e
+        JOIN prev_day p ON p.code = e.code AND p.xdr_date = e.xdr_date
+        LEFT JOIN STOCK_DAILY pd1 ON pd1.code = e.code AND pd1.date = p.prev_date
+        LEFT JOIN STOCK_DAILY cur ON cur.code = e.code AND cur.date = e.xdr_date
+    )
+    SELECT xdr_date, code, name, close_prev, pre_close,
+           {_XDR_THEORY_SQL} AS theory
+    FROM joined
+    WHERE COALESCE(tradestatus, 1) <> 0
+      AND close_prev IS NOT NULL
+      AND pre_close IS NOT NULL
+      AND ROUND(ABS(pre_close - ({_XDR_THEORY_SQL})), 4) > 0.01
+    ORDER BY xdr_date, code
+    """
+    params = [begin_date, end_date, *code_params]
+    return conn.execute(sql, params).fetchall()
+
+
 def _check_table(conn: duckdb.DuckDBPyConnection,
                  label: str, table: str, date_col: str,
                  begin_date: str, end_date: str,

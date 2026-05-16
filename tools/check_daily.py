@@ -324,6 +324,77 @@ def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
     return conn.execute(sql, params).fetchall()
 
 
+def _count_xdr_uncomputable(conn: duckdb.DuckDBPyConnection,
+                            begin_date: str, end_date: str,
+                            ex_filter: str, code_filter: str,
+                            code_params: list[str]) -> int:
+    """统计除权且非停牌、但因上一交易日收盘或当日 pre_close 缺失而无法计算理论价的记录数"""
+    sql = f"""
+    WITH xdr_events AS (
+        SELECT c.code, c.date AS xdr_date
+        FROM CAPITAL_DETAIL c
+        INNER JOIN STOCK_INFO i ON i.code = c.code
+        WHERE c.category = '除权除息'
+          AND c.date BETWEEN ? AND ?
+          AND i.board NOT IN ('INDEX', 'BJ')
+          AND i.list_status = 'L'
+          {ex_filter}
+          {code_filter}
+    ),
+    prev_day AS (
+        SELECT e.code, e.xdr_date,
+               (SELECT MAX(t.cal_date) FROM TRADE_CAL t
+                 WHERE t.is_open = 1 AND t.cal_date < e.xdr_date) AS prev_date
+        FROM xdr_events e
+    )
+    SELECT COUNT(*)
+    FROM xdr_events e
+    JOIN prev_day p ON p.code = e.code AND p.xdr_date = e.xdr_date
+    LEFT JOIN STOCK_DAILY pd1 ON pd1.code = e.code AND pd1.date = p.prev_date
+    LEFT JOIN STOCK_DAILY cur ON cur.code = e.code AND cur.date = e.xdr_date
+    WHERE COALESCE(cur.tradestatus, 1) <> 0
+      AND (pd1.close IS NULL OR cur.pre_close IS NULL)
+    """
+    params = [begin_date, end_date, *code_params]
+    return conn.execute(sql, params).fetchone()[0]
+
+
+def _check_xdr_preclose(conn: duckdb.DuckDBPyConnection,
+                        begin_date: str, end_date: str,
+                        ex_filter: str, code_filter: str,
+                        code_params: list[str]) -> int:
+    """除权日 pre_close 校验:不一致写 CSV 并返回异常条数(计入 total_missing)"""
+    label = "除权前收价  "
+    uncomputable = _count_xdr_uncomputable(conn, begin_date, end_date,
+                                           ex_filter, code_filter, code_params)
+    if uncomputable:
+        logger.warning(
+            f"[{label}]    {uncomputable} 条除权记录因上一交易日收盘/当日pre_close缺失无法校验"
+        )
+
+    rows = _query_xdr_preclose_mismatches(conn, begin_date, end_date,
+                                          ex_filter, code_filter, code_params)
+    if not rows:
+        logger.info(f"[{label}]    完整 OK")
+        return 0
+
+    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = csv_dir / f"check_preclose_xdr_{begin_date}_{end_date}.csv"
+    with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "code", "name", "close_prev",
+                         "pre_close", "theory_preclose", "diff"])
+        for xdr_date, code, name, close_prev, pre_close, theory in rows:
+            diff = round(abs(pre_close - theory), 4)
+            writer.writerow([str(xdr_date), code, name,
+                             close_prev, pre_close, round(theory, 4), diff])
+
+    logger.warning(f"[{label}]    发现 {len(rows)} 条 pre_close 与除权理论价不一致，"
+                    f"明细已写入: {csv_file}")
+    return len(rows)
+
+
 def _check_table(conn: duckdb.DuckDBPyConnection,
                  label: str, table: str, date_col: str,
                  begin_date: str, end_date: str,

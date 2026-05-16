@@ -1,6 +1,6 @@
 import pytest
 
-from tools.check_daily import _query_xdr_preclose_mismatches
+from tools.check_daily import _query_xdr_preclose_mismatches, _count_xdr_uncomputable
 from tests.conftest import insert_stock_info, insert_trade_cal
 
 
@@ -105,3 +105,15 @@ def test_prev_close_missing_not_returned(mem_db):
         mem_db, "2023-04-04", "2023-04-04", "", "", []
     )
     assert rows == []
+
+
+def test_count_uncomputable_counts_missing_prev_close(mem_db):
+    """除权且非停牌、但上一交易日收盘缺失 → 计入"无法计算"计数。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-04-03", "2023-04-04"])
+    _ins_daily(mem_db, "600519.SH", "2023-04-04", close=9.0, pre_close=9.0)
+    _ins_xdr(mem_db, "600519.SH", "2023-04-04", dividend=20)
+    n = _count_xdr_uncomputable(
+        mem_db, "2023-04-04", "2023-04-04", "", "", []
+    )
+    assert n == 1

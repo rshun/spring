@@ -9,12 +9,14 @@
   -x, --exchanges     交易所范围: sh / sz / bj / all (默认 all)
   -c, --codes         指定股票代码 (可选)
   -i, --include-index 同时校验指数日线数据 (默认不校验)
+  -f, --forcerun      强制运行，即使当前日期不是交易日
 
 用法:
   python -m tools.check_daily -b 20260325
   python -m tools.check_daily -b 20260301 -e 20260325
   python -m tools.check_daily -b 20260325 -x sh sz
   python -m tools.check_daily -b 20260325 -i
+  python -m tools.check_daily -b 20260328 -f
 """
 import argparse
 import csv
@@ -68,18 +70,25 @@ def parse_arguments() -> argparse.Namespace:
         help='同时校验指数日线数据 (默认不校验)'
     )
 
+    parser.add_argument(
+        '-f', '--forcerun',
+        action='store_true',
+        help='强制运行, 即使当前日期不是交易日'
+    )
+
     return parser.parse_args()
 
 
-def check_parameters(begin: str, end: str) -> bool:
-    ctx = {"begin": begin, "end": end}
+def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
+    ctx = {"begin": begin, "end": end, "forcerun": forcerun}
     validators = [
         pv.v_dbfile_exists(),
         pv.v_yyyymmdd("begin"),
         pv.v_yyyymmdd("end"),
         pv.v_date_order("begin", "end"),
-        pv.v_single_day_must_be_trading_day("begin", "end"),
     ]
+    if not forcerun:
+        validators.append(pv.v_single_day_must_be_trading_day("begin", "end"))
     return pv.run(ctx, validators)
 
 
@@ -276,13 +285,15 @@ def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
     """
     sql = f"""
     WITH xdr_events AS (
-        SELECT c.code, c.date AS xdr_date, i.name,
+        -- CAPITAL_DETAIL.code 是裸 symbol(无交易所后缀),需用 i.symbol 关联;
+        -- 对外/下游统一用带后缀的规范代码 i.code
+        SELECT i.code AS code, c.date AS xdr_date, i.name,
                COALESCE(c.dividend, 0)        AS dividend,
                COALESCE(c.allotment_price, 0) AS allotment_price,
                COALESCE(c.bonus_share, 0)     AS bonus_share,
                COALESCE(c.allotment_share, 0) AS allotment_share
         FROM CAPITAL_DETAIL c
-        INNER JOIN STOCK_INFO i ON i.code = c.code
+        INNER JOIN STOCK_INFO i ON i.symbol = c.code
         WHERE c.category = '除权除息'
           AND c.date BETWEEN ? AND ?
           AND i.board NOT IN ('INDEX', 'BJ')
@@ -333,9 +344,10 @@ def _count_xdr_uncomputable(conn: duckdb.DuckDBPyConnection,
     sql = f"""
     -- xdr_events/prev_day CTEs mirror _query_xdr_preclose_mismatches — keep WHERE filters in sync
     WITH xdr_events AS (
-        SELECT c.code, c.date AS xdr_date
+        -- CAPITAL_DETAIL.code 是裸 symbol(无交易所后缀),需用 i.symbol 关联
+        SELECT i.code AS code, c.date AS xdr_date
         FROM CAPITAL_DETAIL c
-        INNER JOIN STOCK_INFO i ON i.code = c.code
+        INNER JOIN STOCK_INFO i ON i.symbol = c.code
         WHERE c.category = '除权除息'
           AND c.date BETWEEN ? AND ?
           AND i.board NOT IN ('INDEX', 'BJ')
@@ -444,7 +456,7 @@ def main() -> int:
     """返回值: 0=完整, 1=有缺失, 2=检查出错"""
     myutil.configure_etl_logging()
     args = parse_arguments()
-    if not check_parameters(args.begin, args.end):
+    if not check_parameters(args.begin, args.end, args.forcerun):
         return 2
 
     begin_date = myutil.trans_datestr_format(args.begin)
@@ -457,6 +469,7 @@ def main() -> int:
     logger.info(f"     交易所:   {args.exchanges}")
     logger.info(f"     指定代码: {args.codes if args.codes else '无 (检查全市场)'}")
     logger.info(f"     校验指数: {'是' if args.include_index else '否'}")
+    logger.info(f"     强制运行: {'是' if args.forcerun else '否'}")
     logger.info(f"     除权校验: 是 (除权日 pre_close 与理论除权价比对)")
     logger.info("=" * 60)
 

@@ -24,11 +24,15 @@ def _ins_daily(conn, code, date, close=None, pre_close=None, tradestatus=1):
 
 def _ins_xdr(conn, code, date, dividend=0, allotment_price=0,
              bonus_share=0, allotment_share=0):
+    # 生产数据中 CAPITAL_DETAIL.code 是不带交易所后缀的裸 symbol
+    # (来自通达信 gbbq),与 STOCK_INFO.code/STOCK_DAILY.code 的带后缀形式不同。
+    # fixture 必须复现这一点,否则会掩盖 symbol/code join 失配的 bug。
+    symbol = str(code).split(".")[0]
     conn.execute(
         "INSERT INTO CAPITAL_DETAIL (code, date, category, dividend, "
         "allotment_price, bonus_share, allotment_share, updated_at) "
         "VALUES (?, ?, '除权除息', ?, ?, ?, ?, now())",
-        [code, date, dividend, allotment_price, bonus_share, allotment_share],
+        [symbol, date, dividend, allotment_price, bonus_share, allotment_share],
     )
 
 
@@ -186,6 +190,28 @@ def test_check_xdr_preclose_wrapper_writes_csv_and_returns_count(mem_db, tmp_pat
     content = out.read_text(encoding="utf-8-sig").splitlines()
     assert content[0] == "date,code,name,close_prev,pre_close,theory_preclose,diff"
     assert "600519.SH" in content[1]
+
+
+def test_regression_002763_capital_detail_uses_bare_symbol(mem_db):
+    """回归: CAPITAL_DETAIL.code 为裸 symbol(002763),STOCK_INFO/STOCK_DAILY
+    为带后缀(002763.SZ)。除权日 pre_close 仍等于前收(9.87)而非除权理论价,
+    必须被检出,且返回带后缀的规范代码。
+    现实案例: 002763 2026-05-15 每10股分红 8.0 → theory=9.87-0.8=9.07。"""
+    _seed_stock(mem_db, symbol="002763", exchange="SZ")
+    _ins_cal(mem_db, ["2026-05-14", "2026-05-15"])
+    _ins_daily(mem_db, "002763.SZ", "2026-05-14", close=9.87, pre_close=9.95)
+    _ins_daily(mem_db, "002763.SZ", "2026-05-15", close=8.22, pre_close=9.87)
+    _ins_xdr(mem_db, "002763.SZ", "2026-05-15", dividend=8.0)
+
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2026-05-15", "2026-05-15", "", "", []
+    )
+    assert len(rows) == 1
+    xdr_date, code, name, close_prev, pre_close, theory = rows[0]
+    assert code == "002763.SZ"          # 输出带后缀的规范代码
+    assert close_prev == 9.87
+    assert pre_close == 9.87
+    assert abs(theory - 9.07) < 1e-9
 
 
 def test_check_xdr_preclose_wrapper_clean_returns_zero(mem_db):

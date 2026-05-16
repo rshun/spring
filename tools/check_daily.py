@@ -281,6 +281,10 @@ def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
     查询除权日 pre_close 与理论除权参考价不一致(绝对差 > 0.01 元)的记录。
     仅 category='除权除息'、A股(board NOT IN ('INDEX','BJ'))、list_status='L';
     停牌(tradestatus=0)、上一交易日收盘缺失、当日 pre_close 缺失的记录不在此返回。
+    "真实除权日"判据: 该股 ADJ_FACTOR.adjust_factor 相对上一交易日发生变化。
+    gbbq 的 除权除息.date 不可靠等于真实除权交易日(可能是股权登记日/未实施),
+    仅凭 CAPITAL_DETAIL 会大量误报;因此用独立的 ADJ_FACTOR 因子变化做闸门。
+    ADJ_FACTOR 在 xdr_date 或 prev_date 缺失时无法确认,该记录不判异常。
     返回 [(xdr_date, code, name, close_prev, pre_close, theory), ...]
     """
     sql = f"""
@@ -310,16 +314,21 @@ def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
     joined AS (
         SELECT e.code, e.xdr_date, e.name,
                e.dividend, e.allotment_price, e.bonus_share, e.allotment_share,
-               pd1.close       AS close_prev,
-               cur.pre_close   AS pre_close,
-               cur.tradestatus AS tradestatus
+               pd1.close          AS close_prev,
+               cur.pre_close      AS pre_close,
+               cur.tradestatus    AS tradestatus,
+               afc.adjust_factor  AS af_cur,
+               afp.adjust_factor  AS af_prev
         FROM xdr_events e
         JOIN prev_day p ON p.code = e.code AND p.xdr_date = e.xdr_date
         LEFT JOIN STOCK_DAILY pd1 ON pd1.code = e.code AND pd1.date = p.prev_date
         LEFT JOIN STOCK_DAILY cur ON cur.code = e.code AND cur.date = e.xdr_date
+        LEFT JOIN ADJ_FACTOR  afc ON afc.code = e.code AND afc.trade_date = e.xdr_date
+        LEFT JOIN ADJ_FACTOR  afp ON afp.code = e.code AND afp.trade_date = p.prev_date
     ),
     computed AS (
         SELECT code, xdr_date, name, close_prev, pre_close, tradestatus,
+               af_cur, af_prev,
                {_XDR_THEORY_SQL} AS theory
         FROM joined
     )
@@ -328,6 +337,10 @@ def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
     WHERE COALESCE(tradestatus, 1) <> 0
       AND close_prev IS NOT NULL
       AND pre_close IS NOT NULL
+      -- 闸门: ADJ_FACTOR 确认当天确实发生除权(因子相对上一交易日变化)
+      AND af_cur IS NOT NULL
+      AND af_prev IS NOT NULL
+      AND ABS(af_cur - af_prev) > 1e-9
       -- 四舍五入到 4 位后比较,过滤浮点尾差;有效阈值≈0.01 元(A股报价精度为分)
       AND ROUND(ABS(pre_close - theory), 4) > 0.01
     ORDER BY xdr_date, code
@@ -340,7 +353,8 @@ def _count_xdr_uncomputable(conn: duckdb.DuckDBPyConnection,
                             begin_date: str, end_date: str,
                             ex_filter: str, code_filter: str,
                             code_params: list[str]) -> int:
-    """统计除权且非停牌、但因上一交易日收盘或当日 pre_close 缺失而无法计算理论价的记录数"""
+    """统计已确认真实除权(ADJ_FACTOR 因子变化)、非停牌、但因上一交易日收盘
+    或当日 pre_close 缺失而无法计算理论价的记录数"""
     sql = f"""
     -- xdr_events/prev_day CTEs mirror _query_xdr_preclose_mismatches — keep WHERE filters in sync
     WITH xdr_events AS (
@@ -366,7 +380,13 @@ def _count_xdr_uncomputable(conn: duckdb.DuckDBPyConnection,
     JOIN prev_day p ON p.code = e.code AND p.xdr_date = e.xdr_date
     LEFT JOIN STOCK_DAILY pd1 ON pd1.code = e.code AND pd1.date = p.prev_date
     LEFT JOIN STOCK_DAILY cur ON cur.code = e.code AND cur.date = e.xdr_date
+    LEFT JOIN ADJ_FACTOR  afc ON afc.code = e.code AND afc.trade_date = e.xdr_date
+    LEFT JOIN ADJ_FACTOR  afp ON afp.code = e.code AND afp.trade_date = p.prev_date
     WHERE COALESCE(cur.tradestatus, 1) <> 0
+      -- 闸门: 仅统计 ADJ_FACTOR 确认确实发生除权的记录
+      AND afc.adjust_factor IS NOT NULL
+      AND afp.adjust_factor IS NOT NULL
+      AND ABS(afc.adjust_factor - afp.adjust_factor) > 1e-9
       AND (pd1.close IS NULL OR cur.pre_close IS NULL)
     """
     params = [begin_date, end_date, *code_params]

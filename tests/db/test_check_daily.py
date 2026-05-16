@@ -36,6 +36,21 @@ def _ins_xdr(conn, code, date, dividend=0, allotment_price=0,
     )
 
 
+def _ins_adj(conn, code, date, factor):
+    conn.execute(
+        "INSERT INTO ADJ_FACTOR (code, trade_date, fore_factor, back_factor, "
+        "adjust_factor, updated_at) VALUES (?, ?, ?, ?, ?, now())",
+        [code, date, factor, factor, factor],
+    )
+
+
+def _real_xdr(conn, code, prev_date, xdr_date):
+    """标记一次"真实除权": ADJ_FACTOR 在 prev_date→xdr_date 之间发生变化。
+    没有这一变化,新版校验会判定当天并未真实除权而跳过(防误报闸门)。"""
+    _ins_adj(conn, code, prev_date, 1.0)
+    _ins_adj(conn, code, xdr_date, 1.1)
+
+
 def test_mismatch_detected_with_bonus_and_dividend(mem_db):
     """送股+分红:theory=(close_prev - div/10 + 0)/(1+bonus/10).
     close_prev=11, dividend=5(每10股), bonus_share=10(每10股) →
@@ -45,6 +60,7 @@ def test_mismatch_detected_with_bonus_and_dividend(mem_db):
     _ins_daily(mem_db, "600519.SH", "2023-01-04", close=11.0, pre_close=10.0)
     _ins_daily(mem_db, "600519.SH", "2023-01-05", close=5.2, pre_close=11.0)
     _ins_xdr(mem_db, "600519.SH", "2023-01-05", dividend=5, bonus_share=10)
+    _real_xdr(mem_db, "600519.SH", "2023-01-04", "2023-01-05")
 
     rows = _query_xdr_preclose_mismatches(
         mem_db, "2023-01-05", "2023-01-05", "", "", []
@@ -60,10 +76,11 @@ def test_mismatch_detected_with_bonus_and_dividend(mem_db):
 def test_tolerance_boundary(mem_db):
     """纯现金分红场景:close_prev=10, dividend=1(每10股=0.1/股) →
     theory=(10-0.1)/1=9.9。pre_close=9.91 → diff=0.01 不报;
-    pre_close=9.92 → diff=0.02 报。"""
+    pre_close=9.92 → diff=0.02 报。(均为真实除权)"""
     _seed_stock(mem_db)
     _ins_cal(mem_db, ["2023-02-01", "2023-02-02"])
     _ins_daily(mem_db, "600519.SH", "2023-02-01", close=10.0, pre_close=10.0)
+    _real_xdr(mem_db, "600519.SH", "2023-02-01", "2023-02-02")
 
     # 边界内:diff = 0.01,不报
     _ins_daily(mem_db, "600519.SH", "2023-02-02", close=9.9, pre_close=9.91)
@@ -85,13 +102,14 @@ def test_tolerance_boundary(mem_db):
 
 
 def test_suspended_skipped(mem_db):
-    """除权日停牌(tradestatus=0)不参与校验。"""
+    """除权日停牌(tradestatus=0)不参与校验(即便是真实除权)。"""
     _seed_stock(mem_db)
     _ins_cal(mem_db, ["2023-03-01", "2023-03-02"])
     _ins_daily(mem_db, "600519.SH", "2023-03-01", close=10.0, pre_close=10.0)
     _ins_daily(mem_db, "600519.SH", "2023-03-02", close=10.0,
                pre_close=10.0, tradestatus=0)
     _ins_xdr(mem_db, "600519.SH", "2023-03-02", dividend=20)  # theory≠10
+    _real_xdr(mem_db, "600519.SH", "2023-03-01", "2023-03-02")
     rows = _query_xdr_preclose_mismatches(
         mem_db, "2023-03-02", "2023-03-02", "", "", []
     )
@@ -99,12 +117,13 @@ def test_suspended_skipped(mem_db):
 
 
 def test_prev_close_missing_not_returned(mem_db):
-    """上一交易日无收盘记录 → 无法计算,不在不一致结果中返回。"""
+    """真实除权但上一交易日无收盘记录 → 无法计算,不在不一致结果中返回。"""
     _seed_stock(mem_db)
     _ins_cal(mem_db, ["2023-04-03", "2023-04-04"])
-    # 不写 04-03 的 STOCK_DAILY(close_prev 缺失)
+    # 不写 04-03 的 STOCK_DAILY(close_prev 缺失);ADJ_FACTOR 仍齐全
     _ins_daily(mem_db, "600519.SH", "2023-04-04", close=9.0, pre_close=9.0)
     _ins_xdr(mem_db, "600519.SH", "2023-04-04", dividend=20)
+    _real_xdr(mem_db, "600519.SH", "2023-04-03", "2023-04-04")
     rows = _query_xdr_preclose_mismatches(
         mem_db, "2023-04-04", "2023-04-04", "", "", []
     )
@@ -112,11 +131,12 @@ def test_prev_close_missing_not_returned(mem_db):
 
 
 def test_count_uncomputable_counts_missing_prev_close(mem_db):
-    """除权且非停牌、但上一交易日收盘缺失 → 计入"无法计算"计数。"""
+    """真实除权、非停牌、但上一交易日收盘缺失 → 计入"无法计算"计数。"""
     _seed_stock(mem_db)
     _ins_cal(mem_db, ["2023-04-03", "2023-04-04"])
     _ins_daily(mem_db, "600519.SH", "2023-04-04", close=9.0, pre_close=9.0)
     _ins_xdr(mem_db, "600519.SH", "2023-04-04", dividend=20)
+    _real_xdr(mem_db, "600519.SH", "2023-04-03", "2023-04-04")
     n = _count_xdr_uncomputable(
         mem_db, "2023-04-04", "2023-04-04", "", "", []
     )
@@ -131,6 +151,7 @@ def test_count_uncomputable_excludes_suspended(mem_db):
     _ins_daily(mem_db, "600519.SH", "2023-05-09", close=9.0,
                pre_close=9.0, tradestatus=0)
     _ins_xdr(mem_db, "600519.SH", "2023-05-09", dividend=20)
+    _real_xdr(mem_db, "600519.SH", "2023-05-08", "2023-05-09")
     n = _count_xdr_uncomputable(
         mem_db, "2023-05-09", "2023-05-09", "", "", []
     )
@@ -145,6 +166,7 @@ def test_pure_bonus_share_formula(mem_db):
     _ins_daily(mem_db, "600519.SH", "2023-06-01", close=10.0, pre_close=10.0)
     _ins_daily(mem_db, "600519.SH", "2023-06-02", close=5.0, pre_close=10.0)
     _ins_xdr(mem_db, "600519.SH", "2023-06-02", bonus_share=10)
+    _real_xdr(mem_db, "600519.SH", "2023-06-01", "2023-06-02")
     rows = _query_xdr_preclose_mismatches(
         mem_db, "2023-06-02", "2023-06-02", "", "", []
     )
@@ -161,11 +183,73 @@ def test_allotment_formula(mem_db):
     _ins_daily(mem_db, "600519.SH", "2023-07-04", close=8.3, pre_close=10.0)
     _ins_xdr(mem_db, "600519.SH", "2023-07-04",
              allotment_price=5, allotment_share=5)
+    _real_xdr(mem_db, "600519.SH", "2023-07-03", "2023-07-04")
     rows = _query_xdr_preclose_mismatches(
         mem_db, "2023-07-04", "2023-07-04", "", "", []
     )
     assert len(rows) == 1
     assert abs(rows[0][5] - (12.5 / 1.5)) < 1e-9
+
+
+def test_regression_002763_capital_detail_uses_bare_symbol(mem_db):
+    """回归: CAPITAL_DETAIL.code 为裸 symbol(002763),STOCK_INFO/STOCK_DAILY
+    为带后缀(002763.SZ)。真实除权(ADJ_FACTOR 变化)但 pre_close 仍等于前收
+    (9.87)而非除权理论价,必须被检出,且返回带后缀的规范代码。
+    现实案例: 002763 2026-05-15 每10股分红 8.0 → theory=9.87-0.8=9.07。"""
+    _seed_stock(mem_db, symbol="002763", exchange="SZ")
+    _ins_cal(mem_db, ["2026-05-14", "2026-05-15"])
+    _ins_daily(mem_db, "002763.SZ", "2026-05-14", close=9.87, pre_close=9.95)
+    _ins_daily(mem_db, "002763.SZ", "2026-05-15", close=8.22, pre_close=9.87)
+    _ins_xdr(mem_db, "002763.SZ", "2026-05-15", dividend=8.0)
+    _real_xdr(mem_db, "002763.SZ", "2026-05-14", "2026-05-15")
+
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2026-05-15", "2026-05-15", "", "", []
+    )
+    assert len(rows) == 1
+    xdr_date, code, name, close_prev, pre_close, theory = rows[0]
+    assert code == "002763.SZ"          # 输出带后缀的规范代码
+    assert close_prev == 9.87
+    assert pre_close == 9.87
+    assert abs(theory - 9.07) < 1e-9
+
+
+def test_regression_300174_factor_unchanged_not_flagged(mem_db):
+    """回归(误报修复): CAPITAL_DETAIL 有除权除息记录,但 ADJ_FACTOR 因子
+    在 prev_date→xdr_date 之间未变化 → 当天并未真实除权,pre_close 等于前收
+    是正常的,不得判异常。
+    现实案例: 300174 2026-05-15 gbbq 有记录但 adjust_factor 全程 1.0。"""
+    _seed_stock(mem_db, symbol="300174", exchange="SZ", board="GEM")
+    _ins_cal(mem_db, ["2026-05-14", "2026-05-15"])
+    _ins_daily(mem_db, "300174.SZ", "2026-05-14", close=17.90, pre_close=17.89)
+    _ins_daily(mem_db, "300174.SZ", "2026-05-15", close=17.89, pre_close=17.90)
+    _ins_xdr(mem_db, "300174.SZ", "2026-05-15", dividend=1.0)  # theory=17.8
+    # ADJ_FACTOR 未变化(非真实除权)
+    _ins_adj(mem_db, "300174.SZ", "2026-05-14", 1.0)
+    _ins_adj(mem_db, "300174.SZ", "2026-05-15", 1.0)
+
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2026-05-15", "2026-05-15", "", "", []
+    )
+    assert rows == []
+    n = _count_xdr_uncomputable(
+        mem_db, "2026-05-15", "2026-05-15", "", "", []
+    )
+    assert n == 0
+
+
+def test_adj_factor_missing_not_flagged(mem_db):
+    """ADJ_FACTOR 缺失 → 无法确认是否真实除权,不判异常(避免误报)。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-10-09", "2023-10-10"])
+    _ins_daily(mem_db, "600519.SH", "2023-10-09", close=10.0, pre_close=10.0)
+    _ins_daily(mem_db, "600519.SH", "2023-10-10", close=9.0, pre_close=10.0)
+    _ins_xdr(mem_db, "600519.SH", "2023-10-10", dividend=20)  # theory≠10
+    # 不写任何 ADJ_FACTOR
+    rows = _query_xdr_preclose_mismatches(
+        mem_db, "2023-10-10", "2023-10-10", "", "", []
+    )
+    assert rows == []
 
 
 def test_check_xdr_preclose_wrapper_writes_csv_and_returns_count(mem_db, tmp_path, monkeypatch):
@@ -177,6 +261,7 @@ def test_check_xdr_preclose_wrapper_writes_csv_and_returns_count(mem_db, tmp_pat
     _ins_daily(mem_db, "600519.SH", "2023-08-01", close=10.0, pre_close=10.0)
     _ins_daily(mem_db, "600519.SH", "2023-08-02", close=5.0, pre_close=10.0)
     _ins_xdr(mem_db, "600519.SH", "2023-08-02", bonus_share=10)
+    _real_xdr(mem_db, "600519.SH", "2023-08-01", "2023-08-02")
 
     # 把 csv 目录重定向到 tmp_path,避免污染项目 csv/
     fake_file = tmp_path / "csv" / "x"
@@ -192,35 +277,14 @@ def test_check_xdr_preclose_wrapper_writes_csv_and_returns_count(mem_db, tmp_pat
     assert "600519.SH" in content[1]
 
 
-def test_regression_002763_capital_detail_uses_bare_symbol(mem_db):
-    """回归: CAPITAL_DETAIL.code 为裸 symbol(002763),STOCK_INFO/STOCK_DAILY
-    为带后缀(002763.SZ)。除权日 pre_close 仍等于前收(9.87)而非除权理论价,
-    必须被检出,且返回带后缀的规范代码。
-    现实案例: 002763 2026-05-15 每10股分红 8.0 → theory=9.87-0.8=9.07。"""
-    _seed_stock(mem_db, symbol="002763", exchange="SZ")
-    _ins_cal(mem_db, ["2026-05-14", "2026-05-15"])
-    _ins_daily(mem_db, "002763.SZ", "2026-05-14", close=9.87, pre_close=9.95)
-    _ins_daily(mem_db, "002763.SZ", "2026-05-15", close=8.22, pre_close=9.87)
-    _ins_xdr(mem_db, "002763.SZ", "2026-05-15", dividend=8.0)
-
-    rows = _query_xdr_preclose_mismatches(
-        mem_db, "2026-05-15", "2026-05-15", "", "", []
-    )
-    assert len(rows) == 1
-    xdr_date, code, name, close_prev, pre_close, theory = rows[0]
-    assert code == "002763.SZ"          # 输出带后缀的规范代码
-    assert close_prev == 9.87
-    assert pre_close == 9.87
-    assert abs(theory - 9.07) < 1e-9
-
-
 def test_check_xdr_preclose_wrapper_clean_returns_zero(mem_db):
-    """包装函数:无不一致且无无法计算 → 返回 0。"""
+    """包装函数:真实除权且 pre_close 恰为理论价 → 返回 0。"""
     _seed_stock(mem_db)
     _ins_cal(mem_db, ["2023-09-01", "2023-09-04"])
     _ins_daily(mem_db, "600519.SH", "2023-09-01", close=10.0, pre_close=10.0)
     # 除权日 pre_close 恰为理论价(纯送股 theory=5.0)
     _ins_daily(mem_db, "600519.SH", "2023-09-04", close=5.0, pre_close=5.0)
     _ins_xdr(mem_db, "600519.SH", "2023-09-04", bonus_share=10)
+    _real_xdr(mem_db, "600519.SH", "2023-09-01", "2023-09-04")
     n = _check_xdr_preclose(mem_db, "2023-09-04", "2023-09-04", "", "", [])
     assert n == 0

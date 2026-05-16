@@ -456,6 +456,7 @@ def main() -> int:
     logger.info(f"     交易所:   {args.exchanges}")
     logger.info(f"     指定代码: {args.codes if args.codes else '无 (检查全市场)'}")
     logger.info(f"     校验指数: {'是' if args.include_index else '否'}")
+    logger.info(f"     除权校验: 是 (除权日 pre_close 与理论除权价比对)")
     logger.info("=" * 60)
 
     ex_filter = _build_exchange_filter(args.exchanges)
@@ -475,6 +476,8 @@ def main() -> int:
                                       begin_date, end_date, ex_filter, code_filter, code_params)
         total_missing += _check_is_st_null(conn, begin_date, end_date,
                                            ex_filter, code_filter, code_params)
+        total_missing += _check_xdr_preclose(conn, begin_date, end_date,
+                                             ex_filter, code_filter, code_params)
         if args.include_index:
             total_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
                                           begin_date, end_date, ex_filter, code_filter, code_params,

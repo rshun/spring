@@ -734,59 +734,6 @@ def get_capital_detail(
 
 
 @mcp.tool()
-def get_model_pool(
-    status: str | None = None,
-    code: str | None = None,
-    model_name: str | None = None,
-    max_rows: int = 500,
-) -> dict[str, Any]:
-    """
-    MODEL_STOCK_POOL - 查询模型股票池。
-    可按 status(OBSERVE/FOCUS/TRIGGERED/REMOVED)、code、model_name 过滤。
-    不传参数则返回所有非 REMOVED 记录。
-    """
-    if not table_exists("MODEL_STOCK_POOL"):
-        raise RuntimeError("MODEL_STOCK_POOL table not found.")
-
-    max_rows = max(1, min(int(max_rows), 20000))
-
-    conditions: list[str] = []
-    params: list[Any] = []
-
-    if code:
-        _ = parse_code(code)
-        conditions.append("UPPER(code) = UPPER(?)")
-        params.append(code)
-
-    if status:
-        valid = ("OBSERVE", "FOCUS", "TRIGGERED", "REMOVED")
-        s = status.upper()
-        if s not in valid:
-            raise ValueError(f"status must be one of {valid}")
-        conditions.append("status = ?")
-        params.append(s)
-    elif not code:
-        # default: exclude REMOVED
-        conditions.append("status != 'REMOVED'")
-
-    if model_name:
-        conditions.append("model_name = ?")
-        params.append(model_name)
-
-    where = " AND ".join(conditions) if conditions else "1=1"
-    df = run_sql(
-        f"""
-        SELECT *
-        FROM MODEL_STOCK_POOL
-        WHERE {where}
-        ORDER BY updated_date DESC, code
-        """,
-        params,
-    )
-    return df_to_payload(df, max_rows)
-
-
-@mcp.tool()
 def query(sql: str, max_rows: int = 2000) -> dict[str, Any]:
     """
     Raw SQL query (read-only). DDL/DML is blocked. LIMIT will be appended if missing.

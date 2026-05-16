@@ -330,6 +330,7 @@ def _count_xdr_uncomputable(conn: duckdb.DuckDBPyConnection,
                             code_params: list[str]) -> int:
     """统计除权且非停牌、但因上一交易日收盘或当日 pre_close 缺失而无法计算理论价的记录数"""
     sql = f"""
+    -- xdr_events/prev_day CTEs mirror _query_xdr_preclose_mismatches — keep WHERE filters in sync
     WITH xdr_events AS (
         SELECT c.code, c.date AS xdr_date
         FROM CAPITAL_DETAIL c
@@ -375,7 +376,8 @@ def _check_xdr_preclose(conn: duckdb.DuckDBPyConnection,
     rows = _query_xdr_preclose_mismatches(conn, begin_date, end_date,
                                           ex_filter, code_filter, code_params)
     if not rows:
-        logger.info(f"[{label}]    完整 OK")
+        if not uncomputable:
+            logger.info(f"[{label}]    完整 OK")
         return 0
 
     csv_dir = Path(__file__).parent.parent / "csv"
@@ -388,7 +390,8 @@ def _check_xdr_preclose(conn: duckdb.DuckDBPyConnection,
         for xdr_date, code, name, close_prev, pre_close, theory in rows:
             diff = round(abs(pre_close - theory), 4)
             writer.writerow([str(xdr_date), code, name,
-                             close_prev, pre_close, round(theory, 4), diff])
+                             round(close_prev, 4), round(pre_close, 4),
+                             round(theory, 4), diff])
 
     logger.warning(f"[{label}]    发现 {len(rows)} 条 pre_close 与除权理论价不一致，"
                     f"明细已写入: {csv_file}")

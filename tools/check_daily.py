@@ -266,6 +266,93 @@ def _check_is_st_null(conn: duckdb.DuckDBPyConnection,
     return len(rows)
 
 
+_DAILY_BASIC_NULL_CTE = """
+    WITH trading_days AS (
+        SELECT cal_date FROM TRADE_CAL
+        WHERE is_open = 1 AND cal_date BETWEEN ? AND ?
+    ),
+    active_stocks AS (
+        SELECT code, name FROM STOCK_INFO i
+        WHERE board NOT IN ('INDEX', 'BJ')
+          AND list_status = 'L'
+          {ex_filter}
+          {code_filter}
+    ),
+    suspended AS (
+        SELECT code, date FROM STOCK_DAILY
+        WHERE tradestatus = 0
+          AND date BETWEEN ? AND ?
+    ),
+    nonsusp AS (
+        SELECT b.trade_date, s.code, s.name, b.pb, b.pe,
+               b.total_shares, b.float_shares
+        FROM DAILY_BASIC b
+        INNER JOIN active_stocks s ON b.code = s.code
+        INNER JOIN trading_days t ON b.trade_date = t.cal_date
+        LEFT JOIN suspended p ON p.code = b.code AND p.date = b.trade_date
+        WHERE p.code IS NULL
+    )
+"""
+
+
+def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
+                             begin_date: str, end_date: str,
+                             ex_filter: str, code_filter: str,
+                             code_params: list[str]) -> int:
+    """检查 DAILY_BASIC 关键字段是否缺失,停牌股票不计入。
+    缺失口径 = NULL 或 = 0(baostock 这份数据极少返回 NULL,无值/脏数据多以 0 出现);
+    负值视为有值(亏损股 pe<0、负净资产 pb<0 均正常),不报。
+    - pb/total_shares/float_shares 缺失 -> 异常(写 CSV 并计入 total_missing)
+    - pe 缺失(亏损股很多,且 pe=0 性质同缺失)-> 仅单独告警,不计入异常"""
+    label = "指标空值    "
+    params = [begin_date, end_date, *code_params, begin_date, end_date]
+
+    # pe 缺失(NULL 或 0): 单独统计,仅告警不计入异常
+    pe_sql = _DAILY_BASIC_NULL_CTE.format(
+        ex_filter=ex_filter, code_filter=code_filter
+    ) + "SELECT COUNT(*) FROM nonsusp WHERE pe IS NULL OR pe = 0"
+    pe_missing = conn.execute(pe_sql, params).fetchone()[0]
+    if pe_missing:
+        logger.warning(f"[{label}]    {pe_missing} 条 pe 缺失(NULL 或 0)"
+                        f"(亏损股居多,仅提示,不计入异常)")
+
+    # pb/total_shares/float_shares 缺失(NULL 或 0): 异常
+    detail_sql = _DAILY_BASIC_NULL_CTE.format(
+        ex_filter=ex_filter, code_filter=code_filter
+    ) + """
+    SELECT trade_date, code, name,
+           concat_ws(',',
+               CASE WHEN pb           IS NULL OR pb           = 0 THEN 'pb'           END,
+               CASE WHEN total_shares IS NULL OR total_shares = 0 THEN 'total_shares' END,
+               CASE WHEN float_shares IS NULL OR float_shares = 0 THEN 'float_shares' END
+           ) AS missing
+    FROM nonsusp
+    WHERE pb IS NULL OR pb = 0
+       OR total_shares IS NULL OR total_shares = 0
+       OR float_shares IS NULL OR float_shares = 0
+    ORDER BY trade_date, code
+    """
+    rows = conn.execute(detail_sql, params).fetchall()
+
+    if not rows:
+        if not pe_missing:
+            logger.info(f"[{label}]    完整 OK")
+        return 0
+
+    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = csv_dir / f"check_dailybasic_nulls_{begin_date}_{end_date}.csv"
+    with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "code", "name", "missing"])
+        for trade_date, code, name, missing in rows:
+            writer.writerow([str(trade_date), code, name, missing])
+
+    logger.warning(f"[{label}]    发现 {len(rows)} 条 pb/total_shares/float_shares "
+                    f"缺失(NULL 或 0)，明细已写入: {csv_file}")
+    return len(rows)
+
+
 # 除权参考价公式(通达信口径,每10股字段折算为每股)
 _XDR_THEORY_SQL = (
     "(close_prev - dividend/10 + allotment_price * allotment_share/10) "
@@ -510,6 +597,8 @@ def main() -> int:
                                       begin_date, end_date, ex_filter, code_filter, code_params)
         total_missing += _check_is_st_null(conn, begin_date, end_date,
                                            ex_filter, code_filter, code_params)
+        total_missing += _check_daily_basic_nulls(conn, begin_date, end_date,
+                                                  ex_filter, code_filter, code_params)
         total_missing += _check_xdr_preclose(conn, begin_date, end_date,
                                              ex_filter, code_filter, code_params)
         if args.include_index:

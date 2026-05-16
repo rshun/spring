@@ -183,3 +183,69 @@ def test_tradestatus_one_when_vol_zero_prices_differ(mock_pages):
                               ["20230103", "20230104"])
     row_0104 = result[result["date"] == "2023-01-04"].iloc[0]
     assert row_0104["tradestatus"] == 1
+
+
+# ── fetch_xdxr_data: 按 category 分别映射 (除权除息 vs 股本变化) ──────────
+
+def _xdxr_raw():
+    """两条记录: 除权除息(1) 与 股本变化(5),股本字段与分红字段填不同值,
+    用于验证按 category 取对列。"""
+    base = dict(year=2026, month=5, day=15,
+                fenhong=None, peigujia=None, songzhuangu=None, peigu=None,
+                panqianliutong=None, panhouliutong=None,
+                qianzongguben=None, houzongguben=None)
+    xd = {**base, "category": 1,
+          "fenhong": 2.0, "peigujia": 3.0, "songzhuangu": 4.0, "peigu": 5.0,
+          "panqianliutong": 999, "qianzongguben": 999,
+          "panhouliutong": 999, "houzongguben": 999}
+    gb = {**base, "category": 5,
+          "fenhong": 888, "peigujia": 888, "songzhuangu": 888, "peigu": 888,
+          "panqianliutong": 10.0, "qianzongguben": 20.0,
+          "panhouliutong": 30.0, "houzongguben": 40.0}
+    return [xd, gb]
+
+
+@patch("datasource.tdx._get_max_fail", return_value=10)
+@patch("datasource.tdx._get_category",
+       return_value={"1": "除权除息", "5": "股本变化"})
+@patch("datasource.tdx._connect_api")
+def test_fetch_xdxr_maps_by_category(mock_conn, _mc, _mf):
+    api = MagicMock()
+    api.get_xdxr_info.return_value = _xdxr_raw()
+    api.to_df.side_effect = lambda raw: pd.DataFrame(raw)
+    mock_conn.return_value = api
+
+    from datasource.tdx import fetch_xdxr_data
+    df = fetch_xdxr_data([("600000", "SH")])
+
+    assert df is not None
+    assert list(df.columns) == ["code", "date", "category", "dividend",
+                                "allotment_price", "bonus_share",
+                                "allotment_share"]
+    xd = df[df["category"] == "除权除息"].iloc[0]
+    assert (xd["dividend"], xd["allotment_price"],
+            xd["bonus_share"], xd["allotment_share"]) == (2.0, 3.0, 4.0, 5.0)
+
+    gb = df[df["category"] == "股本变化"].iloc[0]
+    # 股本变化必须取 前流通/前总股本/后流通/后总股本,不能是 888
+    assert (gb["dividend"], gb["allotment_price"],
+            gb["bonus_share"], gb["allotment_share"]) == (10.0, 20.0, 30.0, 40.0)
+
+
+@patch("datasource.tdx._get_max_fail", return_value=10)
+@patch("datasource.tdx._get_category",
+       return_value={"1": "除权除息", "5": "股本变化"})
+@patch("datasource.tdx._connect_api")
+def test_fetch_xdxr_share_change_not_null(mock_conn, _mc, _mf):
+    """回归: 股本变化记录的股本字段不再因列映射缺陷而全为 NULL。"""
+    api = MagicMock()
+    api.get_xdxr_info.return_value = [_xdxr_raw()[1]]  # 仅股本变化
+    api.to_df.side_effect = lambda raw: pd.DataFrame(raw)
+    mock_conn.return_value = api
+
+    from datasource.tdx import fetch_xdxr_data
+    df = fetch_xdxr_data([("600000", "SH")])
+    row = df.iloc[0]
+    assert row["allotment_share"] == 40.0  # 后总股本
+    assert row[["dividend", "allotment_price",
+                "bonus_share", "allotment_share"]].notna().all()

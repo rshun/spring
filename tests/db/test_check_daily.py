@@ -1,6 +1,11 @@
 import pytest
 
-from tools.check_daily import _query_xdr_preclose_mismatches, _count_xdr_uncomputable, _check_xdr_preclose
+from tools.check_daily import (
+    _query_xdr_preclose_mismatches,
+    _count_xdr_uncomputable,
+    _check_xdr_preclose,
+    _check_daily_basic_nulls,
+)
 from tests.conftest import insert_stock_info, insert_trade_cal
 
 
@@ -41,6 +46,15 @@ def _ins_adj(conn, code, date, factor):
         "INSERT INTO ADJ_FACTOR (code, trade_date, fore_factor, back_factor, "
         "adjust_factor, updated_at) VALUES (?, ?, ?, ?, ?, now())",
         [code, date, factor, factor, factor],
+    )
+
+
+def _ins_basic(conn, code, trade_date, pb=1.0, pe=10.0,
+               total_shares=100000000, float_shares=80000000):
+    conn.execute(
+        "INSERT INTO DAILY_BASIC (code, trade_date, pb, pe, "
+        "total_shares, float_shares) VALUES (?, ?, ?, ?, ?, ?)",
+        [code, trade_date, pb, pe, total_shares, float_shares],
     )
 
 
@@ -287,4 +301,115 @@ def test_check_xdr_preclose_wrapper_clean_returns_zero(mem_db):
     _ins_xdr(mem_db, "600519.SH", "2023-09-04", bonus_share=10)
     _real_xdr(mem_db, "600519.SH", "2023-09-01", "2023-09-04")
     n = _check_xdr_preclose(mem_db, "2023-09-04", "2023-09-04", "", "", [])
+    assert n == 0
+
+
+# ── DAILY_BASIC pb/pe/total_shares/float_shares 缺失检查 ──────────────────
+# 缺失口径 = NULL 或 = 0;负值视为有值不报。
+# pb/total_shares/float_shares 缺失=异常;pe 缺失仅单独告警不计入。
+
+def test_dbnull_all_present_ok(mem_db):
+    """四字段都有正常值 → 返回 0,且不发 pe 告警。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-01"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-01")
+    n = _check_daily_basic_nulls(mem_db, "2023-11-01", "2023-11-01", "", "", [])
+    assert n == 0
+
+
+def test_dbnull_pe_null_only_warned_not_counted(mem_db, caplog):
+    """仅 pe 为 NULL → 不计异常(返回0),但有 pe 缺失告警。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-02"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-02", pe=None)
+    with caplog.at_level("WARNING"):
+        n = _check_daily_basic_nulls(mem_db, "2023-11-02", "2023-11-02", "", "", [])
+    assert n == 0
+    assert "pe 缺失" in caplog.text
+
+
+def test_dbnull_pe_zero_only_warned_not_counted(mem_db, caplog):
+    """pe = 0 视为缺失 → 不计异常,但有 pe 缺失告警。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-03"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-03", pe=0)
+    with caplog.at_level("WARNING"):
+        n = _check_daily_basic_nulls(mem_db, "2023-11-03", "2023-11-03", "", "", [])
+    assert n == 0
+    assert "pe 缺失" in caplog.text
+
+
+def test_dbnull_pe_negative_is_valid_no_warn(mem_db, caplog):
+    """pe < 0(亏损股)视为有值 → 不计异常,也不发 pe 缺失告警。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-04"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-04", pe=-12.3)
+    with caplog.at_level("WARNING"):
+        n = _check_daily_basic_nulls(mem_db, "2023-11-04", "2023-11-04", "", "", [])
+    assert n == 0
+    assert "pe 缺失" not in caplog.text
+
+
+def test_dbnull_pb_null_counted(mem_db):
+    """pb 为 NULL → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-05"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-05", pb=None)
+    n = _check_daily_basic_nulls(mem_db, "2023-11-05", "2023-11-05", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_pb_zero_counted(mem_db):
+    """pb = 0 视为缺失 → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-06"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-06", pb=0)
+    n = _check_daily_basic_nulls(mem_db, "2023-11-06", "2023-11-06", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_pb_negative_is_valid_not_counted(mem_db):
+    """pb < 0(负净资产)视为有值 → 不计异常,返回 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-07"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-07", pb=-1.5)
+    n = _check_daily_basic_nulls(mem_db, "2023-11-07", "2023-11-07", "", "", [])
+    assert n == 0
+
+
+def test_dbnull_total_shares_zero_counted(mem_db):
+    """total_shares = 0 视为缺失 → 异常。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-08"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-08", total_shares=0)
+    n = _check_daily_basic_nulls(mem_db, "2023-11-08", "2023-11-08", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_missing_list_excludes_pe_includes_zero(mem_db):
+    """pb=NULL 且 float_shares=0 且 pe=0 → missing='pb,float_shares'(不含 pe),计 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-09"])
+    _ins_basic(mem_db, "600519.SH", "2023-11-09",
+               pb=None, float_shares=0, pe=0)
+    missing = mem_db.execute(
+        "SELECT concat_ws(','," 
+        " CASE WHEN pb IS NULL OR pb=0 THEN 'pb' END,"
+        " CASE WHEN total_shares IS NULL OR total_shares=0 THEN 'total_shares' END,"
+        " CASE WHEN float_shares IS NULL OR float_shares=0 THEN 'float_shares' END)"
+        " FROM DAILY_BASIC WHERE code='600519.SH'"
+    ).fetchone()[0]
+    assert missing == "pb,float_shares"
+    n = _check_daily_basic_nulls(mem_db, "2023-11-09", "2023-11-09", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_suspended_excluded(mem_db):
+    """停牌(tradestatus=0)当日即便缺失也不计入。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2023-11-10"])
+    _ins_daily(mem_db, "600519.SH", "2023-11-10", close=10.0,
+               pre_close=10.0, tradestatus=0)
+    _ins_basic(mem_db, "600519.SH", "2023-11-10", total_shares=0)
+    n = _check_daily_basic_nulls(mem_db, "2023-11-10", "2023-11-10", "", "", [])
     assert n == 0

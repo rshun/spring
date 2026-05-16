@@ -6,8 +6,8 @@ lightgbm==4.6.0
 scikit-learn==1.8.0
 joblib==1.5.3
 
-akshare==1.18.21
-baostock==0.9.1
+akshare
+baostock
 pytdx==1.72
 pyyaml==6.0.3
 

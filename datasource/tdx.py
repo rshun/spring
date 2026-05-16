@@ -290,12 +290,20 @@ def fetch_xdxr_data(stocks: list[tuple]) -> pd.DataFrame | None:
                 if len(unknown):
                     logger.warning(f"  未知 xdxr category 码: {unknown.tolist()}")
                 df['category'] = mapped
-                df = df.rename(columns={
-                    'fenhong':     'dividend',
-                    'peigujia':    'allotment_price',
-                    'songzhuangu': 'bonus_share',
-                    'peigu':       'allotment_share',
-                })
+                # pytdx get_xdxr_info 按 category 填不同字段:
+                #   除权除息(1): fenhong/peigujia/songzhuangu/peigu
+                #   其余(含股本变化等): panqianliutong/qianzongguben/
+                #                       panhouliutong/houzongguben
+                # 统一到 CAPITAL_DETAIL 口径(与 gbbq 二进制/schema 对齐):
+                #   除权除息  -> dividend=红利 allotment_price=配股价
+                #               bonus_share=送股 allotment_share=配股
+                #   股本变化等 -> dividend=前流通盘 allotment_price=前总股本
+                #               bonus_share=后流通盘 allotment_share=后总股本
+                is_xd = df['category'] == '除权除息'
+                df['dividend']        = df['fenhong'].where(is_xd, df['panqianliutong'])
+                df['allotment_price'] = df['peigujia'].where(is_xd, df['qianzongguben'])
+                df['bonus_share']     = df['songzhuangu'].where(is_xd, df['panhouliutong'])
+                df['allotment_share'] = df['peigu'].where(is_xd, df['houzongguben'])
                 all_dfs.append(df[['code', 'date', 'category',
                                    'dividend', 'allotment_price', 'bonus_share', 'allotment_share']])
             except Exception as e:

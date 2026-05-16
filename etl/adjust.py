@@ -2,78 +2,68 @@ import argparse
 import duckdb
 import logging
 import pandas as pd
-from util import myutil,dbutil
+from util import myutil, dbutil
 from util import validators as pv
 
 logger = logging.getLogger("etl.adjust")
 
-# 解析命令行参数
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="A股复权因子入库 (支持多源、多代码)"
     )
 
-    # 参数: 起始日期 (可选，默认当天)
     parser.add_argument(
         '-b', '--begin',
         type=str,
         default=myutil.get_today(),
         help='指定交易日期 (格式: YYYYMMDD)，默认为当天'
     )
-    
-    # 参数: 截止日期 (可选，默认当天)
+
     parser.add_argument(
         '-e', '--end',
         type=str,
         default=myutil.get_today(),
         help='截止日期 (格式: YYYYMMDD),默认当天'
     )
-    
-    # 参数: 股票代码 (可选，支持多个, 优先级最高，如果指定了代码，忽略交易所参数)
+
     parser.add_argument(
         '-c', '--codes',
         nargs='+',
         help='指定股票代码列表 (例如: 600519,000001)，不传则默认处理全量'
     )
-    
-    # 参数 交易所 (可选，支持多个,sz,sh,bj,all)
+
     parser.add_argument(
-        '-x', '--exchanges', nargs='+', 
+        '-x', '--exchanges', nargs='+',
         default=['all'],
         type=str.lower,
-        choices=['sh', 'sz', 'bj', 'all'], 
+        choices=['sh', 'sz', 'bj', 'all'],
         help='指定交易所范围: sh (沪), sz (深), bj (北), all (默认全部)'
     )
 
-    # 参数: 数据源 (可选，默认 bstock)
     parser.add_argument(
         '-s', '--source',
         type=str,
-        choices=['bstock', 'akstock'],
+        choices=['bstock'],
         default='bstock',
-        help='指定数据源类型: bstock数据源, akstock数据源 (默认 bstock数据源)'
+        help='指定数据源类型: bstock数据源, (默认 bstock数据源)'
     )
 
     return parser.parse_args()
 
-"""
-处理已有的复权因子数据：按股票稠密化并逐个入库
-  规则：
-    - 源数据 adjust_df 只提供“复权因子发生变化的日期及复权因子”（稀疏事件）。
-    - 逐日表 ADJ_FACTOR 必须覆盖交易日；当日无事件值则取 T-1（向前填充）。
-    - 新股：若历史从未出现过事件值，则默认因子为 1.0，并从 start_date 起补齐到 end/today。
 
-输入参数:
-  adjust_data: 包含所有股票稀疏数据的 DataFrame
-  stock_list: [(symbol, exchange), ...]
-  conn: duckdb 连接
-"""
 def process_and_save_adjust_factors(
     adjust_df: pd.DataFrame,
     stock_list: list[tuple],
     conn: duckdb.DuckDBPyConnection,
 ) -> None:
-
+    """
+    处理已有的复权因子数据：按股票稠密化并逐个入库。
+    规则：
+      - 源数据 adjust_df 只提供"复权因子发生变化的日期及复权因子"（稀疏事件）。
+      - 逐日表 ADJ_FACTOR 必须覆盖交易日；当日无事件值则取 T-1（向前填充）。
+      - 新股：若历史从未出现过事件值，则默认因子为 1.0，并从 start_date 起补齐到 end/today。
+    """
     targets: list[dict[str, str]] = []
     for symbol, exchange, start_d, end_d, *_ in stock_list:
         sym = str(symbol).strip()
@@ -90,9 +80,7 @@ def process_and_save_adjust_factors(
         return
 
     targets_df = pd.DataFrame(targets)
-    conn.register("temp_targets", targets_df)
 
-    # 注册 temp_adj_raw（即使为空也注册，保证后续 affected CTE 可用）
     need_cols = ["code", "date", "fore_factor", "back_factor", "adjust_factor"]
     if adjust_df is None or adjust_df.empty:
         adj_raw = pd.DataFrame(columns=need_cols)
@@ -106,34 +94,36 @@ def process_and_save_adjust_factors(
         adj_raw["date"] = adj_raw["date"].astype(str)
 
         # 同 code+date 重复：保留最后一条
-        adj_raw.sort_values(["code", "date"], inplace=True)
-        adj_raw.drop_duplicates(["code", "date"], keep="last", inplace=True)
+        adj_raw = (adj_raw
+                   .sort_values(["code", "date"])
+                   .drop_duplicates(["code", "date"], keep="last"))
 
-    conn.register("temp_adj_raw", adj_raw)
-
-    # upsert 本次稀疏变更点到 RAW
-    if not adj_raw.empty:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO ADJ_FACTOR_RAW
-                (code, trade_date, fore_factor, back_factor, adjust_factor, updated_at)
-            SELECT
-                code,
-                CAST(date AS DATE),
-                CAST(fore_factor AS DOUBLE),
-                CAST(back_factor AS DOUBLE),
-                CAST(adjust_factor AS DOUBLE),
-                now()
-            FROM temp_adj_raw;
-            """
-        )
-
-    # 稠密化写入 ADJ_FACTOR（关键：全部 DATE 化，避免类型绑定错误）
-    # 说明：
-    # - affected：本次发生变更的 code，从 min_change_date 起重算
-    # - last_dense：已稠密化表的最后日期，无变更时从 last_dense_date+1 补到 today
-    # - 新股首次跑：既无变更也无历史 last_dense -> 兜底用 start_date（修复只补最后一天的 bug）
     try:
+        conn.register("temp_targets", targets_df)
+        conn.register("temp_adj_raw", adj_raw)
+
+        conn.execute("BEGIN")
+        if not adj_raw.empty:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO ADJ_FACTOR_RAW
+                    (code, trade_date, fore_factor, back_factor, adjust_factor, updated_at)
+                SELECT
+                    code,
+                    CAST(date AS DATE),
+                    CAST(fore_factor AS DOUBLE),
+                    CAST(back_factor AS DOUBLE),
+                    CAST(adjust_factor AS DOUBLE),
+                    now()
+                FROM temp_adj_raw;
+                """
+            )
+
+        # 稠密化写入 ADJ_FACTOR（关键：全部 DATE 化，避免类型绑定错误）
+        # 说明：
+        # - affected：本次发生变更的 code，从 min_change_date 起重算
+        # - last_dense：已稠密化表的最后日期，无变更时从 last_dense_date+1 补到 today
+        # - 新股首次跑：既无变更也无历史 last_dense -> 兜底用 start_date（修复只补最后一天的 bug）
         conn.execute(
             """
             WITH
@@ -211,26 +201,37 @@ def process_and_save_adjust_factors(
             """
         )
 
+        conn.execute("COMMIT")
         logger.info("复权因子稠密化完成：ADJ_FACTOR 已更新。")
     except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
         logger.error(f"复权因子稠密化失败：{e}")
         raise
+    finally:
+        for name in ("temp_targets", "temp_adj_raw"):
+            try:
+                conn.unregister(name)
+            except Exception:
+                pass
 
-'''
-  检查参数有效性
-'''
+
 def check_parameters(begin: str, end: str) -> bool:
+    """校验命令行参数有效性"""
     ctx = {"begin": begin, "end": end}
     validators = [
         pv.v_dbfile_exists(),
         pv.v_yyyymmdd("begin"),
         pv.v_yyyymmdd("end"),
         pv.v_date_order("begin", "end"),
+        pv.v_single_day_must_be_trading_day("begin", "end"),
     ]
-    validators.append(pv.v_single_day_must_be_trading_day("begin", "end", allow_non_trading=False))
     return pv.run(ctx, validators)
 
-def main():
+
+def main() -> None:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
@@ -240,25 +241,24 @@ def main():
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
 
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info("获取股票复权因子任务启动")
     logger.info(f"     起始日期:  {begin_date}")
     logger.info(f"     截止日期:  {end_date}")
     logger.info(f"     交易所:    {args.exchanges}")
     logger.info(f"     指定代码:  {args.codes if args.codes else '无 (处理全市场)'}")
     logger.info(f"     数据源:    {args.source}")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
-    # 获取股票代码列表
     candidate_codes = dbutil.get_candidate_codes(
-        begindate    = begin_date,
-        enddate      = end_date,
-        exchanges_arg= args.exchanges,
-        codes_arg    = args.codes
+        begindate     = begin_date,
+        enddate       = end_date,
+        exchanges_arg = args.exchanges,
+        codes_arg     = args.codes
     )
 
     if not candidate_codes:
-        logger.warning("警告: 数据库中没有找到符合条件的股....")
+        logger.warning("警告: 数据库中没有找到符合条件的股票")
         return
 
     conn: duckdb.DuckDBPyConnection | None = None
@@ -267,10 +267,10 @@ def main():
 
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_adjust_factors'):
-            logger.error(f"错误: 模块 '{args.source}' 中没有定义 'fetch_adjust_factors' 方法。")
+            logger.error(f"模块 '{args.source}' 中没有定义 'fetch_adjust_factors' 方法。")
             return
 
-        adjust = module.fetch_adjust_factors(candidate_codes) 
+        adjust = module.fetch_adjust_factors(candidate_codes)
 
         if adjust is None:
             adjust = pd.DataFrame()
@@ -285,12 +285,13 @@ def main():
             logger.info("未获取到新复权因子，已执行每日数据补齐。")
 
     except ImportError:
-        logger.error(f"Module {args.source} not found.")
-    except AttributeError:
-        logger.error(f"Module {args.source} does not have the expected function.")
+        logger.error(f"模块 '{args.source}' 不存在，请检查数据源配置。")
+    except Exception as e:
+        logger.error(f"处理复权因子时发生错误：{e}")
     finally:
         if conn is not None:
             conn.close()
+
 
 if __name__ == "__main__":
     main()

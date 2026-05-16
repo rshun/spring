@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 同步股本变迁数据 (CAPITAL_DETAIL)
 
@@ -11,6 +9,7 @@ from __future__ import annotations
     python -m etl.sync_capital --help
 """
 import argparse
+import duckdb
 import logging
 import os
 import struct
@@ -18,9 +17,11 @@ import hashlib
 import zipfile
 import threading
 import time
+import pandas as pd
 from pathlib import Path
 from queue import Queue
 from util.myutil import configure_etl_logging
+from util.config import get_config
 
 logger = logging.getLogger("etl.sync_capital")
 
@@ -30,44 +31,42 @@ CSV_DIR      = PROJECT_ROOT / "csv"
 
 GBBQ_FILE    = CSV_DIR / "gbbq"
 
-TDX_CW_TXT_URL  = "http://down.tdx.com.cn:8001/tdxfin/gpcw.txt"
-TDX_CW_FILE_URL = "http://down.tdx.com.cn:8001/tdxfin/"
-TDX_GBBQ_ZIP_URL = "http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
+# 通达信财务文件名格式: "gpcw" + "YYYYMMDD" + ".ext" = 4+8+4 = 16 字符
+_CW_FILENAME_LEN = 16
 
-CATEGORY = {
-    '1': '除权除息', '2': '送配股上市', '3': '非流通股上市', '4': '未知股本变动', '5': '股本变化',
-    '6': '增发新股', '7': '股份回购', '8': '增发新股上市', '9': '转配股上市', '10': '可转债上市',
-    '11': '扩缩股', '12': '非流通股缩股', '13': '送认购权证', '14': '送认沽权证',
-    '15': '未知新类别',
-}
+
+def _get_tdx_config():
+    """从 config.yaml 读取通达信财务相关配置"""
+    return get_config()["tdx"]
 
 
 # ── 工具函数 ──────────────────────────────────────────────
 
-def download_url(url, tries=3, delay=3):
+def download_url(url):
     import requests
 
+    cfg = _get_tdx_config()["download"]
+    tries   = cfg["tries"]
+    delay   = cfg["retry_delay"]
+    timeout = cfg["request_timeout"]
     header = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                       '(KHTML, like Gecko) Chrome/87.0.4280.141',
     }
-    last_error = None
     for attempt in range(1, tries + 1):
         try:
-            resp = requests.get(url, headers=header, timeout=10)
+            resp = requests.get(url, headers=header, timeout=timeout)
             resp.raise_for_status()
             return resp
-        except Exception as exc:
-            last_error = exc
+        except Exception:
             if attempt == tries:
                 raise
             time.sleep(delay)
-    raise RuntimeError(f"下载失败: {url}") from last_error
 
 
 class ManyThreadDownload:
-    def __init__(self, num=10):
-        self.num = num
+    def __init__(self):
+        self.num = _get_tdx_config()["download"]["thread_count"]
         self.url = ''
         self.name = ''
         self.total = 0
@@ -84,24 +83,38 @@ class ManyThreadDownload:
 
     def _download_chunk(self, ts_queue):
         import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
 
-        while not ts_queue.empty():
-            start_, end_ = ts_queue.get()
-            headers = {'Range': 'Bytes=%s-%s' % (start_, end_), 'Accept-Encoding': '*'}
-            flag = False
-            while not flag:
+        # 单 session 复用：urllib3.Retry 自动处理 5xx/429 重试与退避
+        cfg = _get_tdx_config()["download"]
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=cfg["http_retry_total"],
+            backoff_factor=cfg["http_retry_backoff"],
+            status_forcelist=cfg["http_retry_status_codes"],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+
+        try:
+            while not ts_queue.empty():
+                start_, end_ = ts_queue.get()
+                headers = {'Range': 'Bytes=%s-%s' % (start_, end_), 'Accept-Encoding': '*'}
                 try:
-                    requests.adapters.DEFAULT_RETRIES = 10
-                    res = requests.get(self.url, headers=headers)
-                    res.close()
+                    res = session.get(self.url, headers=headers, timeout=cfg["chunk_timeout"])
+                    res.raise_for_status()
                 except Exception as e:
-                    logger.info(f"  下载分片 ({start_}-{end_}) 出错，重试: {e}")
-                    time.sleep(1)
-                    continue
-                flag = True
-            with open(self.name, "rb+") as fd:
-                fd.seek(start_)
-                fd.write(res.content)
+                    logger.error(f"  下载分片 ({start_}-{end_}) 失败: {e}")
+                    raise RuntimeError(f"下载分片 ({start_}-{end_}) 失败") from e
+
+                with open(self.name, "rb+") as fd:
+                    fd.seek(start_)
+                    fd.write(res.content)
+                res.close()
+        finally:
+            session.close()
 
     def run(self, url, name):
         import requests
@@ -109,7 +122,8 @@ class ManyThreadDownload:
         self.url = url
         self.name = name
         self.total = int(requests.head(url).headers['Content-Length'])
-        if os.path.exists(name) and os.path.getsize(name) >= self.total:
+        name_path = Path(name)
+        if name_path.exists() and name_path.stat().st_size >= self.total:
             return self.total
 
         with open(name, "wb") as fd:
@@ -131,8 +145,6 @@ class ManyThreadDownload:
 
 def historyfinancialreader(filepath):
     """读取通达信专业财务 .dat 文件"""
-    import pandas as pd
-
     with open(filepath, 'rb') as cw_file:
         header_pack_format = '<1hI1H3L'
         header_size = struct.calcsize(header_pack_format)
@@ -158,30 +170,27 @@ def historyfinancialreader(filepath):
     return pd.DataFrame(results)
 
 
-def list_cw_files(directory, ext_name):
-    """列出目录中 gpcw????????.ext 格式的文件"""
+def list_cw_files(directory: Path, ext_name: str) -> list[str]:
+    """列出目录中 gpcwYYYYMMDD.<ext_name> 格式的通达信财务文件"""
     if not directory.exists():
         return []
-    result = []
-    for f in os.listdir(directory):
-        if len(f) == 16 and f[:4] == "gpcw" and f.endswith("." + ext_name):
-            result.append(f)
-    return result
+    return [
+        f.name for f in directory.iterdir()
+        if len(f.name) == _CW_FILENAME_LEN and f.name.startswith("gpcw") and f.suffix == f".{ext_name}"
+    ]
 
 
 # ── 下载财务文件 ──────────────────────────────────────────
 
 def sync_cw_files():
     """从通达信服务器下载/更新专业财务文件到 download/ 目录"""
-    import pandas as pd
-
     cw_dir = DOWNLOAD_DIR / "cw"
     pkl_dir = DOWNLOAD_DIR / "cw_pkl"
     cw_dir.mkdir(parents=True, exist_ok=True)
     pkl_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("下载通达信财务文件校验信息...")
-    resp = download_url(TDX_CW_TXT_URL)
+    resp = download_url(_get_tdx_config()["cw_txt_url"])
     lines = resp.text.strip().split('\r\n')
     rows = [line.strip().split(",") for line in lines]
     server_df = pd.DataFrame(rows, columns=['filename', 'md5', 'filesize'])
@@ -195,30 +204,30 @@ def sync_cw_files():
             tick = time.time()
             logger.info(f"  {filename} 本机没有，开始下载")
             zip_path = cw_dir / filename
-            downloader.run(TDX_CW_FILE_URL + filename, str(zip_path))
+            downloader.run(_get_tdx_config()["cw_file_url"] + filename, str(zip_path))
             if not _extract_and_convert(zip_path, cw_dir, pkl_dir):
                 continue
             logger.info(f"  {filename} 完成 用时 {time.time() - tick:.2f}s")
 
-    # 2) 更新 md5 不一致的 zip 文件
+    # 2) 更新 md5 不一致的 zip 文件（服务器 md5 统一转小写，与 hexdigest() 对齐）
     local_zips = list_cw_files(cw_dir, 'zip')
-    server_md5_set = set(server_df['md5'].tolist())
+    server_md5_map = dict(zip(server_df['filename'], server_df['md5'].str.lower()))
     for filename in local_zips:
         zip_path = cw_dir / filename
         with open(zip_path, 'rb') as f:
             file_md5 = hashlib.md5(f.read()).hexdigest()
-        if file_md5 not in server_md5_set:
+        if file_md5 != server_md5_map.get(filename, ''):
             tick = time.time()
             logger.info(f"  {filename} 需要更新，开始下载")
-            os.remove(zip_path)
-            downloader.run(TDX_CW_FILE_URL + filename, str(zip_path))
+            zip_path.unlink()
+            downloader.run(_get_tdx_config()["cw_file_url"] + filename, str(zip_path))
             if not _extract_and_convert(zip_path, cw_dir, pkl_dir):
                 continue
             logger.info(f"  {filename} 完成更新 用时 {time.time() - tick:.2f}s")
 
     # 3) 补齐缺失的 pkl 导出
     local_dats = list_cw_files(cw_dir, 'dat')
-    existing_pkls = set(os.listdir(pkl_dir)) if pkl_dir.exists() else set()
+    existing_pkls = {p.name for p in pkl_dir.iterdir()} if pkl_dir.exists() else set()
     for datname in local_dats:
         pkl_name = datname[:-4] + '.pkl'
         if pkl_name not in existing_pkls:
@@ -231,15 +240,14 @@ def sync_cw_files():
     logger.info("专业财务文件同步完成")
 
 
-def _extract_and_convert(zip_path, cw_dir, pkl_dir):
+def _extract_and_convert(zip_path: Path, cw_dir: Path, pkl_dir: Path) -> bool:
     """解压 zip 并转换 dat -> pkl，失败返回 False"""
     try:
         with zipfile.ZipFile(str(zip_path), 'r') as zf:
             zf.extractall(str(cw_dir))
-    except (zipfile.BadZipFile, Exception) as e:
+    except (zipfile.BadZipFile, OSError) as e:
         logger.error(f"  文件 {zip_path.name} 损坏或解压失败，跳过: {e}")
-        if zip_path.exists():
-            os.remove(zip_path)
+        zip_path.unlink(missing_ok=True)
         return False
 
     dat_path = zip_path.with_suffix('.dat')
@@ -250,8 +258,6 @@ def _extract_and_convert(zip_path, cw_dir, pkl_dir):
     return True
 
 
-# ── 解密 gbbq 并入库 ─────────────────────────────────────
-
 # ── 数据源：三步获取 gbbq ─────────────────────────────────
 
 def _load_gbbq_from_local() -> pd.DataFrame | None:
@@ -259,7 +265,10 @@ def _load_gbbq_from_local() -> pd.DataFrame | None:
     import pytdx.reader.gbbq_reader
 
     if os.name == "nt":
-        gbbq_path = Path(r"C:\new_zszq_cf\T0002\hq_cache\gbbq")
+        local_root = get_config().get("local_paths", {}).get("tdx_gbbq")
+        if not local_root:
+            return None
+        gbbq_path = Path(local_root)
     else:
         gbbq_path = Path.home() / "data" / "tdx" / "T0002" / "hq_cache" / "gbbq"
 
@@ -268,26 +277,26 @@ def _load_gbbq_from_local() -> pd.DataFrame | None:
 
     logger.info("解密通达信 gbbq 股本变迁文件...")
     df = pytdx.reader.gbbq_reader.GbbqReader().get_df(str(gbbq_path))
-    df.drop(columns=['market'], inplace=True)
+    df = df.drop(columns=['market'])
     df.columns = ['code', 'date', 'category',
                    'dividend', 'allotment_price', 'bonus_share', 'allotment_share']
-    df['category'] = df['category'].astype(str).map(CATEGORY)
+    df['category'] = df['category'].astype(str).map(_get_tdx_config()["capital_category"])
     df['code'] = df['code'].astype(str)
     return df
 
 
-def _load_gbbq_from_csv() -> pd.DataFrame | None:
-    """步骤2: 从 csv/gbbq 二进制文件读取"""
+def _load_gbbq_from_binary_cache() -> pd.DataFrame | None:
+    """步骤2: 从 csv/gbbq 二进制缓存文件读取（注意：文件无后缀名，是 dbf 二进制不是 CSV）"""
     import pytdx.reader.gbbq_reader
 
     if not GBBQ_FILE.exists():
         return None
     logger.info(f"从 {GBBQ_FILE} 读取 gbbq 数据")
     df = pytdx.reader.gbbq_reader.GbbqReader().get_df(str(GBBQ_FILE))
-    df.drop(columns=['market'], inplace=True)
+    df = df.drop(columns=['market'])
     df.columns = ['code', 'date', 'category',
                    'dividend', 'allotment_price', 'bonus_share', 'allotment_share']
-    df['category'] = df['category'].astype(str).map(CATEGORY)
+    df['category'] = df['category'].astype(str).map(_get_tdx_config()["capital_category"])
     df['code'] = df['code'].astype(str)
     return df
 
@@ -299,8 +308,8 @@ def _load_gbbq_from_download() -> pd.DataFrame | None:
 
     zip_path = DOWNLOAD_DIR / "gbbq.zip"
     try:
-        logger.info(f"下载通达信 gbbq 文件: {TDX_GBBQ_ZIP_URL}")
-        resp = download_url(TDX_GBBQ_ZIP_URL)
+        logger.info(f"下载通达信 gbbq 文件: {_get_tdx_config()['gbbq_zip_url']}")
+        resp = download_url(_get_tdx_config()["gbbq_zip_url"])
         zip_path.write_bytes(resp.content)
 
         with zipfile.ZipFile(str(zip_path), "r") as zf:
@@ -312,10 +321,10 @@ def _load_gbbq_from_download() -> pd.DataFrame | None:
 
         logger.info(f"gbbq 文件已下载到 {GBBQ_FILE}")
     except Exception as e:
-        logger.info(f"下载 gbbq 文件失败: {e}")
+        logger.error(f"下载 gbbq 文件失败: {e}")
         return None
 
-    return _load_gbbq_from_csv()
+    return _load_gbbq_from_binary_cache()
 
 
 def _load_gbbq_from_server() -> pd.DataFrame | None:
@@ -323,7 +332,6 @@ def _load_gbbq_from_server() -> pd.DataFrame | None:
     from datasource.tdx import fetch_xdxr_data
     from util import dbutil
 
-    # 从数据库获取股票列表
     conn = dbutil.get_connection(is_read_only=True)
     try:
         stocks = conn.execute(
@@ -333,7 +341,7 @@ def _load_gbbq_from_server() -> pd.DataFrame | None:
         conn.close()
 
     if not stocks:
-        logger.info("[错误] 数据库中无股票列表，请先运行 sync_stock_info")
+        logger.error("数据库中无股票列表，请先运行 sync_stock_info")
         return None
 
     return fetch_xdxr_data(stocks)
@@ -357,8 +365,8 @@ def sync_gbbq(download: bool = False):
         df_gbbq = _load_gbbq_from_local()
         source = "本地二进制"
     if df_gbbq is None:
-        df_gbbq = _load_gbbq_from_csv()
-        source = "CSV"
+        df_gbbq = _load_gbbq_from_binary_cache()
+        source = "二进制缓存"
     if df_gbbq is None:
         df_gbbq = _load_gbbq_from_server()
         source = "在线服务器"
@@ -393,7 +401,7 @@ def save_capital_detail_to_db(df: pd.DataFrame):
     from util import dbutil
 
     logger.info(f"正在将 {len(df)} 条股本变迁数据写入数据库...")
-    conn = None
+    conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = dbutil.get_connection(is_read_only=False)
         conn.register("temp_capital_detail", df)
@@ -417,9 +425,13 @@ def save_capital_detail_to_db(df: pd.DataFrame):
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条股本变迁数据")
     except Exception as e:
-        logger.error(f"[错误] 写入 CAPITAL_DETAIL 表失败: {e}")
+        logger.error(f"写入 CAPITAL_DETAIL 表失败: {e}")
     finally:
         if conn is not None:
+            try:
+                conn.unregister("temp_capital_detail")
+            except Exception:
+                pass
             conn.close()
 
 
@@ -462,7 +474,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     configure_etl_logging()
     args = parse_arguments()
 
@@ -472,10 +484,7 @@ def main():
     logger.info('=' * 60)
 
     sync_cw_files()
-
-
     sync_gbbq(download=args.download)
-
     cleanup_gbbq_file()
 
     logger.info('=' * 60)

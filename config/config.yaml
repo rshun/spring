@@ -1,0 +1,87 @@
+# spring 项目全局配置
+# 所有硬编码的固定值统一管理于此文件
+
+# Windows 本机通达信安装路径；非 Windows 系统下忽略此节
+local_paths:
+  # 通达信 Vipdoc 根目录（其下分 sh/sz/.../lday/*.day）
+  tdx_vipdoc: "C:\\new_zszq_cf\\Vipdoc"
+  # 通达信 gbbq 股本变迁二进制文件路径
+  tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
+  # DuckDB 数据库文件路径（~ 会展开为用户主目录）
+  db: "~/data/quant.db"
+  # 基础/输入数据目录（如 sync_industry 的 SwClassCode_2021.csv）；
+  # 未配置或留空时回退到项目根目录下的 data/
+  data_dir: ""
+
+akshare:
+  # 单只股票连续失败超过此次数时终止采集
+  max_fail: 20
+  # 单次行情接口请求超时时间（秒）
+  request_timeout: 30
+
+baostock:
+  # 单只股票最多重试次数
+  max_fetch_attempts: 3
+  # 登录会话失效后重新登录的等待时间（秒）
+  retry_delay_login: 0.2
+  # Broken pipe 断管后重新登录的等待时间（秒）
+  retry_delay_pipe: 0.5
+
+tdx:
+  # 通达信行情服务器列表 (IP, 端口)，按经验优先级排序
+  servers:
+    - [218.6.170.55, 7709]
+    - [123.125.108.24, 7709]
+    - [180.153.39.51, 7709]
+    - [221.194.181.176, 7709]
+    - [59.173.18.140, 7709]
+    - [115.238.90.165, 7709]
+    - [124.160.88.183, 7709]
+    - [60.28.23.80, 7709]
+
+  # 每次最多拉取 800 条日K，分页次数（10 页 ≈ 8000 个交易日）
+  max_pages: 10
+
+  # 连续失败超过此次数时触发重连
+  max_fail: 20
+
+  # 专业财务文件校验信息下载地址
+  cw_txt_url: "http://down.tdx.com.cn:8001/tdxfin/gpcw.txt"
+
+  # 专业财务文件下载地址前缀
+  cw_file_url: "http://down.tdx.com.cn:8001/tdxfin/"
+
+  # 股本变迁 zip 下载地址
+  gbbq_zip_url: "http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
+
+  download:
+    # download_url() 简单重试参数
+    tries: 3
+    retry_delay: 3
+    request_timeout: 10
+    # 多线程分片下载线程数
+    thread_count: 10
+    # 分片下载超时（秒）
+    chunk_timeout: 30
+    # HTTPAdapter Retry 策略
+    http_retry_total: 5
+    http_retry_backoff: 1
+    http_retry_status_codes: [429, 500, 502, 503, 504]
+
+  # 股本变迁类别码 → 中文名称 映射表
+  capital_category:
+    "1": "除权除息"
+    "2": "送配股上市"
+    "3": "非流通股上市"
+    "4": "未知股本变动"
+    "5": "股本变化"
+    "6": "增发新股"
+    "7": "股份回购"
+    "8": "增发新股上市"
+    "9": "转配股上市"
+    "10": "可转债上市"
+    "11": "扩缩股"
+    "12": "非流通股缩股"
+    "13": "送认购权证"
+    "14": "送认沽权证"
+    "15": "未知新类别"

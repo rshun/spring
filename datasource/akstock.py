@@ -2,20 +2,52 @@ import akshare as ak
 import logging
 import pandas as pd
 from util.myutil import timer
+from util.config import get_config
 from datetime import datetime
 
 logger = logging.getLogger("etl.datasource.akstock")
 
-'''
-  获取北交所股票基础信息
-'''
+_SUMMARY_OUT_COLS = [
+    'trade_date', 'exchange_code',
+    'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
+    'short_sell_volume', 'short_repay_volume',
+    'short_balance_volume', 'short_balance_amount',
+    'margin_short_balance',
+]
+
+_DETAIL_OUT_COLS = [
+    'trade_date', 'exchange_code', 'symbol', 'code',
+    'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
+    'short_sell_volume', 'short_repay_volume',
+    'short_balance_volume', 'short_balance_amount',
+    'margin_short_balance',
+]
+
+_INDUSTRY_OUT_COLS = ['symbol', 'start_date', 'industry_code', 'update_time']
+
+
+def _get_max_fail() -> int:
+    return get_config()["akshare"]["max_fail"]
+
+
+def _get_request_timeout() -> int:
+    return get_config()["akshare"]["request_timeout"]
+
+
 def fetch_bj_stock_data(trade_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-                
-    try:        
+    """获取北交所股票基础信息
+
+    Parameters
+    ----------
+    trade_date : YYYY-MM-DD，用于 df_basic 的 date 字段
+    Returns (df_info, df_basic)
+    """
+    try:
         df_raw = ak.stock_info_bj_name_code()
         if df_raw.empty:
-            logger.info("警告: 未获取到北交所数据")
+            logger.warning("未获取到北交所数据")
             return pd.DataFrame(), pd.DataFrame()
+
         df_raw['symbol'] = df_raw['证券代码'].astype(str)
         df_raw['code'] = df_raw['symbol'] + '.BJ'
 
@@ -23,109 +55,109 @@ def fetch_bj_stock_data(trade_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         df_info['code'] = df_raw['code']
         df_info['symbol'] = df_raw['symbol']
         df_info['name'] = df_raw['证券简称']
-        df_info['exchange'] = 'BJ'           # 固定为 BJ
-        df_info['board'] = 'BJ'              # 北交所统称为 BJ 板块
-        df_info['list_date'] = pd.to_datetime(df_raw['上市日期'], errors='coerce').dt.date
-        df_info['delist_date'] = None        # 当前在市，无退市日期
-        df_info['list_status'] = 'L'         # 状态默认为 L (Listing)
-        
-        # 存放 Company Info 所需的字段 (code, date, industry, list_date, total_shares, float_shares)
+        df_info['exchange'] = 'BJ'
+        df_info['board'] = 'BJ'
+        df_info['list_date'] = pd.to_datetime(df_raw['上市日期'], errors='coerce')
+        df_info['delist_date'] = None
+        df_info['list_status'] = 'L'
+
         df_basic = pd.DataFrame()
         df_basic['code'] = df_raw['code']
         df_basic['date'] = trade_date
-        df_basic['total_shares'] = pd.to_numeric(df_raw['总股本'].astype(str).str.replace(',', '', regex=False), errors='coerce')
-        df_basic['float_shares'] = pd.to_numeric(df_raw['流通股本'].astype(str).str.replace(',', '', regex=False), errors='coerce')
-        
+        df_basic['total_shares'] = pd.to_numeric(
+            df_raw['总股本'].astype(str).str.replace(',', '', regex=False), errors='coerce')
+        df_basic['float_shares'] = pd.to_numeric(
+            df_raw['流通股本'].astype(str).str.replace(',', '', regex=False), errors='coerce')
         df_basic = df_basic[['code', 'date', 'total_shares', 'float_shares']]
-        
+
         logger.info(f"[成功] 获取到 {len(df_info)} 条北交所数据")
-        
         return df_info, df_basic
     except Exception as e:
-        logger.info(f"[失败] 获取北交所数据出错: {e}")
+        logger.error(f"获取北交所数据出错: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 
-'''
-  获取指定交易所的所有股票基本信息 (akshare接口接口获取股票基本信息根据市场不同而不同)
-  京市--ak.stock_info_bj_name_code()
-  输入参数
-    exchange: str -- 交易所 (sh, sz, bj, all)
-'''
 def fetch_stock_info(exchanges: list) -> tuple[pd.DataFrame, pd.DataFrame]:
-    
+    """获取指定交易所的股票基本信息（当前仅支持 BJ）
+
+    Parameters
+    ----------
+    exchanges : 交易所列表，如 ['BJ'] 或 ['all']
+    Returns (df_info, df_basic)
+    """
     target_exs = set(e.upper() for e in exchanges)
     if 'BJ' in target_exs or 'ALL' in target_exs:
-        return fetch_bj_stock_data(datetime.now().strftime("%Y-%m-%d")) 
+        return fetch_bj_stock_data(datetime.now().strftime("%Y-%m-%d"))
     else:
         logger.info(f"不支持的交易所代码: {exchanges}")
         return pd.DataFrame(), pd.DataFrame()
 
-'''
-  获取股票单笔行情数据
-'''
-def fetch_stock_data(start_date_str: str, end_date_str: str, symbol: str,market: str) -> tuple[pd.DataFrame, pd.DataFrame]:
- 
+
+def fetch_stock_data(start_date_str: str, end_date_str: str, symbol: str, market: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """拉取单只股票历史日K数据
+
+    Parameters
+    ----------
+    start_date_str / end_date_str : YYYYMMDD 格式
+    symbol : 6位股票代码
+    market : 交易所 SH/SZ/BJ
+    Returns (df_daily, df_basic)
+    """
     df_raw = ak.stock_zh_a_hist(
-                symbol=symbol, 
-                period="daily", 
-                start_date=start_date_str, 
-                end_date=end_date_str, 
-                adjust="",
-                timeout=30
-            )
+        symbol=symbol,
+        period="daily",
+        start_date=start_date_str,
+        end_date=end_date_str,
+        adjust="",
+        timeout=_get_request_timeout()
+    )
 
     if df_raw.empty:
         return pd.DataFrame(), pd.DataFrame()
-        
+
     std_code = f"{symbol}.{market.upper()}"
-    #目标列: code, date, open, high, low, close, volume, amount
     df_daily = pd.DataFrame({
-        'code': std_code,
-        'date': df_raw['日期'],
-        'open': pd.to_numeric(df_raw['开盘'], errors='coerce'),
-        'high': pd.to_numeric(df_raw['最高'], errors='coerce'),
-        'low':  pd.to_numeric(df_raw['最低'], errors='coerce'),
-        'close': pd.to_numeric(df_raw['收盘'], errors='coerce'),
-        'volume': pd.to_numeric(df_raw['成交量'], errors='coerce') * 100,
-        'amount': pd.to_numeric(df_raw['成交额'], errors='coerce'),
-        "tradestatus": 1
+        'code':         std_code,
+        'date':         df_raw['日期'],
+        'open':         pd.to_numeric(df_raw['开盘'], errors='coerce'),
+        'high':         pd.to_numeric(df_raw['最高'], errors='coerce'),
+        'low':          pd.to_numeric(df_raw['最低'], errors='coerce'),
+        'close':        pd.to_numeric(df_raw['收盘'], errors='coerce'),
+        'volume':       pd.to_numeric(df_raw['成交量'], errors='coerce') * 100,
+        'amount':       pd.to_numeric(df_raw['成交额'], errors='coerce'),
+        'trade_status': 1
     })
-    
-    # --- B. 构建 df_basic (每日指标) ---
-    # 目标列: code, trade_date, turnover_rate, pe, pb, is_st
-    # AkShare 此接口仅提供 换手率
+
     df_basic = pd.DataFrame({
-        'code': std_code,
-        'trade_date': df_raw['日期'],
+        'code':          std_code,
+        'trade_date':    df_raw['日期'],
         'turnover_rate': pd.to_numeric(df_raw['换手率'], errors='coerce'),
-        'pe': None,     # AkShare此接口无PE
-        'pb': None,     # AkShare此接口无PB
-        'is_st': None   # AkShare此接口无ST标记
+        'pe':            None,
+        'pb':            None,
+        'is_st':         None
     })
 
     return df_daily, df_basic
 
-'''
-批量获取股票数据
-输入参数: 
-   stock_list: 元组---股票代码(6位数字), 交易所(SH,SZ,BJ),起始和结束日期
-返回参数:
-   pd--明细
-'''
+
 @timer
 def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """批量获取股票日K数据
 
+    Parameters
+    ----------
+    stock_list : list of (symbol, market, begin_date, end_date, status) tuples
+    Returns (daily_df, basic_df)
+    """
     total = len(stock_list)
     all_daily_data = []
     all_basic_data = []
+    fail_count = 0
+    max_fail = _get_max_fail()
 
     logger.info(f"[akshare插件] 开始批量获取个股行情数据，共计 {total} 只股票...")
 
-    fail_count = 0
-    MAX_FAIL = 20
-
-    for i, (symbol, market, begindate, enddate,status) in enumerate(stock_list):
+    for i, (symbol, market, begindate, enddate, status) in enumerate(stock_list):
         if status == "D":
             continue
         start_date_str = begindate.replace("-", "")
@@ -133,58 +165,42 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
         try:
             df_daily, df_basic = fetch_stock_data(start_date_str, end_date_str, symbol, market)
 
-            all_daily_data.append(df_daily)
-            all_basic_data.append(df_basic)
+            if not df_daily.empty:
+                all_daily_data.append(df_daily)
+            if not df_basic.empty:
+                all_basic_data.append(df_basic)
+
             if (i + 1) % 100 == 0:
                 logger.info(f"   进度: {i + 1}/{total}")
-            
-            fail_count = 0 # 重置失败计数
+
+            fail_count = 0
 
         except Exception as e:
             fail_count += 1
-            logger.info(f"获取失败: {symbol} | 原因: {e}")
-            
-            if fail_count >= MAX_FAIL:
-                logger.info(f"[警告] 连续失败次数达到 {MAX_FAIL} 次。")
+            logger.warning(f"获取失败: {symbol} | 原因: {e}")
+
+            if fail_count >= max_fail:
+                logger.warning(f"连续失败次数达到 {max_fail} 次，终止采集")
                 break
-            continue
 
     final_daily = pd.concat(all_daily_data, ignore_index=True) if all_daily_data else pd.DataFrame()
     final_basic = pd.concat(all_basic_data, ignore_index=True) if all_basic_data else pd.DataFrame()
-    logger.info(f"[AkShare] 采集完成。")
-    logger.info(f"   - 行情记录: {len(final_daily)} 条")
-    logger.info(f"   - 指标记录: {len(final_basic)} 条")
+    logger.info(f"[AkShare] 采集完成，行情记录: {len(final_daily)} 条，指标记录: {len(final_basic)} 条")
 
     return final_daily, final_basic
 
-'''
-获取深证证券交易所股票
-该接口返回:
-    板块	object
-    A股代码 object
-    A股简称 object
-    A股上市日期 object
-    A股总股本   object
-    A股流通股本 object
-    所属行业    object
-'''
-'''
-DEPRECATED: 旧申万行业定义接口。
-  新流程使用 etl.sync_industry --input 读取 tmp/swclasscode.csv，
-  并写入新版 SW_INDUSTRY(sw_version, industry_code, ...)。
-获取申万一/二/三级行业定义
-返回参数:
-    pd.DataFrame -- sw_code / sw_name / sw_level / parent_code
-'''
-def fetch_sw_industries() -> pd.DataFrame:
 
-    # 一级
+def fetch_sw_industries() -> pd.DataFrame:
+    """[DEPRECATED] 获取申万一/二/三级行业定义
+
+    新流程使用 etl.sync_industry --input 读取 tmp/swclasscode.csv。
+    Returns DataFrame(sw_code, sw_name, sw_level, parent_code)
+    """
     l1 = ak.sw_index_first_info()[['行业代码', '行业名称']].copy()
     l1.columns = ['sw_code', 'sw_name']
     l1['sw_level'] = 1
     l1['parent_code'] = None
 
-    # 二级
     l2_raw = ak.sw_index_second_info()[['行业代码', '行业名称', '上级行业']].copy()
     l2_raw.columns = ['sw_code', 'sw_name', 'parent_name']
     name_to_l1_code = l1.set_index('sw_name')['sw_code'].to_dict()
@@ -192,7 +208,6 @@ def fetch_sw_industries() -> pd.DataFrame:
     l2_raw['parent_code'] = l2_raw['parent_name'].map(name_to_l1_code)
     l2 = l2_raw[['sw_code', 'sw_name', 'sw_level', 'parent_code']]
 
-    # 三级（接口不一定存在）
     try:
         l3_raw = ak.sw_index_third_info()[['行业代码', '行业名称', '上级行业']].copy()
         l3_raw.columns = ['sw_code', 'sw_name', 'parent_name']
@@ -201,32 +216,22 @@ def fetch_sw_industries() -> pd.DataFrame:
         l3_raw['parent_code'] = l3_raw['parent_name'].map(name_to_l2_code)
         l3 = l3_raw[['sw_code', 'sw_name', 'sw_level', 'parent_code']]
     except Exception as e:
-        logger.info(f"  [警告] 获取申万三级行业定义失败，跳过: {e}")
+        logger.warning(f"获取申万三级行业定义失败，跳过: {e}")
         l3 = pd.DataFrame(columns=['sw_code', 'sw_name', 'sw_level', 'parent_code'])
 
     return pd.concat([l1, l2, l3], ignore_index=True)
 
-'''
-DEPRECATED: 旧股票-申万行业映射接口。
-  新流程使用 fetch_stock_industry_clf_hist_sw() 获取
-  ak.stock_industry_clf_hist_sw() 原始历史数据，并通过视图展开一/二/三级。
-遍历行业代码，获取所有股票的申万行业归属
-输入参数:
-    industry_df: fetch_sw_industries() 返回的行业定义 DataFrame
-返回参数:
-    pd.DataFrame -- code / sw_l1_code / sw_l1_name / sw_l2_code / sw_l2_name /
-                    sw_l3_code / sw_l3_name / entry_date
-'''
-def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
 
-    # 用代码直接查父级，避免名称匹配不一致导致 L1/L2 code 为空
+def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
+    """[DEPRECATED] 获取所有股票的申万行业归属
+
+    新流程使用 fetch_stock_industry_clf_hist_sw()。
+    Returns DataFrame(code, sw_l1_code, sw_l1_name, sw_l2_code, sw_l2_name,
+                       sw_l3_code, sw_l3_name, entry_date)
+    """
     code_to_row = industry_df.set_index('sw_code').to_dict('index')
 
     def get_hierarchy(sw_code: str, sw_level: int) -> dict:
-        """给定行业代码及级别，推导完整 L1/L2/L3 字段。
-        - L3：沿 parent_code 向上推导 L2→L1，L3 有值
-        - L2：该代码即为 L2，沿 parent_code 推导 L1，L3 为空（申万未细分到三级）
-        """
         row = code_to_row.get(sw_code, {})
         if sw_level == 3:
             l3_code = sw_code
@@ -235,7 +240,7 @@ def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
             l2_row  = code_to_row.get(l2_code, {})
             l1_code = l2_row.get('parent_code') or ''
             l1_row  = code_to_row.get(l1_code, {})
-        else:  # sw_level == 2，申万仅归属到二级，无三级
+        else:
             l3_code = ''
             l3_name = ''
             l2_code = sw_code
@@ -254,8 +259,6 @@ def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
     l3_codes = industry_df[industry_df['sw_level'] == 3]['sw_code'].tolist()
     l2_codes = industry_df[industry_df['sw_level'] == 2]['sw_code'].tolist()
 
-    # L3 优先遍历；再补查所有 L2，捕捉申万仅归属到二级的股票
-    # concat 后 drop_duplicates(keep='first') 保留 L3 记录
     query_pairs = [(c, 3) for c in l3_codes] + [(c, 2) for c in l2_codes]
     total = len(query_pairs)
     logger.info(f"[akshare插件] 开始遍历 {len(l3_codes)} 个L3 + {len(l2_codes)} 个L2 行业获取成分股...")
@@ -281,7 +284,7 @@ def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
             all_records.append(df)
 
         except Exception as e:
-            logger.info(f"  [警告] 获取行业 {sw_code} 成分股失败: {e}")
+            logger.warning(f"获取行业 {sw_code} 成分股失败: {e}")
 
         if i % 20 == 0:
             logger.info(f"   已处理: {i}/{total}")
@@ -298,116 +301,191 @@ def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
     return result[cols].reset_index(drop=True)
 
 
-'''
-获取指定交易日沪深两市融资融券明细数据，合并后返回统一格式 DataFrame。
+def _fetch_summary_sse(begin_date: str, end_date: str) -> pd.DataFrame:
+    """上交所融资融券汇总：单次区间查询。"""
+    try:
+        df = ak.stock_margin_sse(start_date=begin_date, end_date=end_date)
+    except Exception as e:
+        logger.warning(f"  [WARN] 上交所融资融券汇总获取失败: {e}")
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
 
-输入:
-  trade_date: 交易日字符串 (格式: YYYYMMDD)
-输出列:
-  code, trade_date, name, exchange,
-  margin_buy, margin_balance, margin_repay,
-  short_sell_vol, short_balance_vol, short_repay_vol,
-  short_balance_amt, total_balance
-'''
-def fetch_margin_data(trade_date: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
 
-    OUT_COLS = [
-        'code', 'trade_date', 'name', 'exchange',
-        'margin_buy', 'margin_balance', 'margin_repay',
-        'short_sell_vol', 'short_balance_vol', 'short_repay_vol',
-        'short_balance_amt', 'total_balance',
-    ]
+    df = df.rename(columns={
+        '信用交易日期':   'trade_date',
+        '融资余额':       'margin_balance',
+        '融资买入额':     'margin_buy_amount',
+        '融券余量':       'short_balance_volume',
+        '融券余量金额':   'short_balance_amount',
+        '融券卖出量':     'short_sell_volume',
+        '融资融券余额':   'margin_short_balance',
+    })
+    df['trade_date'] = pd.to_datetime(df['trade_date'].astype(str), format='%Y%m%d', errors='coerce').dt.date
+    df = df.dropna(subset=['trade_date']).copy()
+    df['exchange_code']        = 'SH'
+    df['margin_repay_amount']  = None
+    df['short_repay_volume']   = None
+    return df.reindex(columns=_SUMMARY_OUT_COLS).reset_index(drop=True)
+
+
+def _fetch_summary_szse(trade_dates: list[str]) -> pd.DataFrame:
+    """深交所融资融券汇总：逐日查询，取"融资融券"汇总行。"""
+    rows = []
+    for d in trade_dates:
+        try:
+            df = ak.stock_margin_szse(date=d)
+        except Exception as e:
+            logger.warning(f"  [WARN] 深交所融资融券汇总 {d} 获取失败: {e}")
+            continue
+        if df is None or df.empty:
+            continue
+
+        if '项目' in df.columns:
+            df = df[df['项目'].astype(str).str.strip() == '融资融券'].copy()
+            if df.empty:
+                continue
+
+        df = df.rename(columns={
+            '数据日期':       'trade_date',
+            '融资买入额':     'margin_buy_amount',
+            '融资余额':       'margin_balance',
+            '融券卖出量':     'short_sell_volume',
+            '融券余量金额':   'short_balance_amount',
+            '融券余量':       'short_balance_volume',
+            '融资融券余额':   'margin_short_balance',
+        })
+        if 'trade_date' not in df.columns:
+            df['trade_date'] = d
+        df['trade_date']           = pd.to_datetime(df['trade_date'].astype(str), errors='coerce').dt.date
+        df['exchange_code']        = 'SZ'
+        df['margin_repay_amount']  = None
+        df['short_repay_volume']   = None
+        rows.append(df.reindex(columns=_SUMMARY_OUT_COLS))
+
+    if not rows:
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
+    return pd.concat(rows, ignore_index=True)
+
+
+def fetch_margin_summary(begin_date: str, end_date: str,
+                         exchanges: list[str],
+                         trade_dates: list[str]) -> pd.DataFrame:
+    """获取沪深融资融券每日汇总数据 (MARGIN_SUMMARY_DAILY)
+
+    Parameters
+    ----------
+    begin_date / end_date : YYYYMMDD
+    exchanges : 交易所列表，元素 sh/sz/all
+    trade_dates : 区间内交易日列表 YYYYMMDD，供 SZ 逐日抓取使用
+    """
+    target = set(e.lower() for e in exchanges)
+    want_sh = ('sh' in target) or ('all' in target)
+    want_sz = ('sz' in target) or ('all' in target)
+
+    parts = []
+    if want_sh:
+        df_sh = _fetch_summary_sse(begin_date, end_date)
+        logger.info(f"  上交所汇总: {len(df_sh)} 条")
+        parts.append(df_sh)
+    if want_sz:
+        df_sz = _fetch_summary_szse(trade_dates)
+        logger.info(f"  深交所汇总: {len(df_sz)} 条")
+        parts.append(df_sz)
+
+    if not parts:
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
+    return pd.concat(parts, ignore_index=True).reset_index(drop=True)
+
+
+def fetch_margin_detail(trade_date: str, exchanges: list[str]) -> pd.DataFrame:
+    """获取指定交易日的沪深融资融券明细 (MARGIN_DETAIL_DAILY)
+
+    Parameters
+    ----------
+    trade_date : YYYYMMDD
+    exchanges : 交易所列表，元素 sh/sz/all
+    """
+    target = set(e.lower() for e in exchanges)
+    want_sh = ('sh' in target) or ('all' in target)
+    want_sz = ('sz' in target) or ('all' in target)
+
     trade_dt = datetime.strptime(trade_date, '%Y%m%d').date()
-    dfs = []
+    dfs: list[pd.DataFrame] = []
 
-    # ── 深交所 ────────────────────────────────────────────────────────────
-    try:
-        df_sz = ak.stock_margin_detail_szse(date=trade_date)
-        if not df_sz.empty:
-            df_sz = df_sz.rename(columns={
-                '证券代码':     'symbol',
-                '证券简称':     'name',
-                '融资买入额':   'margin_buy',
-                '融资余额':     'margin_balance',
-                '融券卖出量':   'short_sell_vol',
-                '融券余量':     'short_balance_vol',
-                '融券余额':     'short_balance_amt',
-                '融资融券余额': 'total_balance',
-            })
-            # 只保留 A 股 (代码以 0 或 3 开头的 6 位数字)
-            df_sz = df_sz[df_sz['symbol'].astype(str).str.match(r'^[03]\d{5}$')].copy()
-            df_sz['code']       = df_sz['symbol'].astype(str).str.zfill(6) + '.SZ'
-            df_sz['trade_date'] = trade_dt
-            df_sz['exchange']   = 'SZ'
-            df_sz['margin_repay']    = None
-            df_sz['short_repay_vol'] = None
-            dfs.append(df_sz)
-            logger.info(f"  深交所: {len(df_sz)} 条")
-    except Exception as e:
-        logger.warning(f"  [WARN] 深交所融资融券获取失败: {e}")
+    if want_sz:
+        try:
+            df_sz = ak.stock_margin_detail_szse(date=trade_date)
+            if df_sz is not None and not df_sz.empty:
+                df_sz = df_sz.rename(columns={
+                    '证券代码':     'symbol',
+                    '融资买入额':   'margin_buy_amount',
+                    '融资余额':     'margin_balance',
+                    '融券卖出量':   'short_sell_volume',
+                    '融券余量':     'short_balance_volume',
+                    '融券余额':     'short_balance_amount',
+                    '融资融券余额': 'margin_short_balance',
+                })
+                df_sz = df_sz[df_sz['symbol'].astype(str).str.match(r'^[03]\d{5}$')].copy()
+                df_sz['symbol']              = df_sz['symbol'].astype(str).str.zfill(6)
+                df_sz['code']                = df_sz['symbol'] + '.SZ'
+                df_sz['trade_date']          = trade_dt
+                df_sz['exchange_code']       = 'SZ'
+                df_sz['margin_repay_amount'] = None
+                df_sz['short_repay_volume']  = None
+                dfs.append(df_sz.reindex(columns=_DETAIL_OUT_COLS))
+                logger.info(f"  深交所明细: {len(df_sz)} 条")
+        except Exception as e:
+            logger.warning(f"  [WARN] 深交所融资融券明细 {trade_date} 获取失败: {e}")
 
-    # ── 上交所 ────────────────────────────────────────────────────────────
-    try:
-        df_sh = ak.stock_margin_detail_sse(date=trade_date)
-        if not df_sh.empty:
-            df_sh = df_sh.rename(columns={
-                '信用交易日期':   'trade_date_raw',
-                '标的证券代码':   'symbol',
-                '标的证券简称':   'name',
-                '融资余额':       'margin_balance',
-                '融资买入额':     'margin_buy',
-                '融资偿还额':     'margin_repay',
-                '融券余量':       'short_balance_vol',
-                '融券卖出量':     'short_sell_vol',
-                '融券偿还量':     'short_repay_vol',
-            })
-            # 只保留 A 股 (代码以 6 开头的 6 位数字)
-            df_sh = df_sh[df_sh['symbol'].astype(str).str.match(r'^6\d{5}$')].copy()
-            df_sh['code']       = df_sh['symbol'].astype(str).str.zfill(6) + '.SH'
-            df_sh['trade_date'] = trade_dt
-            df_sh['exchange']   = 'SH'
-            df_sh['short_balance_amt'] = None
-            df_sh['total_balance']     = None
-            dfs.append(df_sh)
-            logger.info(f"  上交所: {len(df_sh)} 条")
-    except Exception as e:
-        logger.warning(f"  [WARN] 上交所融资融券获取失败: {e}")
+    if want_sh:
+        try:
+            df_sh = ak.stock_margin_detail_sse(date=trade_date)
+            if df_sh is not None and not df_sh.empty:
+                df_sh = df_sh.rename(columns={
+                    '标的证券代码':   'symbol',
+                    '融资余额':       'margin_balance',
+                    '融资买入额':     'margin_buy_amount',
+                    '融资偿还额':     'margin_repay_amount',
+                    '融券余量':       'short_balance_volume',
+                    '融券卖出量':     'short_sell_volume',
+                    '融券偿还量':     'short_repay_volume',
+                })
+                df_sh = df_sh[df_sh['symbol'].astype(str).str.match(r'^6\d{5}$')].copy()
+                df_sh['symbol']               = df_sh['symbol'].astype(str).str.zfill(6)
+                df_sh['code']                 = df_sh['symbol'] + '.SH'
+                df_sh['trade_date']           = trade_dt
+                df_sh['exchange_code']        = 'SH'
+                df_sh['short_balance_amount'] = None
+                df_sh['margin_short_balance'] = None
+                dfs.append(df_sh.reindex(columns=_DETAIL_OUT_COLS))
+                logger.info(f"  上交所明细: {len(df_sh)} 条")
+        except Exception as e:
+            logger.warning(f"  [WARN] 上交所融资融券明细 {trade_date} 获取失败: {e}")
 
     if not dfs:
-        return pd.DataFrame(columns=OUT_COLS)
-
-    result = pd.concat(dfs, ignore_index=True)
-
-    # 确保所有输出列存在，缺失列补 None
-    for col in OUT_COLS:
-        if col not in result.columns:
-            result[col] = None
-
-    return result[OUT_COLS].reset_index(drop=True)
+        return pd.DataFrame(columns=_DETAIL_OUT_COLS)
+    return pd.concat(dfs, ignore_index=True).reset_index(drop=True)
 
 
-'''
-获取股票申万行业分类历史原始数据
-接口: ak.stock_industry_clf_hist_sw()
-返回:
-  symbol / start_date / industry_code / update_time
-'''
 def fetch_stock_industry_clf_hist_sw() -> pd.DataFrame:
+    """获取股票申万行业分类历史原始数据
 
-    OUT_COLS = ['symbol', 'start_date', 'industry_code', 'update_time']
-
+    接口: ak.stock_industry_clf_hist_sw()
+    Returns DataFrame(symbol, start_date, industry_code, update_time)
+    """
     try:
         df = ak.stock_industry_clf_hist_sw()
         if df is None or df.empty:
             logger.warning("stock_industry_clf_hist_sw 未返回数据")
-            return pd.DataFrame(columns=OUT_COLS)
+            return pd.DataFrame(columns=_INDUSTRY_OUT_COLS)
 
-        missing = [c for c in OUT_COLS if c not in df.columns]
+        missing = [c for c in _INDUSTRY_OUT_COLS if c not in df.columns]
         if missing:
             logger.error(f"stock_industry_clf_hist_sw 缺少字段: {missing}")
-            return pd.DataFrame(columns=OUT_COLS)
+            return pd.DataFrame(columns=_INDUSTRY_OUT_COLS)
 
-        result = df[OUT_COLS].copy()
+        result = df[_INDUSTRY_OUT_COLS].copy()
         result = result.dropna(subset=['symbol', 'start_date', 'industry_code'])
         result['symbol'] = result['symbol'].astype(str).str.strip().str.zfill(6)
         result['industry_code'] = result['industry_code'].astype(str).str.strip()
@@ -418,7 +496,7 @@ def fetch_stock_industry_clf_hist_sw() -> pd.DataFrame:
         result = result.drop_duplicates(subset=['symbol', 'start_date', 'industry_code'], keep='last')
 
         logger.info(f"[成功] 获取股票申万行业历史 {len(result)} 条")
-        return result[OUT_COLS].reset_index(drop=True)
+        return result[_INDUSTRY_OUT_COLS].reset_index(drop=True)
     except Exception as e:
         logger.error(f"获取股票申万行业历史失败: {e}")
-        return pd.DataFrame(columns=OUT_COLS)
+        return pd.DataFrame(columns=_INDUSTRY_OUT_COLS)

@@ -306,14 +306,18 @@ def _query_xdr_preclose_mismatches(conn: duckdb.DuckDBPyConnection,
         JOIN prev_day p ON p.code = e.code AND p.xdr_date = e.xdr_date
         LEFT JOIN STOCK_DAILY pd1 ON pd1.code = e.code AND pd1.date = p.prev_date
         LEFT JOIN STOCK_DAILY cur ON cur.code = e.code AND cur.date = e.xdr_date
+    ),
+    computed AS (
+        SELECT code, xdr_date, name, close_prev, pre_close, tradestatus,
+               {_XDR_THEORY_SQL} AS theory
+        FROM joined
     )
-    SELECT xdr_date, code, name, close_prev, pre_close,
-           {_XDR_THEORY_SQL} AS theory
-    FROM joined
+    SELECT xdr_date, code, name, close_prev, pre_close, theory
+    FROM computed
     WHERE COALESCE(tradestatus, 1) <> 0
       AND close_prev IS NOT NULL
       AND pre_close IS NOT NULL
-      AND ROUND(ABS(pre_close - ({_XDR_THEORY_SQL})), 4) > 0.01
+      AND ROUND(ABS(pre_close - theory), 4) > 0.01
     ORDER BY xdr_date, code
     """
     params = [begin_date, end_date, *code_params]

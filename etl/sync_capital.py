@@ -412,7 +412,11 @@ def save_capital_detail_to_db(df: pd.DataFrame):
             SELECT
                 code,
                 CAST(
-                    STRPTIME(CAST(CAST(date AS INTEGER) AS VARCHAR), '%Y%m%d')
+                    COALESCE(
+                        TRY_STRPTIME(CAST(TRY_CAST(date AS BIGINT) AS VARCHAR), '%Y%m%d'),
+                        TRY_STRPTIME(CAST(date AS VARCHAR), '%Y-%m-%d'),
+                        TRY_CAST(date AS TIMESTAMP)
+                    )
                     AS DATE
                 ),
                 category,

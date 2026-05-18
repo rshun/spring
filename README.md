@@ -144,8 +144,9 @@ python -m etl.fill_volratio
 # 补齐深沪市涨停数据(补齐T-1日,每天运行)
 python -m etl.update_limit 
 
-# 根据CAPITAL_DETAIL回填DAILY_BASIC的总股本和流通股本(补齐T-1日)
-python  -m etl.fill_shares 
+# 根据CAPITAL_DETAIL回填DAILY_BASIC的总股本和流通股本(默认补齐T-1日，每天运行)  
+# 由于新股上市会有数据上窗口空缺, 所以回填数据以15天为限来保证股本数据有值  
+python  -m etl.fill_shares -b 20260501 -e 20260515  
 ```
 
 #### 同步申万行业数据  
@@ -243,6 +244,10 @@ pytest tests/integration/
 
 - bstock
    - **有时候日线有数据，且下载未报错, 但pb,pe不一定有值, 如果后续有用到需要先校验再使用**
+   - **此数据源以下日期和股票缺失**
+      - 2012-09-10,001872.SZ,招商港口
+      - 2012-09-10,001914.SZ,招商积余
+      - 2012-09-10,302132.SZ,中航成飞
 
 ## ⚠ 注意  
    - **若当日停牌,tdx,lday,bstock均会插入数据到STOCK_DAILY和DAILY_BASIC表**

@@ -25,15 +25,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-b', '--begin',
         type=str,
-        default=myutil.get_today(),
-        help='指定起始日期 (格式: YYYYMMDD)，默认为当天'
+        default=myutil.get_yesterday(),
+        help='指定起始日期 (格式: YYYYMMDD)，默认为 T-1 日 (昨天)'
     )
 
     parser.add_argument(
         '-e', '--end',
         type=str,
-        default=myutil.get_today(),
-        help='指定结束日期 (格式: YYYYMMDD)，默认为当天'
+        default=myutil.get_yesterday(),
+        help='指定结束日期 (格式: YYYYMMDD)，默认为 T-1 日 (昨天)'
     )
 
     parser.add_argument(

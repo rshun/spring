@@ -23,6 +23,13 @@ _DETAIL_OUT_COLS = [
     'margin_short_balance',
 ]
 
+_DETAIL_NUM_COLS = [
+    'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
+    'short_sell_volume', 'short_repay_volume',
+    'short_balance_volume', 'short_balance_amount',
+    'margin_short_balance',
+]
+
 _INDUSTRY_OUT_COLS = ['symbol', 'start_date', 'industry_code', 'update_time']
 
 
@@ -465,7 +472,11 @@ def fetch_margin_detail(trade_date: str, exchanges: list[str]) -> pd.DataFrame:
 
     if not dfs:
         return pd.DataFrame(columns=_DETAIL_OUT_COLS)
-    return pd.concat(dfs, ignore_index=True).reset_index(drop=True)
+    result = pd.concat(dfs, ignore_index=True).reset_index(drop=True)
+    # 数值列统一转 float64，避免 DuckDB 把大额(>21亿)金额列推断成 INT32 溢出
+    for col in _DETAIL_NUM_COLS:
+        result[col] = pd.to_numeric(result[col], errors='coerce').astype('float64')
+    return result
 
 
 def fetch_stock_industry_clf_hist_sw() -> pd.DataFrame:

@@ -560,7 +560,8 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
 
 
 def main() -> int:
-    """返回值: 0=完整, 1=有缺失, 2=检查出错"""
+    """返回值: 0=核心日线完整, 1=核心日线有缺失, 2=检查出错
+    (除权前收价/指标空值/is_st 仅告警写 CSV，不影响返回码)"""
     myutil.configure_etl_logging()
     args = parse_arguments()
     if not check_parameters(args.begin, args.end, args.forcerun):
@@ -587,31 +588,38 @@ def main() -> int:
     try:
         conn = dbutil.get_connection()
 
-        total_missing = 0
-        total_missing += _check_table(conn, "日线数据    ", "STOCK_DAILY", "date",
-                                      begin_date, end_date, ex_filter, code_filter, code_params,
-                                      is_self_table=True)
-        total_missing += _check_table(conn, "复权因子数据", "ADJ_FACTOR", "trade_date",
-                                      begin_date, end_date, ex_filter, code_filter, code_params)
-        total_missing += _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
-                                      begin_date, end_date, ex_filter, code_filter, code_params)
-        total_missing += _check_is_st_null(conn, begin_date, end_date,
-                                           ex_filter, code_filter, code_params)
-        total_missing += _check_daily_basic_nulls(conn, begin_date, end_date,
-                                                  ex_filter, code_filter, code_params)
-        total_missing += _check_xdr_preclose(conn, begin_date, end_date,
-                                             ex_filter, code_filter, code_params)
+        # 核心日线缺记录 -> 阻断管道(返回 1)
+        core_missing = 0
+        core_missing += _check_table(conn, "日线数据    ", "STOCK_DAILY", "date",
+                                     begin_date, end_date, ex_filter, code_filter, code_params,
+                                     is_self_table=True)
+        core_missing += _check_table(conn, "复权因子数据", "ADJ_FACTOR", "trade_date",
+                                     begin_date, end_date, ex_filter, code_filter, code_params)
+        core_missing += _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
+                                     begin_date, end_date, ex_filter, code_filter, code_params)
         if args.include_index:
-            total_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
-                                          begin_date, end_date, ex_filter, code_filter, code_params,
-                                          is_self_table=True, board_sql="board = 'INDEX'")
+            core_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
+                                         begin_date, end_date, ex_filter, code_filter, code_params,
+                                         is_self_table=True, board_sql="board = 'INDEX'")
+
+        # 以下三类: 继续检查、写 CSV、打日志告警，但不阻断管道
+        warn_missing = 0
+        warn_missing += _check_is_st_null(conn, begin_date, end_date,
+                                          ex_filter, code_filter, code_params)
+        warn_missing += _check_daily_basic_nulls(conn, begin_date, end_date,
+                                                 ex_filter, code_filter, code_params)
+        warn_missing += _check_xdr_preclose(conn, begin_date, end_date,
+                                            ex_filter, code_filter, code_params)
 
         logger.info("-" * 60)
-        if total_missing == 0:
-            logger.info("检查完成: 所有表数据完整 OK")
+        if warn_missing:
+            logger.warning(f"非阻断检查: 共发现 {warn_missing} 条告警记录"
+                           f"(除权前收价/指标空值/is_st，已写 CSV，不阻断管道)")
+        if core_missing == 0:
+            logger.info("检查完成: 核心日线数据完整 OK")
             return 0
         else:
-            logger.warning(f"检查完成: 共发现 {total_missing} 条缺失记录")
+            logger.warning(f"检查完成: 核心日线发现 {core_missing} 条缺失记录")
             return 1
 
     except Exception as e:

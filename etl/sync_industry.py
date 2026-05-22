@@ -44,6 +44,11 @@ def parse_arguments() -> argparse.Namespace:
         help='--input 模式下写入 SW_INDUSTRY 的申万行业版本号 (默认 2021)'
     )
     parser.add_argument(
+        '--download',
+        action='store_true',
+        help='强制从申万官网下载 StockClassifyUse_stock.xls 取数，跳过 akshare'
+    )
+    parser.add_argument(
         '-f', '--forcerun',
         action='store_true',
         help='强制运行，即使当前日期不是交易日'
@@ -181,13 +186,23 @@ def main() -> None:
                 logger.info(f"  共读取 {len(industry_df)} 条申万行业层级定义。")
                 dbutil.save_sw_industry_hierarchy_to_db(industry_df, conn)
         else:
-            module = myutil.import_source_module(args.source)
-            if not hasattr(module, 'fetch_stock_industry_clf_hist_sw'):
-                logger.error(f"模块 '{args.source}' 中没有定义 'fetch_stock_industry_clf_hist_sw' 方法。")
-                return
+            from datasource import dlhttp
 
-            logger.info("\n[Step 1] 获取股票申万行业历史原始数据...")
-            raw_df = module.fetch_stock_industry_clf_hist_sw()
+            if args.download:
+                logger.info("\n[Step 1] 强制从申万官网下载文件获取股票申万行业历史原始数据...")
+                raw_df = dlhttp.fetch_stock_industry_clf_hist_sw()
+            else:
+                module = myutil.import_source_module(args.source)
+                if not hasattr(module, 'fetch_stock_industry_clf_hist_sw'):
+                    logger.error(f"模块 '{args.source}' 中没有定义 'fetch_stock_industry_clf_hist_sw' 方法。")
+                    return
+
+                logger.info("\n[Step 1] 获取股票申万行业历史原始数据...")
+                raw_df = module.fetch_stock_industry_clf_hist_sw()
+                if raw_df is None or raw_df.empty:
+                    logger.warning(f"{args.source} 未获取到数据，回退到申万官网文件下载...")
+                    raw_df = dlhttp.fetch_stock_industry_clf_hist_sw()
+
             if raw_df is None or raw_df.empty:
                 logger.warning("未获取到股票申万行业历史原始数据，跳过写入。")
             else:

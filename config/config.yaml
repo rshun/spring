@@ -27,6 +27,21 @@ baostock:
   # Broken pipe 断管后重新登录的等待时间（秒）
   retry_delay_pipe: 0.5
 
+# 申万宏源研究 (swsresearch.com) HTTP 文件下载源
+# 作为 sync_industry akshare 取数失败时的回退数据源
+sws:
+  # 申万行业分类（个股）历史明细 xls 下载地址
+  classify_xls_url: "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
+  # 下载请求超时（秒）
+  request_timeout: 30
+  # 下载重试次数
+  tries: 3
+  # 重试间隔（秒）
+  retry_delay: 3
+  # 是否校验 HTTPS 证书：申万官网证书链不完整，开启校验会 CERTIFICATE_VERIFY_FAILED，
+  # 故默认关闭。下载的是公开只读文件，风险较低；如所在网络可正常校验可改为 true。
+  verify_ssl: false
+
 tdx:
   # 通达信行情服务器列表 (IP, 端口)，按经验优先级排序
   servers:

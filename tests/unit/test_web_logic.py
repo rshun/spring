@@ -3,7 +3,7 @@ import datetime
 import pandas as pd
 from unittest.mock import patch
 
-from datasource.dlhttp import (
+from datasource.web import (
     read_classify_xls,
     _clean_industry_df,
     fetch_stock_industry_clf_hist_sw,
@@ -24,14 +24,14 @@ def _raw_xls_df():
 # ── read_classify_xls ─────────────────────────────────────────────────────────
 
 def test_read_classify_xls_renames_columns():
-    with patch("datasource.dlhttp.pd.read_excel", return_value=_raw_xls_df()):
+    with patch("datasource.web.pd.read_excel", return_value=_raw_xls_df()):
         df = read_classify_xls("dummy.xls")
     assert list(df.columns) == _INDUSTRY_OUT_COLS
 
 
 def test_read_classify_xls_missing_column_raises():
     bad = _raw_xls_df().drop(columns=['行业代码'])
-    with patch("datasource.dlhttp.pd.read_excel", return_value=bad):
+    with patch("datasource.web.pd.read_excel", return_value=bad):
         try:
             read_classify_xls("dummy.xls")
             assert False, "应抛出缺少字段异常"
@@ -65,15 +65,15 @@ def test_clean_drops_invalid_start_date():
 # ── fetch_stock_industry_clf_hist_sw ──────────────────────────────────────────
 
 def test_fetch_returns_empty_on_download_failure():
-    with patch("datasource.dlhttp._download", side_effect=Exception("网络错误")):
+    with patch("datasource.web._download", side_effect=Exception("网络错误")):
         df = fetch_stock_industry_clf_hist_sw()
     assert df.empty
     assert list(df.columns) == _INDUSTRY_OUT_COLS
 
 
 def test_fetch_happy_path():
-    with patch("datasource.dlhttp._download", return_value=None), \
-         patch("datasource.dlhttp.pd.read_excel", return_value=_raw_xls_df()):
+    with patch("datasource.web._download", return_value=None), \
+         patch("datasource.web.pd.read_excel", return_value=_raw_xls_df()):
         df = fetch_stock_industry_clf_hist_sw()
     assert list(df.columns) == _INDUSTRY_OUT_COLS
     assert df['symbol'].iloc[0] == '000001'
@@ -81,5 +81,5 @@ def test_fetch_happy_path():
 
 
 def _rename(raw: pd.DataFrame) -> pd.DataFrame:
-    from datasource.dlhttp import _CLASSIFY_COL_MAP
+    from datasource.web import _CLASSIFY_COL_MAP
     return raw.rename(columns=_CLASSIFY_COL_MAP)[_INDUSTRY_OUT_COLS].copy()

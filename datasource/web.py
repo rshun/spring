@@ -1,6 +1,8 @@
-"""HTTP 文件下载数据源
+# 修改记录:
+#   2026-05-22  Claude  从 dlhttp.py 重命名为 web.py，定位为通用 http/https 文件下载数据源
+"""通用 http/https 文件下载数据源
 
-通过 https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。
+通过 http/https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。
 目前提供申万行业分类（个股）历史明细，从申万宏源研究 (swsresearch.com) 下载
 StockClassifyUse_stock.xls 并解析为与 akstock.fetch_stock_industry_clf_hist_sw()
 完全一致的 DataFrame，便于两者互为回退。
@@ -13,7 +15,7 @@ import pandas as pd
 
 from util.config import get_config
 
-logger = logging.getLogger("etl.datasource.dlhttp")
+logger = logging.getLogger("etl.datasource.web")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOWNLOAD_DIR = PROJECT_ROOT / "download"

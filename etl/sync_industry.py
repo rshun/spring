@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-05-22  Claude  数据源模块 dlhttp 重命名为 web，更新 import 引用
 """
 同步申万行业数据
   1、默认通过 ak.stock_industry_clf_hist_sw() 获取股票申万三级行业历史原始数据
@@ -186,11 +188,11 @@ def main() -> None:
                 logger.info(f"  共读取 {len(industry_df)} 条申万行业层级定义。")
                 dbutil.save_sw_industry_hierarchy_to_db(industry_df, conn)
         else:
-            from datasource import dlhttp
+            from datasource import web
 
             if args.download:
                 logger.info("\n[Step 1] 强制从申万官网下载文件获取股票申万行业历史原始数据...")
-                raw_df = dlhttp.fetch_stock_industry_clf_hist_sw()
+                raw_df = web.fetch_stock_industry_clf_hist_sw()
             else:
                 module = myutil.import_source_module(args.source)
                 if not hasattr(module, 'fetch_stock_industry_clf_hist_sw'):
@@ -201,7 +203,7 @@ def main() -> None:
                 raw_df = module.fetch_stock_industry_clf_hist_sw()
                 if raw_df is None or raw_df.empty:
                     logger.warning(f"{args.source} 未获取到数据，回退到申万官网文件下载...")
-                    raw_df = dlhttp.fetch_stock_industry_clf_hist_sw()
+                    raw_df = web.fetch_stock_industry_clf_hist_sw()
 
             if raw_df is None or raw_df.empty:
                 logger.warning("未获取到股票申万行业历史原始数据，跳过写入。")

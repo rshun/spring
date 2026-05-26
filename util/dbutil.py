@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-05-26  Claude  新增 save_capital_detail_to_db (从 etl/sync_capital.py 迁入)
 import logging
 import duckdb
 import pandas as pd
@@ -694,6 +696,47 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
     finally:
         try:
             conn.unregister("temp_margin_detail")
+        except Exception:
+            pass
+
+
+def save_capital_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
+    """将股本变迁数据写入 CAPITAL_DETAIL 表"""
+    if df is None or df.empty:
+        logger.info("无股本变迁数据，跳过写入。")
+        return
+
+    logger.info(f"正在将 {len(df)} 条股本变迁数据写入数据库...")
+    try:
+        conn.register("temp_capital_detail", df)
+        conn.execute("""
+            INSERT OR REPLACE INTO CAPITAL_DETAIL
+                (code, date, category, dividend, allotment_price,
+                 bonus_share, allotment_share, updated_at)
+            SELECT
+                code,
+                CAST(
+                    COALESCE(
+                        TRY_STRPTIME(CAST(TRY_CAST(date AS BIGINT) AS VARCHAR), '%Y%m%d'),
+                        TRY_STRPTIME(CAST(date AS VARCHAR), '%Y-%m-%d'),
+                        TRY_CAST(date AS TIMESTAMP)
+                    )
+                    AS DATE
+                ),
+                category,
+                CAST(dividend        AS DOUBLE),
+                CAST(allotment_price AS DOUBLE),
+                CAST(bonus_share     AS DOUBLE),
+                CAST(allotment_share AS DOUBLE),
+                now()
+            FROM temp_capital_detail
+        """)
+        logger.info(f"[入库] 成功写入 {len(df)} 条股本变迁数据")
+    except Exception as e:
+        logger.error(f"写入 CAPITAL_DETAIL 表失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_capital_detail")
         except Exception:
             pass
 

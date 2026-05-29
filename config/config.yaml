@@ -18,6 +18,10 @@ akshare:
   max_fail: 20
   # 单次行情接口请求超时时间（秒）
   request_timeout: 30
+  # 融资融券等接口单次调用的异常重试次数（含首次），用于缓解 szse/sse 官网偶发 SSL 断连
+  tries: 3
+  # 重试间隔（秒）
+  retry_delay: 3
 
 baostock:
   # 单只股票最多重试次数

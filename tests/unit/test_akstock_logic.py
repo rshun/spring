@@ -10,6 +10,7 @@ from datasource.akstock import (
     fetch_stock_industry_clf_hist_sw,
     _fetch_summary_sse,
     _fetch_summary_szse,
+    _retry_call,
     _SUMMARY_OUT_COLS,
     _DETAIL_OUT_COLS,
     _INDUSTRY_OUT_COLS,
@@ -151,15 +152,16 @@ def test_fetch_summary_sse_ak_raises_returns_empty():
 # ── _fetch_summary_szse 逐日 + exchange_code ─────────────────────────────────
 
 def _szse_raw():
-    # Column names match what ak.stock_margin_szse returns and what
-    # _fetch_summary_szse() expects to rename.
-    # The '项目' column must contain '融资融券' for the row to be kept.
+    # 列名/格式对齐 ak.stock_margin_szse 真实返回:
+    #   - '项目' 列须为 '融资融券' 才被保留;
+    #   - '融券余额' (非 '融券余量金额') 映射到 short_balance_amount;
+    #   - 数值以"亿"为单位显示且带千分位逗号, _fetch_summary_szse 会去逗号后 ×1e8 转元/股。
     return pd.DataFrame({
         "数据日期": ["20230103"],
         "项目": ["融资融券"],
-        "融资买入额": [1e9], "融资余额": [1e10],
-        "融券卖出量": [5e5], "融券余量金额": [1e8],
-        "融券余量": [1e6], "融资融券余额": [2e10],
+        "融资买入额": ["1,519.96"], "融资余额": ["14,220.17"],
+        "融券卖出量": ["0.29"], "融券余额": ["76.67"],
+        "融券余量": ["8.84"], "融资融券余额": ["14,296.85"],
     })
 
 
@@ -169,8 +171,36 @@ def test_fetch_summary_szse_exchange_code():
     assert (result["exchange_code"] == "SZ").all()
 
 
+def test_fetch_summary_szse_maps_short_balance_amount():
+    """正例: 「融券余额」列应正确映射到 short_balance_amount (回归测试: 原映射误写为「融券余量金额」)。"""
+    with patch("datasource.akstock.ak.stock_margin_szse", return_value=_szse_raw()):
+        result = _fetch_summary_szse(["20230103"])
+    # 76.67 亿 → ×1e8 元; 8.84 亿 → ×1e8 股
+    assert result["short_balance_amount"].iloc[0] == pytest.approx(76.67e8)
+    assert result["short_balance_volume"].iloc[0] == pytest.approx(8.84e8)
+
+
+def test_fetch_summary_szse_converts_yi_to_yuan():
+    """正例: "亿"显示值(含千分位逗号)统一 ×1e8 转元/股。"""
+    with patch("datasource.akstock.ak.stock_margin_szse", return_value=_szse_raw()):
+        result = _fetch_summary_szse(["20230103"])
+    assert result["margin_balance"].iloc[0] == pytest.approx(14220.17e8)
+    assert result["margin_buy_amount"].iloc[0] == pytest.approx(1519.96e8)
+    assert result["margin_short_balance"].iloc[0] == pytest.approx(14296.85e8)
+    assert result["short_sell_volume"].iloc[0] == pytest.approx(0.29e8)
+
+
+def test_fetch_summary_szse_missing_short_balance_column():
+    """反例: akshare 改列名或缺失「融券余额」时, short_balance_amount 安全降级为空, 不报错。"""
+    df_no_amount = _szse_raw().drop(columns=["融券余额"])
+    with patch("datasource.akstock.ak.stock_margin_szse", return_value=df_no_amount):
+        result = _fetch_summary_szse(["20230103"])
+    assert len(result) == 1
+    assert result["short_balance_amount"].isna().all()
+
+
 def test_fetch_summary_szse_skip_failed_day():
-    """某日接口失败时跳过，继续处理其余日期。"""
+    """某日接口失败时跳过，继续处理其余日期。重试次数固定为 1 以隔离跳过逻辑。"""
     call_count = 0
 
     def side_effect(date):
@@ -180,10 +210,79 @@ def test_fetch_summary_szse_skip_failed_day():
             raise Exception("接口错误")
         return _szse_raw()
 
-    with patch("datasource.akstock.ak.stock_margin_szse", side_effect=side_effect):
+    with patch("datasource.akstock._get_retry_tries", return_value=1), \
+         patch("datasource.akstock.ak.stock_margin_szse", side_effect=side_effect):
         result = _fetch_summary_szse(["20230103", "20230104"])
     assert call_count == 2
     assert len(result) == 1
+
+
+# ── _retry_call 异常重试 ─────────────────────────────────────────────────────
+
+def test_retry_call_succeeds_first_try():
+    """正例: 首次成功时只调用一次，不重试、不 sleep。"""
+    calls = []
+
+    def fn():
+        calls.append(1)
+        return "ok"
+
+    with patch("datasource.akstock._get_retry_tries", return_value=3), \
+         patch("datasource.akstock.time.sleep") as mock_sleep:
+        result = _retry_call(fn, "测试接口")
+    assert result == "ok"
+    assert len(calls) == 1
+    mock_sleep.assert_not_called()
+
+
+def test_retry_call_retries_then_succeeds():
+    """正例: 前两次抛异常、第三次成功，最终返回结果，共调用 3 次。"""
+    calls = []
+
+    def fn():
+        calls.append(1)
+        if len(calls) < 3:
+            raise ConnectionError("SSL EOF")
+        return "ok"
+
+    with patch("datasource.akstock._get_retry_tries", return_value=3), \
+         patch("datasource.akstock._get_retry_delay", return_value=0), \
+         patch("datasource.akstock.time.sleep"):
+        result = _retry_call(fn, "测试接口")
+    assert result == "ok"
+    assert len(calls) == 3
+
+
+def test_retry_call_raises_after_exhausting_tries():
+    """反例: 全部失败时抛出最后一次异常，调用次数等于 tries。"""
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise ConnectionError("SSL EOF")
+
+    with patch("datasource.akstock._get_retry_tries", return_value=3), \
+         patch("datasource.akstock._get_retry_delay", return_value=0), \
+         patch("datasource.akstock.time.sleep"):
+        with pytest.raises(ConnectionError):
+            _retry_call(fn, "测试接口")
+    assert len(calls) == 3
+
+
+def test_retry_call_does_not_retry_empty_result():
+    """反例: 空结果是合法返回(如非交易日)，不应触发重试。"""
+    calls = []
+
+    def fn():
+        calls.append(1)
+        return pd.DataFrame()
+
+    with patch("datasource.akstock._get_retry_tries", return_value=3), \
+         patch("datasource.akstock.time.sleep") as mock_sleep:
+        result = _retry_call(fn, "测试接口")
+    assert result is not None and result.empty
+    assert len(calls) == 1
+    mock_sleep.assert_not_called()
 
 
 # ── fetch_margin_detail symbol 过滤正则 ──────────────────────────────────────

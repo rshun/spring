@@ -1,5 +1,10 @@
+# 修改记录:
+#   2026-05-29  Claude  修复深交所融资融券汇总(_fetch_summary_szse)字段映射: akshare 实际返回列为「融券余额」, 原映射「融券余量金额」已失效导致 short_balance_amount 入库为空
+#   2026-05-29  Claude  4 个融资融券 akshare 调用加异常重试(_retry_call), 重试次数/间隔放 config.yaml akshare.tries/retry_delay, 缓解 szse/sse 官网偶发 SSL 断连
+#   2026-05-29  Claude  深交所汇总(_fetch_summary_szse)金额/数量由"亿"显示值统一 ×1e8 转 元/股, 对齐 schema 与其它数据源
 import akshare as ak
 import logging
+import time
 import pandas as pd
 from util.myutil import timer
 from util.config import get_config
@@ -23,6 +28,13 @@ _DETAIL_OUT_COLS = [
     'margin_short_balance',
 ]
 
+# 深交所汇总接口以"亿"为单位显示的数值列(金额亿元/数量亿股), 入库前 ×1e8 转 元/股
+_SZSE_SUMMARY_SCALE_COLS = [
+    'margin_buy_amount', 'margin_balance',
+    'short_sell_volume', 'short_balance_volume',
+    'short_balance_amount', 'margin_short_balance',
+]
+
 _DETAIL_NUM_COLS = [
     'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
     'short_sell_volume', 'short_repay_volume',
@@ -39,6 +51,35 @@ def _get_max_fail() -> int:
 
 def _get_request_timeout() -> int:
     return get_config()["akshare"]["request_timeout"]
+
+
+def _get_retry_tries() -> int:
+    return get_config()["akshare"].get("tries", 3)
+
+
+def _get_retry_delay() -> float:
+    return get_config()["akshare"].get("retry_delay", 3)
+
+
+def _retry_call(fn, what: str):
+    """对 akshare 取数调用做异常重试。
+
+    仅在抛异常时重试，正常返回（含空结果）不重试——空结果是合法结果（如非交易日）。
+    重试次数与间隔取自 config.yaml akshare.tries / akshare.retry_delay。
+    全部失败后抛出最后一次异常，交由调用方按原有逻辑安全降级。
+    """
+    tries = _get_retry_tries()
+    delay = _get_retry_delay()
+    last_exc: Exception | None = None
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"  [WARN] {what} 第 {attempt}/{tries} 次调用失败: {e}")
+            if attempt < tries:
+                time.sleep(delay)
+    raise last_exc
 
 
 def fetch_bj_stock_data(trade_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -311,7 +352,10 @@ def fetch_stock_sw_mapping(industry_df: pd.DataFrame) -> pd.DataFrame:
 def _fetch_summary_sse(begin_date: str, end_date: str) -> pd.DataFrame:
     """上交所融资融券汇总：单次区间查询。"""
     try:
-        df = ak.stock_margin_sse(start_date=begin_date, end_date=end_date)
+        df = _retry_call(
+            lambda: ak.stock_margin_sse(start_date=begin_date, end_date=end_date),
+            "上交所融资融券汇总",
+        )
     except Exception as e:
         logger.warning(f"  [WARN] 上交所融资融券汇总获取失败: {e}")
         return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
@@ -341,7 +385,10 @@ def _fetch_summary_szse(trade_dates: list[str]) -> pd.DataFrame:
     rows = []
     for d in trade_dates:
         try:
-            df = ak.stock_margin_szse(date=d)
+            df = _retry_call(
+                lambda d=d: ak.stock_margin_szse(date=d),
+                f"深交所融资融券汇总 {d}",
+            )
         except Exception as e:
             logger.warning(f"  [WARN] 深交所融资融券汇总 {d} 获取失败: {e}")
             continue
@@ -358,7 +405,7 @@ def _fetch_summary_szse(trade_dates: list[str]) -> pd.DataFrame:
             '融资买入额':     'margin_buy_amount',
             '融资余额':       'margin_balance',
             '融券卖出量':     'short_sell_volume',
-            '融券余量金额':   'short_balance_amount',
+            '融券余额':       'short_balance_amount',
             '融券余量':       'short_balance_volume',
             '融资融券余额':   'margin_short_balance',
         })
@@ -368,6 +415,14 @@ def _fetch_summary_szse(trade_dates: list[str]) -> pd.DataFrame:
         df['exchange_code']        = 'SZ'
         df['margin_repay_amount']  = None
         df['short_repay_volume']   = None
+
+        # 深交所汇总数值以"亿"为单位显示(金额=亿元, 数量=亿股)且带千分位逗号,
+        # 统一去逗号后 ×1e8 转回 元/股, 对齐 schema 注释及其它数据源(沪市汇总、沪深明细)
+        for col in _SZSE_SUMMARY_SCALE_COLS:
+            if col in df.columns:
+                cleaned = df[col].astype(str).str.replace(',', '', regex=False)
+                df[col] = pd.to_numeric(cleaned, errors='coerce') * 1e8
+
         rows.append(df.reindex(columns=_SUMMARY_OUT_COLS))
 
     if not rows:
@@ -422,7 +477,10 @@ def fetch_margin_detail(trade_date: str, exchanges: list[str]) -> pd.DataFrame:
 
     if want_sz:
         try:
-            df_sz = ak.stock_margin_detail_szse(date=trade_date)
+            df_sz = _retry_call(
+                lambda: ak.stock_margin_detail_szse(date=trade_date),
+                f"深交所融资融券明细 {trade_date}",
+            )
             if df_sz is not None and not df_sz.empty:
                 df_sz = df_sz.rename(columns={
                     '证券代码':     'symbol',
@@ -447,7 +505,10 @@ def fetch_margin_detail(trade_date: str, exchanges: list[str]) -> pd.DataFrame:
 
     if want_sh:
         try:
-            df_sh = ak.stock_margin_detail_sse(date=trade_date)
+            df_sh = _retry_call(
+                lambda: ak.stock_margin_detail_sse(date=trade_date),
+                f"上交所融资融券明细 {trade_date}",
+            )
             if df_sh is not None and not df_sh.empty:
                 df_sh = df_sh.rename(columns={
                     '标的证券代码':   'symbol',

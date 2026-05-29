@@ -2,6 +2,7 @@
 #   2026-05-26  Claude  从 etl/sync_capital.py 拆分通达信"离线文件"数据源逻辑
 #   2026-05-26  Claude  加固 ManyThreadDownload: 收集线程异常 + run 后校验 size，
 #                       sync_cw_files 单文件失败跳过，避免静默产出错误大小的 zip
+#   2026-05-29  Claude  新增 iter_cw_reports: 遍历本地 cw 文件按报告期产出 DataFrame
 """
 通达信离线文件数据源
 
@@ -282,6 +283,53 @@ def sync_cw_files():
             logger.info(f"  {datname} 完成 用时 {time.time() - tick:.2f}s")
 
     logger.info("专业财务文件同步完成")
+
+
+def iter_cw_reports(start: str | None = None, end: str | None = None):
+    """遍历本地 cw 专业财务文件，按报告期升序产出 (report_date, DataFrame)
+
+    优先读 download/cw_pkl/*.pkl(已解析)，该期 pkl 缺失时回退 download/cw/*.dat。
+
+    Parameters
+    ----------
+    start / end : 报告期过滤(闭区间)，接受 YYYYMMDD 或 YYYY-MM-DD；None 表示不限。
+
+    Yields
+    ------
+    (report_date, df) : report_date 为 YYYYMMDD 字符串(取自文件名 gpcwYYYYMMDD)；
+                        df 为位置列 DataFrame(列 0=code, 列 N=cw字段N)。
+                        无任何本地文件时不产出(安全降级)。
+    """
+    pkl_dir = DOWNLOAD_DIR / "cw_pkl"
+    cw_dir = DOWNLOAD_DIR / "cw"
+
+    def _norm(d: str | None) -> str | None:
+        return d.replace("-", "") if d else d
+
+    s, e = _norm(start), _norm(end)
+
+    # 报告期 = pkl 与 dat 文件名的并集(gpcwYYYYMMDD -> YYYYMMDD)
+    names = set(list_cw_files(pkl_dir, "pkl")) | set(list_cw_files(cw_dir, "dat"))
+    report_dates = sorted({n[4:12] for n in names})
+    if not report_dates:
+        logger.warning("未找到任何本地 cw 财务文件(download/cw_pkl 或 download/cw)")
+        return
+
+    for rd in report_dates:
+        if s and rd < s:
+            continue
+        if e and rd > e:
+            continue
+        pkl_path = pkl_dir / f"gpcw{rd}.pkl"
+        try:
+            if pkl_path.exists():
+                df = pd.read_pickle(str(pkl_path))
+            else:
+                df = historyfinancialreader(str(cw_dir / f"gpcw{rd}.dat"))
+        except Exception as ex:
+            logger.warning(f"  读取 cw 报告期 {rd} 失败，跳过: {ex}")
+            continue
+        yield rd, df
 
 
 def _extract_and_convert(zip_path: Path, cw_dir: Path, pkl_dir: Path) -> bool:

@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-05-26  Claude  新增 save_capital_detail_to_db (从 etl/sync_capital.py 迁入)
+#   2026-05-29  Claude  新增 save_finance_report_to_db (专业财务报表 cw 数据入库)
 import logging
 import duckdb
 import pandas as pd
@@ -737,6 +738,46 @@ def save_capital_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
     finally:
         try:
             conn.unregister("temp_capital_detail")
+        except Exception:
+            pass
+
+
+def save_finance_report_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
+    """将专业财务报表数据(cw)写入 FINANCE_REPORT 表
+
+    df 需为 datasource.cw_fields.cw_df_to_finance_report 的输出：
+    含 code/report_date + 若干具名字段列。按 (code, report_date) UPSERT，
+    仅更新 df 中实际存在的列，避免覆盖其他来源/其他报告期已写入的字段。
+    """
+    if df is None or df.empty:
+        logger.info("无专业财务数据，跳过写入。")
+        return
+
+    from datasource.cw_fields import VALUE_COLUMNS
+
+    # 只取 df 中实际存在的数值列(旧版 cw 文件字段较少)
+    present = [c for c in VALUE_COLUMNS if c in df.columns]
+    insert_cols = ["code", "report_date", *present]
+    select_exprs = ["code", "CAST(report_date AS DATE)", *present]
+    update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in present)
+    update_clause = (f"{update_set}, updated_at = now()" if update_set else "updated_at = now()")
+
+    logger.info(f"正在将 {len(df)} 条专业财务报表写入数据库...")
+    try:
+        conn.register("temp_finance_report", df)
+        conn.execute(f"""
+            INSERT INTO FINANCE_REPORT ({", ".join(insert_cols)}, updated_at)
+            SELECT {", ".join(select_exprs)}, now()
+            FROM temp_finance_report
+            ON CONFLICT (code, report_date) DO UPDATE SET
+                {update_clause}
+        """)
+        logger.info(f"[入库] 成功写入 {len(df)} 条专业财务报表数据")
+    except Exception as e:
+        logger.error(f"写入 FINANCE_REPORT 表失败: {e}")
+    finally:
+        try:
+            conn.unregister("temp_finance_report")
         except Exception:
             pass
 

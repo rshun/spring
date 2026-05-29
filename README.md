@@ -22,6 +22,7 @@ spring/
 │   ├── sync_capital.py  # 同步股本变动与权息资料 (gbbq)
 │   ├── sync_industry.py # 同步申万行业分类
 │   ├── sync_margin.py   # 同步融资融券汇总和明细数据
+│   ├── sync_finance.py  # 同步专业财务报表 (通达信 cw, 按报告期)
 │   ├── fill_volratio.py # 补齐量比
 │   ├── update_limit.py  # 补齐涨跌停
 │   └── fill_shares.py   # 回填总股本/流通股本(及市值)
@@ -173,6 +174,27 @@ python -m etl.sync_margin -b 20250101 -e 20250507 -x sh
 python -m etl.sync_margin --only summary
 ```
 
+#### 同步专业财务报表数据 (通达信 cw 文件, 按报告期)
+```bash
+# 同步周期: 财报为季度数据, 无需每天跑。建议每周 1 次(不带 --download);
+#   披露季(4月一季报 / 8月半年报 / 10月三季报 / 次年3-4月年报)可加到每周 2 次。
+#   入库为 UPSERT(按 code+report_date), 重复跑安全幂等。
+#   注: sync_capital 每天已调用 sync_cw_files 更新本地 cw 文件,
+#       故 sync_finance 日常可不带 --download, 直接重读本地即可。
+
+# 导入本地全部报告期 (读 download/cw_pkl, 缺失回退 download/cw)
+python -m etl.sync_finance
+
+# 导入前先运行 sync_cw_files 更新本地 cw 文件
+python -m etl.sync_finance --download
+
+# 仅导入指定报告期区间 (YYYYMMDD 或 YYYY-MM-DD)
+python -m etl.sync_finance --start 20200101 --end 20241231
+
+# 仅导入指定股票 (逗号或空格分隔的裸代码)
+python -m etl.sync_finance --codes 000001,600519
+```
+
 ## 🤖 MCP 工具能力 (Tools)
 
 通过 `mcp_server/server.py`，项目向 AI 模型提供了丰富的量化工具，大模型可以直接调用以下功能：
@@ -199,6 +221,8 @@ python -m etl.sync_margin --only summary
 - `CAPITAL_DETAIL`: 股本变动及除权除息资料
 - `MARGIN_SUMMARY_DAILY`: 融资融券每日汇总数据（按交易所）
 - `MARGIN_DETAIL_DAILY`: 融资融券每日明细数据（按个股）
+- `FINANCE_REPORT`: 专业财务报表（通达信 cw 文件，按报告期；三大报表合存宽表）
+- `V_BALANCE_SHEET` / `V_INCOME_STATEMENT` / `V_CASH_FLOW`: 资产负债表 / 利润表 / 现金流量表视图（基于 `FINANCE_REPORT`）
 
 ## 🧪 测试
 
@@ -258,6 +282,5 @@ pytest tests/integration/
 
 ## 📋️ TODO  
 - 补齐换手率
-- 下载财务数据
 - 根据除权除息资料校验pre_close是否准确
 - 补齐pb,pe

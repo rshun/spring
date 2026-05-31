@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-05-26  Claude  新增 save_capital_detail_to_db (从 etl/sync_capital.py 迁入)
 #   2026-05-29  Claude  新增 save_finance_report_to_db (专业财务报表 cw 数据入库)
+#   2026-05-30  Claude  新增 fill_daily_basic_turnover (换手率, 支持 overwrite 开关并返回更新行数)
 import logging
 import duckdb
 import pandas as pd
@@ -9,6 +10,16 @@ from datetime import datetime, date
 from typing import List, Tuple, Optional
 
 logger = logging.getLogger("etl.util.dbutil")
+
+_DAILY_BASIC_SHARE_EVENT_CATEGORIES = (
+    "股本变化",
+    "转配股上市",
+    "送配股上市",
+    "非流通股上市",
+    "增发新股上市",
+    "可转债上市",
+    "股份回购",
+)
 
 
 def check_is_trading_day(date_str: str) -> bool:
@@ -903,7 +914,7 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                             exchanges: list[str] | None = None,
                             conn: duckdb.DuckDBPyConnection | None = None) -> None:
     """
-    根据 CAPITAL_DETAIL 股本变化记录回填 DAILY_BASIC 的 total_shares / float_shares。
+    根据 CAPITAL_DETAIL 有效股本状态记录回填 DAILY_BASIC 的 total_shares / float_shares。
     params 顺序: [start_date, end_date, *code_params, *exchange_params]，三处 SQL 均相同。
     """
     if isinstance(codes, str):
@@ -924,26 +935,53 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         exchange_filter = f"AND i.exchange IN ({placeholders})"
         exchange_params = list(exchanges)
 
+    share_category_placeholders = ", ".join(["?"] * len(_DAILY_BASIC_SHARE_EVENT_CATEGORIES))
+    category_params = list(_DAILY_BASIC_SHARE_EVENT_CATEGORIES)
+
     sql = f"""
-        WITH capital_events AS (
-            SELECT i.code, cd.date,
-                   cd.bonus_share     AS float_shares_wan,
-                   cd.allotment_share AS total_shares_wan
+        WITH raw_capital_events AS (
+            SELECT
+                i.code,
+                cd.date,
+                cd.dividend        AS prev_float_shares_wan,
+                cd.allotment_price AS prev_total_shares_wan,
+                cd.bonus_share     AS float_shares_wan,
+                cd.allotment_share AS total_shares_wan
             FROM CAPITAL_DETAIL cd
             JOIN STOCK_INFO i ON cd.code = i.symbol
-            WHERE cd.category = '股本变化'
+            WHERE cd.category IN ({share_category_placeholders})
+              AND cd.bonus_share > 0
+              AND cd.allotment_share > 0
+        ),
+
+        dedup_events AS (
+            SELECT
+                code,
+                date,
+                MAX(prev_float_shares_wan) AS prev_float_shares_wan,
+                MAX(prev_total_shares_wan) AS prev_total_shares_wan,
+                MAX(float_shares_wan)      AS float_shares_wan,
+                MAX(total_shares_wan)      AS total_shares_wan
+            FROM raw_capital_events
+            GROUP BY code, date
+        ),
+
+        capital_events AS (
+            SELECT code, date, float_shares_wan, total_shares_wan
+            FROM dedup_events
 
             UNION ALL
 
-            SELECT i.code, DATE '1990-01-01' AS date,
-                   t.dividend         AS float_shares_wan,
-                   t.allotment_price  AS total_shares_wan
+            SELECT code, DATE '1990-01-01' AS date,
+                   prev_float_shares_wan AS float_shares_wan,
+                   prev_total_shares_wan AS total_shares_wan
             FROM (
-                SELECT *, ROW_NUMBER() OVER (PARTITION BY code ORDER BY date) AS rn
-                FROM CAPITAL_DETAIL
-                WHERE category = '股本变化'
+                SELECT *,
+                       ROW_NUMBER() OVER (PARTITION BY code ORDER BY date) AS rn
+                FROM dedup_events
+                WHERE prev_float_shares_wan > 0
+                  AND prev_total_shares_wan > 0
             ) t
-            JOIN STOCK_INFO i ON t.code = i.symbol
             WHERE t.rn = 1
         ),
 
@@ -973,6 +1011,7 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
     """
 
     range_params: list = [start_date, end_date, *code_params, *exchange_params]
+    update_params: list = [*category_params, *range_params]
 
     need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
@@ -991,13 +1030,17 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         total_result = con.execute(count_sql, range_params).fetchone()
         total_rows = total_result[0] if total_result else 0
 
-        cd_count_sql = "SELECT COUNT(DISTINCT code) FROM CAPITAL_DETAIL WHERE category = '股本变化'"
-        cd_result = con.execute(cd_count_sql).fetchone()
+        cd_count_sql = (
+            "SELECT COUNT(DISTINCT code) FROM CAPITAL_DETAIL "
+            f"WHERE category IN ({share_category_placeholders}) "
+            "AND bonus_share > 0 AND allotment_share > 0"
+        )
+        cd_result = con.execute(cd_count_sql, category_params).fetchone()
         cd_stocks = cd_result[0] if cd_result else 0
-        logger.info(f"  CAPITAL_DETAIL 中共 {cd_stocks} 只股票有股本变化记录")
+        logger.info(f"  CAPITAL_DETAIL 中共 {cd_stocks} 只股票有有效股本状态记录")
         logger.info(f"  DAILY_BASIC 目标区间共 {total_rows} 行待处理")
 
-        con.execute(sql, range_params)
+        con.execute(sql, update_params)
 
         verify_sql = f"""
             SELECT COUNT(*)
@@ -1012,10 +1055,103 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         updated_result = con.execute(verify_sql, range_params).fetchone()
         updated_rows = updated_result[0] if updated_result else 0
         skipped = total_rows - updated_rows
-        logger.info(f"  成功更新 {updated_rows} 行, 跳过 {skipped} 行(无股本变化数据)")
+        logger.info(f"  成功更新 {updated_rows} 行, 跳过 {skipped} 行(无有效股本状态数据)")
 
     except Exception as e:
         logger.error(f"更新股本数据失败: {e}")
+    finally:
+        if need_close and con is not None:
+            con.close()
+
+
+def fill_daily_basic_turnover(start_date: str, end_date: str,
+                              codes: list[str] | None = None,
+                              exchanges: list[str] | None = None,
+                              overwrite: bool = False,
+                              conn: duckdb.DuckDBPyConnection | None = None) -> int:
+    """
+    回填 DAILY_BASIC 的换手率 turnover_rate。
+
+    换手率(%) = 当日成交量(股) / 流通股本(股) × 100
+      - 成交量取自 STOCK_DAILY.volume(单位: 股)
+      - 流通股本取自 DAILY_BASIC.float_shares(由 fill_daily_basic_shares
+        依据 CAPITAL_DETAIL 股本变动明细回填, 单位: 股)
+      - 前置条件: 先跑 fill_daily_basic_shares 回填 float_shares
+
+    overwrite=False(默认): 仅回填 turnover_rate 为空的行, 不覆盖已有值;
+    overwrite=True: 区间内全部重算覆盖。
+
+    返回实际更新的行数。
+    """
+    if isinstance(codes, str):
+        codes = [codes]
+
+    code_filter = ""
+    exchange_filter = ""
+    code_params: list[str] = []
+    exchange_params: list[str] = []
+
+    if codes:
+        placeholders = ", ".join(["?"] * len(codes))
+        code_filter = f"AND db.code IN ({placeholders})"
+        code_params = list(codes)
+
+    if exchanges:
+        placeholders = ", ".join(["?"] * len(exchanges))
+        exchange_filter = f"AND i.exchange IN ({placeholders})"
+        exchange_params = list(exchanges)
+
+    null_filter = "" if overwrite else "AND db.turnover_rate IS NULL"
+
+    # 待更新行的取数逻辑(count 与 update 共用), 参数顺序:
+    #   [start_date, end_date, *code_params, *exchange_params]
+    src_sql = f"""
+        SELECT
+            db.code,
+            db.trade_date,
+            ROUND(sd.volume / db.float_shares * 100, 4) AS turnover_rate
+        FROM DAILY_BASIC db
+        JOIN STOCK_DAILY sd ON db.code = sd.code AND db.trade_date = sd.date
+        JOIN STOCK_INFO i   ON db.code = i.code
+        WHERE db.trade_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+            AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
+            AND db.float_shares IS NOT NULL
+            AND db.float_shares > 0
+            AND sd.tradestatus = 1
+            AND sd.volume IS NOT NULL
+            {null_filter}
+            {code_filter}
+            {exchange_filter}
+    """
+
+    count_sql = f"SELECT COUNT(*) FROM ({src_sql}) s"
+    update_sql = f"""
+        UPDATE DAILY_BASIC
+        SET turnover_rate = src.turnover_rate
+        FROM ({src_sql}) src
+        WHERE DAILY_BASIC.code       = src.code
+          AND DAILY_BASIC.trade_date = src.trade_date;
+    """
+
+    range_params: list = [start_date, end_date, *code_params, *exchange_params]
+
+    need_close = conn is None
+    con: duckdb.DuckDBPyConnection | None = None
+    try:
+        con = conn if conn is not None else get_connection(is_read_only=False)
+
+        count_result = con.execute(count_sql, range_params).fetchone()
+        updated_rows = count_result[0] if count_result else 0
+
+        con.execute(update_sql, range_params)
+
+        mode = "覆盖" if overwrite else "仅补空"
+        logger.info(f"  换手率回填完成({mode}), 成功更新 {updated_rows} 行")
+        return updated_rows
+
+    except Exception as e:
+        logger.error(f"更新换手率失败: {e}")
+        return 0
     finally:
         if need_close and con is not None:
             con.close()

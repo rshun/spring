@@ -7,8 +7,13 @@ local_paths:
   tdx_vipdoc: "C:\\new_zszq_cf\\Vipdoc"
   # 通达信 gbbq 股本变迁二进制文件路径
   tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
-  # DuckDB 数据库文件路径（~ 会展开为用户主目录）
+  # DuckDB 正式库文件路径（~ 会展开为用户主目录）
   db: "~/data/quant.db"
+  # DuckDB 测试库文件路径：正式库被 MCP server 等进程占用(写锁冲突)时，
+  # 把 db_active 切到 test 即可让 ETL/脚本改用此库，互不干扰
+  db_test: "~/data/quant_test.db"
+  # 当前生效的库：prod=正式库(db) | test=测试库(db_test)；缺省/留空按 prod
+  db_active: "prod"
   # 基础/输入数据目录（如 sync_industry 的 SwClassCode_2021.csv）；
   # 未配置或留空时回退到项目根目录下的 data/
   data_dir: ""

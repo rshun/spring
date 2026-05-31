@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-05-30  Claude  get_default_dbfile 支持 prod/test 库切换(local_paths.db_active)
 import time
 import os
 import pkgutil
@@ -47,13 +49,25 @@ def configure_etl_logging() -> None:
 
 
 def get_default_dbfile() -> Path:
-    """获取默认的数据库名
+    """获取默认的数据库文件路径
+
+    支持正式库/测试库切换(profile)，避免正式库被 MCP server 等进程占用(写锁冲突)时
+    无法跑 ETL/测试。由 config.yaml 的 local_paths 控制:
+        db          正式库路径
+        db_test     测试库路径
+        db_active   prod | test，缺省为 prod(向后兼容)；大小写不敏感
+    db_active=test 但 db_test 未配置时，回退内置默认路径。
 
     返回:
-        数据库的文件名
+        数据库文件的完整路径 Path 对象
     """
     from util.config import get_config
-    db_path = (get_config().get("local_paths") or {}).get("db", "").strip()
+    local_paths = get_config().get("local_paths") or {}
+
+    active = (local_paths.get("db_active") or "prod").strip().lower()
+    key = "db_test" if active == "test" else "db"
+
+    db_path = (local_paths.get(key) or "").strip()
     if not db_path:
         db_path = str(Path.home() / "data" / "quant.db")
     return Path(db_path).expanduser()

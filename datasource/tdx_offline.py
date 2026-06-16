@@ -3,6 +3,8 @@
 #   2026-05-26  Claude  加固 ManyThreadDownload: 收集线程异常 + run 后校验 size，
 #                       sync_cw_files 单文件失败跳过，避免静默产出错误大小的 zip
 #   2026-05-29  Claude  新增 iter_cw_reports: 遍历本地 cw 文件按报告期产出 DataFrame
+#   2026-06-12  Claude  cw md5 校验按报告期截断(默认最近12个季度)，规避服务器每日
+#                       重打包历史 zip 导致的 md5 滚动变化; full=True 恢复全量校验
 """
 通达信离线文件数据源
 
@@ -219,8 +221,40 @@ def list_cw_files(directory: Path, ext_name: str) -> list[str]:
 
 # ── cw 专业财务文件同步 ──────────────────────────────────
 
-def sync_cw_files():
-    """从通达信服务器下载/更新专业财务文件到 download/ 目录"""
+def filter_recent_cw_filenames(filenames: list[str], quarters: int) -> set[str]:
+    """从 gpcwYYYYMMDD.* 文件名中选出最近 quarters 个报告期的文件名集合
+
+    quarters <= 0 表示不截断(返回全部)；无法解析报告期的文件名安全起见保留。
+    """
+    if quarters <= 0:
+        return set(filenames)
+    dated: dict[str, set[str]] = {}
+    undated: set[str] = set()
+    for name in filenames:
+        rd = name[4:12] if len(name) == _CW_FILENAME_LEN and name.startswith("gpcw") else ""
+        if rd.isdigit():
+            dated.setdefault(rd, set()).add(name)
+        else:
+            undated.add(name)
+    keep = undated
+    for rd in sorted(dated)[-quarters:]:
+        keep |= dated[rd]
+    return keep
+
+
+def sync_cw_files(full: bool = False):
+    """从通达信服务器下载/更新专业财务文件到 download/ 目录
+
+    服务器每天会批量重新打包大部分历史报告期的 zip(md5 滚动变化, 内容多为
+    无实质变更), 全量 md5 校验会导致每天重下约百个历史文件。因此默认只对
+    最近 N 个季度(config: tdx.cw_refresh_quarters, 默认 12)做 md5 校验更新,
+    覆盖披露期更新/财报更正/新股 IPO 近 3 年财务回填; 更早的报告期本地存在
+    即跳过。本地缺失的文件不受窗口限制, 始终下载。
+
+    Parameters
+    ----------
+    full : True 时恢复对全部报告期做 md5 校验(捞超过窗口的陈年重述)。
+    """
     cw_dir = DOWNLOAD_DIR / "cw"
     pkl_dir = DOWNLOAD_DIR / "cw_pkl"
     cw_dir.mkdir(parents=True, exist_ok=True)
@@ -253,6 +287,16 @@ def sync_cw_files():
     # 2) 更新 md5 不一致的 zip 文件（服务器 md5 统一转小写，与 hexdigest() 对齐）
     local_zips = list_cw_files(cw_dir, 'zip')
     server_md5_map = dict(zip(server_df['filename'], server_df['md5'].str.lower()))
+    if not full:
+        quarters = _get_tdx_config().get("cw_refresh_quarters", 12)
+        window = filter_recent_cw_filenames(server_df['filename'].tolist(), quarters)
+        skipped = [f for f in local_zips if f not in window]
+        local_zips = [f for f in local_zips if f in window]
+        if skipped:
+            logger.info(
+                f"  md5 校验按报告期截断: 仅校验最近 {quarters} 个季度共 {len(local_zips)} 个文件, "
+                f"跳过 {len(skipped)} 个早期文件 (--full 可全量校验)"
+            )
     for filename in local_zips:
         zip_path = cw_dir / filename
         with open(zip_path, 'rb') as f:

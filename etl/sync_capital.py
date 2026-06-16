@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-05-26  Claude  下载/解析/入库三层分离：迁出到 datasource/tdx_offline 与 util/dbutil
+#   2026-06-12  Claude  新增 --full: cw 文件全量 md5 校验(默认只校验最近 N 个季度)
 """
 同步股本变迁数据 (CAPITAL_DETAIL)
 
@@ -29,6 +30,12 @@ def parse_arguments() -> argparse.Namespace:
         action='store_true',
         help='优先从 gbbq.zip 下载 gbbq 文件，默认不下载',
     )
+    parser.add_argument(
+        '--full',
+        action='store_true',
+        help='cw 财务文件对全部报告期做 md5 校验更新，'
+             '默认只校验最近 N 个季度(config: tdx.cw_refresh_quarters)',
+    )
     return parser.parse_args()
 
 
@@ -42,7 +49,7 @@ def main() -> None:
     logger.info('=' * 60)
 
     # 1) 同步通达信专业财务文件
-    tdx_offline.sync_cw_files()
+    tdx_offline.sync_cw_files(full=args.full)
 
     # 2) 获取 gbbq 股本变迁数据
     tick = time.time()

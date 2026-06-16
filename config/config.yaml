@@ -173,6 +173,11 @@ tdx:
   # 专业财务文件下载地址前缀
   cw_file_url: "http://down.tdx.com.cn:8001/tdxfin/"
 
+  # cw 文件 md5 校验更新窗口: 只对最近 N 个季度做校验重下(服务器每天重打包
+  # 历史 zip 导致 md5 滚动变化)。覆盖披露期更新/财报更正/IPO 近 3 年财务回填;
+  # <=0 表示不截断。--full 可临时全量校验。
+  cw_refresh_quarters: 12
+
   # 股本变迁 zip 下载地址
   gbbq_zip_url: "http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
 

@@ -1,7 +1,13 @@
+# 修改记录:
+#   2026-06-18  Claude  新增 STOCK_DAILY / ADJ_FACTOR 字段级空值校验,
+#                       DAILY_BASIC 扩展 turnover_rate/total_mv/float_mv/涨跌停价校验
+#                       (依据下游 strategy 程序实际读取的字段;均为告警不阻断)
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
-      对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
-      停牌股票(tradestatus=0)不计入缺失
+      1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
+         停牌股票(tradestatus=0)不计入缺失
+      2) 字段空值: 针对下游 strategy 程序实际读取的关键字段做空值/异常值校验
+         (STOCK_DAILY 价量、DAILY_BASIC 指标、ADJ_FACTOR 复权因子;均仅告警写 CSV)
 
 输入参数:
   -b, --begin         起始日期 (格式: YYYYMMDD)，默认为当天
@@ -285,7 +291,9 @@ _DAILY_BASIC_NULL_CTE = """
     ),
     nonsusp AS (
         SELECT b.trade_date, s.code, s.name, b.pb, b.pe,
-               b.total_shares, b.float_shares
+               b.total_shares, b.float_shares,
+               b.turnover_rate, b.total_mv, b.float_mv,
+               b.limit_up, b.limit_down
         FROM DAILY_BASIC b
         INNER JOIN active_stocks s ON b.code = s.code
         INNER JOIN trading_days t ON b.trade_date = t.cal_date
@@ -302,8 +310,12 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
     """检查 DAILY_BASIC 关键字段是否缺失,停牌股票不计入。
     缺失口径 = NULL 或 = 0(baostock 这份数据极少返回 NULL,无值/脏数据多以 0 出现);
     负值视为有值(亏损股 pe<0、负净资产 pb<0 均正常),不报。
-    - pb/total_shares/float_shares 缺失 -> 异常(写 CSV 并计入 total_missing)
-    - pe 缺失(亏损股很多,且 pe=0 性质同缺失)-> 仅单独告警,不计入异常"""
+    - pb/total_shares/float_shares/turnover_rate/total_mv/float_mv 缺失(NULL或0)、
+      limit_up/limit_down 缺失(NULL或≤0) -> 异常(写 CSV 并计入 total_missing)
+    - pe 缺失(亏损股很多,且 pe=0 性质同缺失)-> 仅单独告警,不计入异常
+
+    注: volume_ratio(新股首日/ST 极低流动性会正常缺失)、
+        is_limit_up/is_limit_down(0=未涨跌停是正常值)不在此校验。"""
     label = "指标空值    "
     params = [begin_date, end_date, *code_params, begin_date, end_date]
 
@@ -322,14 +334,24 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
     ) + """
     SELECT trade_date, code, name,
            concat_ws(',',
-               CASE WHEN pb           IS NULL OR pb           = 0 THEN 'pb'           END,
-               CASE WHEN total_shares IS NULL OR total_shares = 0 THEN 'total_shares' END,
-               CASE WHEN float_shares IS NULL OR float_shares = 0 THEN 'float_shares' END
+               CASE WHEN pb            IS NULL OR pb            = 0 THEN 'pb'            END,
+               CASE WHEN total_shares  IS NULL OR total_shares  = 0 THEN 'total_shares'  END,
+               CASE WHEN float_shares  IS NULL OR float_shares  = 0 THEN 'float_shares'  END,
+               CASE WHEN turnover_rate IS NULL OR turnover_rate = 0 THEN 'turnover_rate' END,
+               CASE WHEN total_mv      IS NULL OR total_mv      = 0 THEN 'total_mv'      END,
+               CASE WHEN float_mv      IS NULL OR float_mv      = 0 THEN 'float_mv'      END,
+               CASE WHEN limit_up      IS NULL OR limit_up     <= 0 THEN 'limit_up'      END,
+               CASE WHEN limit_down    IS NULL OR limit_down   <= 0 THEN 'limit_down'    END
            ) AS missing
     FROM nonsusp
-    WHERE pb IS NULL OR pb = 0
-       OR total_shares IS NULL OR total_shares = 0
-       OR float_shares IS NULL OR float_shares = 0
+    WHERE pb            IS NULL OR pb            = 0
+       OR total_shares  IS NULL OR total_shares  = 0
+       OR float_shares  IS NULL OR float_shares  = 0
+       OR turnover_rate IS NULL OR turnover_rate = 0
+       OR total_mv      IS NULL OR total_mv      = 0
+       OR float_mv      IS NULL OR float_mv      = 0
+       OR limit_up      IS NULL OR limit_up     <= 0
+       OR limit_down    IS NULL OR limit_down   <= 0
     ORDER BY trade_date, code
     """
     rows = conn.execute(detail_sql, params).fetchall()
@@ -348,8 +370,142 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
         for trade_date, code, name, missing in rows:
             writer.writerow([str(trade_date), code, name, missing])
 
-    logger.warning(f"[{label}]    发现 {len(rows)} 条 pb/total_shares/float_shares "
-                    f"缺失(NULL 或 0)，明细已写入: {csv_file}")
+    logger.warning(f"[{label}]    发现 {len(rows)} 条指标字段"
+                    f"(pb/shares/turnover_rate/mv/涨跌停价)缺失，明细已写入: {csv_file}")
+    return len(rows)
+
+
+def _check_stock_daily_nulls(conn: duckdb.DuckDBPyConnection,
+                             begin_date: str, end_date: str,
+                             ex_filter: str, code_filter: str,
+                             code_params: list[str]) -> int:
+    """检查 STOCK_DAILY 价量字段在"正常交易日(tradestatus=1)"是否异常。
+    口径: open/high/low/close/pre_close/amount 为 NULL 或 ≤0、volume 为 NULL 或 ≤0
+    即视为异常(正常交易当天价格必为正、必有成交量额;pre_close 缺失被填 -1)。
+    停牌(tradestatus≠1)行不参与。仅告警写 CSV,返回异常条数(不阻断管道)。"""
+    label = "日线价量    "
+    sql = f"""
+    WITH trading_days AS (
+        SELECT cal_date FROM TRADE_CAL
+        WHERE is_open = 1 AND cal_date BETWEEN ? AND ?
+    ),
+    active_stocks AS (
+        SELECT code, name FROM STOCK_INFO i
+        WHERE board NOT IN ('INDEX', 'BJ')
+          AND list_status = 'L'
+          {ex_filter}
+          {code_filter}
+    ),
+    traded AS (
+        SELECT d.date AS trade_date, s.code, s.name,
+               d.open, d.high, d.low, d.close, d.pre_close, d.volume, d.amount
+        FROM STOCK_DAILY d
+        INNER JOIN active_stocks s ON d.code = s.code
+        INNER JOIN trading_days t ON d.date = t.cal_date
+        WHERE d.tradestatus = 1
+    )
+    SELECT trade_date, code, name,
+           concat_ws(',',
+               CASE WHEN open      IS NULL OR open      <= 0 THEN 'open'      END,
+               CASE WHEN high      IS NULL OR high      <= 0 THEN 'high'      END,
+               CASE WHEN low       IS NULL OR low       <= 0 THEN 'low'       END,
+               CASE WHEN close     IS NULL OR close     <= 0 THEN 'close'     END,
+               CASE WHEN pre_close IS NULL OR pre_close <= 0 THEN 'pre_close' END,
+               CASE WHEN volume    IS NULL OR volume    <= 0 THEN 'volume'    END,
+               CASE WHEN amount    IS NULL OR amount    <= 0 THEN 'amount'    END
+           ) AS missing
+    FROM traded
+    WHERE open      IS NULL OR open      <= 0
+       OR high      IS NULL OR high      <= 0
+       OR low       IS NULL OR low       <= 0
+       OR close     IS NULL OR close     <= 0
+       OR pre_close IS NULL OR pre_close <= 0
+       OR volume    IS NULL OR volume    <= 0
+       OR amount    IS NULL OR amount    <= 0
+    ORDER BY trade_date, code
+    """
+    params = [begin_date, end_date, *code_params]
+    rows = conn.execute(sql, params).fetchall()
+
+    if not rows:
+        logger.info(f"[{label}]    完整 OK")
+        return 0
+
+    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = csv_dir / f"check_stockdaily_nulls_{begin_date}_{end_date}.csv"
+    with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "code", "name", "missing"])
+        for trade_date, code, name, missing in rows:
+            writer.writerow([str(trade_date), code, name, missing])
+
+    logger.warning(f"[{label}]    发现 {len(rows)} 条价量字段异常(NULL 或 ≤0)，"
+                    f"明细已写入: {csv_file}")
+    return len(rows)
+
+
+def _check_adj_factor_nulls(conn: duckdb.DuckDBPyConnection,
+                            begin_date: str, end_date: str,
+                            ex_filter: str, code_filter: str,
+                            code_params: list[str]) -> int:
+    """检查 ADJ_FACTOR 复权因子在"正常交易日"是否缺失。
+    口径: fore_factor/back_factor/adjust_factor 为 NULL 或 ≤0 即视为异常
+    (复权因子恒为正;back_factor 是下游最常用的后复权因子)。
+    仅对当日实际正常交易(STOCK_DAILY.tradestatus=1)的股票校验。
+    仅告警写 CSV,返回异常条数(不阻断管道)。"""
+    label = "复权因子值  "
+    sql = f"""
+    WITH trading_days AS (
+        SELECT cal_date FROM TRADE_CAL
+        WHERE is_open = 1 AND cal_date BETWEEN ? AND ?
+    ),
+    active_stocks AS (
+        SELECT code, name FROM STOCK_INFO i
+        WHERE board NOT IN ('INDEX', 'BJ')
+          AND list_status = 'L'
+          {ex_filter}
+          {code_filter}
+    ),
+    traded AS (
+        SELECT a.trade_date, s.code, s.name,
+               a.fore_factor, a.back_factor, a.adjust_factor
+        FROM ADJ_FACTOR a
+        INNER JOIN active_stocks s ON a.code = s.code
+        INNER JOIN trading_days t ON a.trade_date = t.cal_date
+        INNER JOIN STOCK_DAILY d ON d.code = a.code AND d.date = a.trade_date
+                                AND d.tradestatus = 1
+    )
+    SELECT trade_date, code, name,
+           concat_ws(',',
+               CASE WHEN fore_factor   IS NULL OR fore_factor   <= 0 THEN 'fore_factor'   END,
+               CASE WHEN back_factor   IS NULL OR back_factor   <= 0 THEN 'back_factor'   END,
+               CASE WHEN adjust_factor IS NULL OR adjust_factor <= 0 THEN 'adjust_factor' END
+           ) AS missing
+    FROM traded
+    WHERE fore_factor   IS NULL OR fore_factor   <= 0
+       OR back_factor   IS NULL OR back_factor   <= 0
+       OR adjust_factor IS NULL OR adjust_factor <= 0
+    ORDER BY trade_date, code
+    """
+    params = [begin_date, end_date, *code_params]
+    rows = conn.execute(sql, params).fetchall()
+
+    if not rows:
+        logger.info(f"[{label}]    完整 OK")
+        return 0
+
+    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    csv_file = csv_dir / f"check_adjfactor_nulls_{begin_date}_{end_date}.csv"
+    with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "code", "name", "missing"])
+        for trade_date, code, name, missing in rows:
+            writer.writerow([str(trade_date), code, name, missing])
+
+    logger.warning(f"[{label}]    发现 {len(rows)} 条复权因子缺失(NULL 或 ≤0)，"
+                    f"明细已写入: {csv_file}")
     return len(rows)
 
 
@@ -602,8 +758,12 @@ def main() -> int:
                                          begin_date, end_date, ex_filter, code_filter, code_params,
                                          is_self_table=True, board_sql="board = 'INDEX'")
 
-        # 以下三类: 继续检查、写 CSV、打日志告警，但不阻断管道
+        # 以下几类: 继续检查、写 CSV、打日志告警，但不阻断管道
         warn_missing = 0
+        warn_missing += _check_stock_daily_nulls(conn, begin_date, end_date,
+                                                 ex_filter, code_filter, code_params)
+        warn_missing += _check_adj_factor_nulls(conn, begin_date, end_date,
+                                                ex_filter, code_filter, code_params)
         warn_missing += _check_is_st_null(conn, begin_date, end_date,
                                           ex_filter, code_filter, code_params)
         warn_missing += _check_daily_basic_nulls(conn, begin_date, end_date,
@@ -614,7 +774,8 @@ def main() -> int:
         logger.info("-" * 60)
         if warn_missing:
             logger.warning(f"非阻断检查: 共发现 {warn_missing} 条告警记录"
-                           f"(除权前收价/指标空值/is_st，已写 CSV，不阻断管道)")
+                           f"(日线价量/复权因子/指标空值/is_st/除权前收价，"
+                           f"已写 CSV，不阻断管道)")
         if core_missing == 0:
             logger.info("检查完成: 核心日线数据完整 OK")
             return 0

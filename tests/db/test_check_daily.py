@@ -5,6 +5,8 @@ from tools.check_daily import (
     _count_xdr_uncomputable,
     _check_xdr_preclose,
     _check_daily_basic_nulls,
+    _check_stock_daily_nulls,
+    _check_adj_factor_nulls,
 )
 from tests.conftest import insert_stock_info, insert_trade_cal
 
@@ -50,11 +52,36 @@ def _ins_adj(conn, code, date, factor):
 
 
 def _ins_basic(conn, code, trade_date, pb=1.0, pe=10.0,
-               total_shares=100000000, float_shares=80000000):
+               total_shares=100000000, float_shares=80000000,
+               turnover_rate=2.5, total_mv=1.0e10, float_mv=8.0e9,
+               limit_up=11.0, limit_down=9.0):
     conn.execute(
         "INSERT INTO DAILY_BASIC (code, trade_date, pb, pe, "
-        "total_shares, float_shares) VALUES (?, ?, ?, ?, ?, ?)",
-        [code, trade_date, pb, pe, total_shares, float_shares],
+        "total_shares, float_shares, turnover_rate, total_mv, float_mv, "
+        "limit_up, limit_down) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [code, trade_date, pb, pe, total_shares, float_shares,
+         turnover_rate, total_mv, float_mv, limit_up, limit_down],
+    )
+
+
+def _ins_sd(conn, code, date, open_=10.0, high=11.0, low=9.0, close=10.5,
+            pre_close=10.0, tradestatus=1, volume=1000000, amount=12000000.0):
+    """插入一条价量字段齐全的 STOCK_DAILY(各参数可单独覆盖以构造异常)。"""
+    conn.execute(
+        "INSERT INTO STOCK_DAILY (code, date, open, high, low, close, "
+        "pre_close, tradestatus, volume, amount) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [code, date, open_, high, low, close, pre_close,
+         tradestatus, volume, amount],
+    )
+
+
+def _ins_adj_fields(conn, code, date, fore=1.0, back=1.0, adjust=1.0):
+    """插入一条 ADJ_FACTOR(各因子可单独传 None/≤0 以构造异常)。"""
+    conn.execute(
+        "INSERT INTO ADJ_FACTOR (code, trade_date, fore_factor, back_factor, "
+        "adjust_factor, updated_at) VALUES (?, ?, ?, ?, ?, now())",
+        [code, date, fore, back, adjust],
     )
 
 
@@ -412,4 +439,169 @@ def test_dbnull_suspended_excluded(mem_db):
                pre_close=10.0, tradestatus=0)
     _ins_basic(mem_db, "600519.SH", "2023-11-10", total_shares=0)
     n = _check_daily_basic_nulls(mem_db, "2023-11-10", "2023-11-10", "", "", [])
+    assert n == 0
+
+
+# ── DAILY_BASIC 新增字段: turnover_rate / total_mv / float_mv / 涨跌停价 ──────
+
+def test_dbnull_turnover_rate_zero_counted(mem_db):
+    """turnover_rate = 0 视为缺失 → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-01-02"])
+    _ins_basic(mem_db, "600519.SH", "2024-01-02", turnover_rate=0)
+    n = _check_daily_basic_nulls(mem_db, "2024-01-02", "2024-01-02", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_total_mv_null_counted(mem_db):
+    """total_mv 为 NULL → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-01-03"])
+    _ins_basic(mem_db, "600519.SH", "2024-01-03", total_mv=None)
+    n = _check_daily_basic_nulls(mem_db, "2024-01-03", "2024-01-03", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_float_mv_zero_counted(mem_db):
+    """float_mv = 0 视为缺失 → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-01-04"])
+    _ins_basic(mem_db, "600519.SH", "2024-01-04", float_mv=0)
+    n = _check_daily_basic_nulls(mem_db, "2024-01-04", "2024-01-04", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_limit_up_zero_counted(mem_db):
+    """limit_up ≤ 0(涨停价)视为缺失 → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-01-05"])
+    _ins_basic(mem_db, "600519.SH", "2024-01-05", limit_up=0)
+    n = _check_daily_basic_nulls(mem_db, "2024-01-05", "2024-01-05", "", "", [])
+    assert n == 1
+
+
+def test_dbnull_new_fields_all_present_ok(mem_db):
+    """turnover_rate/total_mv/float_mv/limit_up/limit_down 都有正常值 → 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-01-08"])
+    _ins_basic(mem_db, "600519.SH", "2024-01-08")  # 默认全为正常值
+    n = _check_daily_basic_nulls(mem_db, "2024-01-08", "2024-01-08", "", "", [])
+    assert n == 0
+
+
+# ── STOCK_DAILY 价量字段空值校验 ─────────────────────────────────────────────
+# 口径: 正常交易日(tradestatus=1) open/high/low/close/pre_close/volume/amount
+# 为 NULL 或 ≤0 即异常;停牌行不参与。
+
+def test_sdnull_all_present_ok(mem_db):
+    """价量字段齐全且为正 → 返回 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-02-01"])
+    _ins_sd(mem_db, "600519.SH", "2024-02-01")
+    n = _check_stock_daily_nulls(mem_db, "2024-02-01", "2024-02-01", "", "", [])
+    assert n == 0
+
+
+def test_sdnull_close_zero_counted(mem_db):
+    """close = 0 → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-02-02"])
+    _ins_sd(mem_db, "600519.SH", "2024-02-02", close=0)
+    n = _check_stock_daily_nulls(mem_db, "2024-02-02", "2024-02-02", "", "", [])
+    assert n == 1
+
+
+def test_sdnull_volume_zero_counted(mem_db):
+    """正常交易日 volume = 0 → 异常(正常交易必有成交量),返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-02-03"])
+    _ins_sd(mem_db, "600519.SH", "2024-02-03", volume=0)
+    n = _check_stock_daily_nulls(mem_db, "2024-02-03", "2024-02-03", "", "", [])
+    assert n == 1
+
+
+def test_sdnull_pre_close_fill_minus_one_counted(mem_db):
+    """pre_close = -1(缺失填充值)→ 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-02-04"])
+    _ins_sd(mem_db, "600519.SH", "2024-02-04", pre_close=-1)
+    n = _check_stock_daily_nulls(mem_db, "2024-02-04", "2024-02-04", "", "", [])
+    assert n == 1
+
+
+def test_sdnull_suspended_excluded(mem_db):
+    """停牌(tradestatus≠1)行即便价量全为 0 也不参与校验 → 返回 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-02-05"])
+    _ins_sd(mem_db, "600519.SH", "2024-02-05", open_=0, high=0, low=0,
+            close=0, pre_close=-1, volume=0, amount=0, tradestatus=0)
+    n = _check_stock_daily_nulls(mem_db, "2024-02-05", "2024-02-05", "", "", [])
+    assert n == 0
+
+
+def test_sdnull_missing_label_lists_fields(mem_db, tmp_path, monkeypatch):
+    """异常时 CSV 的 missing 列正确列出涉及字段。"""
+    import tools.check_daily as cd
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-02-06"])
+    _ins_sd(mem_db, "600519.SH", "2024-02-06", close=0, volume=0)
+    monkeypatch.setattr(cd, "__file__", str(tmp_path / "csv" / "x"))
+    n = _check_stock_daily_nulls(mem_db, "2024-02-06", "2024-02-06", "", "", [])
+    assert n == 1
+    out = tmp_path / "csv" / "check_stockdaily_nulls_2024-02-06_2024-02-06.csv"
+    content = out.read_text(encoding="utf-8-sig").splitlines()
+    assert content[0] == "date,code,name,missing"
+    assert "close" in content[1] and "volume" in content[1]
+
+
+# ── ADJ_FACTOR 复权因子空值校验 ─────────────────────────────────────────────
+# 口径: 正常交易日 fore/back/adjust_factor 为 NULL 或 ≤0 即异常。
+
+def test_afnull_all_present_ok(mem_db):
+    """三个因子都为正,且当日正常交易 → 返回 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-03-01"])
+    _ins_sd(mem_db, "600519.SH", "2024-03-01")
+    _ins_adj_fields(mem_db, "600519.SH", "2024-03-01")
+    n = _check_adj_factor_nulls(mem_db, "2024-03-01", "2024-03-01", "", "", [])
+    assert n == 0
+
+
+def test_afnull_back_factor_null_counted(mem_db):
+    """back_factor 为 NULL(下游最常用)→ 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-03-02"])
+    _ins_sd(mem_db, "600519.SH", "2024-03-02")
+    _ins_adj_fields(mem_db, "600519.SH", "2024-03-02", back=None)
+    n = _check_adj_factor_nulls(mem_db, "2024-03-02", "2024-03-02", "", "", [])
+    assert n == 1
+
+
+def test_afnull_factor_zero_counted(mem_db):
+    """adjust_factor ≤ 0 → 异常,返回 1。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-03-03"])
+    _ins_sd(mem_db, "600519.SH", "2024-03-03")
+    _ins_adj_fields(mem_db, "600519.SH", "2024-03-03", adjust=0)
+    n = _check_adj_factor_nulls(mem_db, "2024-03-03", "2024-03-03", "", "", [])
+    assert n == 1
+
+
+def test_afnull_suspended_excluded(mem_db):
+    """当日停牌(tradestatus=0)→ 即便因子异常也不参与校验,返回 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-03-04"])
+    _ins_sd(mem_db, "600519.SH", "2024-03-04", tradestatus=0)
+    _ins_adj_fields(mem_db, "600519.SH", "2024-03-04", back=None)
+    n = _check_adj_factor_nulls(mem_db, "2024-03-04", "2024-03-04", "", "", [])
+    assert n == 0
+
+
+def test_afnull_no_daily_row_excluded(mem_db):
+    """当日无 STOCK_DAILY 行(无法确认是否交易)→ 不参与因子校验,返回 0。"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2024-03-05"])
+    # 仅有 ADJ_FACTOR 且 back_factor 异常,但无对应 STOCK_DAILY 行
+    _ins_adj_fields(mem_db, "600519.SH", "2024-03-05", back=None)
+    n = _check_adj_factor_nulls(mem_db, "2024-03-05", "2024-03-05", "", "", [])
     assert n == 0

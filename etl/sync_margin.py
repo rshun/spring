@@ -104,6 +104,8 @@ def _requested_codes(exchanges: list[str]) -> set[str]:
 
 def _fill_missing_exchanges(df, requested: set[str], fallback_fn):
     """对 akstock 未返回的交易所调用 fallback_fn(缺失交易所小写列表)，合并结果。"""
+    # 注意: 缺失检测按交易所粒度(非 交易所×日期)。多日区间回补时若 akstock 对某交易所
+    # 只返回了部分日期, 缺失日期不会被官网回补; 默认 T-1 单日运行与逐日明细路径不受影响。
     present = set(df['exchange_code'].unique()) if df is not None and not df.empty else set()
     missing = requested - present
     if not missing:

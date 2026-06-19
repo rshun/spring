@@ -3,6 +3,7 @@
 #   2026-06-19  Claude  抽出通用 _http_download；新增沪深融资融券官网文件下载/清洗(fetch_margin_summary/detail)作为 akstock 回退
 #   2026-06-19  Claude  新增上交所融资融券汇总/明细清洗函数(_clean_sse_summary/_clean_sse_detail)
 #   2026-06-19  Claude  新增深交所融资融券汇总/明细清洗函数(_clean_szse_summary/_clean_szse_detail)
+#   2026-06-19  Claude  新增官网下载编排 fetch_margin_summary/fetch_margin_detail
 """通用 http/https 文件下载数据源
 
 通过 http/https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。
@@ -254,3 +255,101 @@ def _clean_szse_detail(raw_df, trade_date):
     df['margin_repay_amount'] = None
     df['short_repay_volume'] = None
     return df.reindex(columns=_DETAIL_OUT_COLS).reset_index(drop=True)
+
+
+def _get_margin_web_config() -> dict:
+    return get_config()["margin_web"]
+
+
+def _ensure_sse_file(yyyymmdd: str) -> Path:
+    """下载上交所 rzrqjygk{date}.xls 到 download/（已存在则不重下），返回路径。"""
+    cfg = _get_margin_web_config()
+    url = cfg["sse_url_tpl"].format(date=yyyymmdd)
+    dest = DOWNLOAD_DIR / f"rzrqjygk{yyyymmdd}.xls"
+    if not dest.exists():
+        logger.info(f"下载上交所融资融券文件: {url}")
+        _http_download(
+            url, dest,
+            timeout=cfg.get("request_timeout", 30),
+            tries=cfg.get("tries", 3),
+            delay=cfg.get("retry_delay", 3),
+            verify=cfg.get("verify_ssl", True),
+            headers={'Referer': 'https://www.sse.com.cn/'},
+        )
+    return dest
+
+
+def _download_szse_file(yyyy_mm_dd: str, tabkey: str) -> Path:
+    """下载深交所融资融券 xlsx（tab1 汇总 / tab2 明细），返回路径。"""
+    cfg = _get_margin_web_config()
+    url = cfg["szse_url_tpl"].format(date=yyyy_mm_dd, tabkey=tabkey)
+    dest = DOWNLOAD_DIR / f"szse_margin_{tabkey}_{yyyy_mm_dd}.xlsx"
+    logger.info(f"下载深交所融资融券文件: {url}")
+    _http_download(
+        url, dest,
+        timeout=cfg.get("request_timeout", 30),
+        tries=cfg.get("tries", 3),
+        delay=cfg.get("retry_delay", 3),
+        verify=cfg.get("verify_ssl", True),
+    )
+    return dest
+
+
+def _wants(exchanges):
+    target = {e.lower() for e in exchanges}
+    return ('sh' in target or 'all' in target), ('sz' in target or 'all' in target)
+
+
+def fetch_margin_summary(begin_date, end_date, exchanges, trade_dates):
+    """官网回退：沪深融资融券汇总。签名/输出列与 akstock.fetch_margin_summary 一致。"""
+    want_sh, want_sz = _wants(exchanges)
+    parts = []
+    for d in trade_dates:
+        td = datetime.strptime(d, '%Y%m%d').date()
+        if want_sh:
+            try:
+                path = _ensure_sse_file(d)
+                raw = pd.read_excel(path, sheet_name='汇总信息', dtype=str, engine='xlrd')
+                parts.append(_clean_sse_summary(raw, td))
+                logger.info(f"  上交所汇总(官网) {d}: 1 条")
+            except Exception as e:
+                logger.warning(f"  [WARN] 上交所汇总(官网) {d} 获取失败: {e}")
+        if want_sz:
+            try:
+                path = _download_szse_file(td.isoformat(), 'tab1')
+                raw = pd.read_excel(path, sheet_name=0, dtype=str)
+                parts.append(_clean_szse_summary(raw, td))
+                logger.info(f"  深交所汇总(官网) {d}: 1 条")
+            except Exception as e:
+                logger.warning(f"  [WARN] 深交所汇总(官网) {d} 获取失败: {e}")
+    if not parts:
+        return pd.DataFrame(columns=_SUMMARY_OUT_COLS)
+    return pd.concat(parts, ignore_index=True).reset_index(drop=True)
+
+
+def fetch_margin_detail(trade_date, exchanges):
+    """官网回退：指定交易日沪深融资融券明细。签名/输出列与 akstock.fetch_margin_detail 一致。"""
+    want_sh, want_sz = _wants(exchanges)
+    td = datetime.strptime(trade_date, '%Y%m%d').date()
+    dfs = []
+    if want_sz:
+        try:
+            path = _download_szse_file(td.isoformat(), 'tab2')
+            raw = pd.read_excel(path, sheet_name=0, dtype=str)
+            df = _clean_szse_detail(raw, td)
+            dfs.append(df)
+            logger.info(f"  深交所明细(官网) {trade_date}: {len(df)} 条")
+        except Exception as e:
+            logger.warning(f"  [WARN] 深交所明细(官网) {trade_date} 获取失败: {e}")
+    if want_sh:
+        try:
+            path = _ensure_sse_file(trade_date)
+            raw = pd.read_excel(path, sheet_name='明细信息', dtype=str, engine='xlrd')
+            df = _clean_sse_detail(raw, td)
+            dfs.append(df)
+            logger.info(f"  上交所明细(官网) {trade_date}: {len(df)} 条")
+        except Exception as e:
+            logger.warning(f"  [WARN] 上交所明细(官网) {trade_date} 获取失败: {e}")
+    if not dfs:
+        return pd.DataFrame(columns=_DETAIL_OUT_COLS)
+    return pd.concat(dfs, ignore_index=True).reset_index(drop=True)

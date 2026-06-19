@@ -120,3 +120,37 @@ def test_clean_szse_detail_preserves_leading_zeros():
 def test_clean_szse_detail_missing_column_raises():
     with pytest.raises(ValueError):
         web._clean_szse_detail(pd.DataFrame({'证券代码': ['000001']}), TD)
+
+
+def test_fetch_margin_summary_sh_success(monkeypatch, tmp_path):
+    # mock 下载：返回一个假路径；mock read_excel 返回 SSE 汇总原始表
+    monkeypatch.setattr(web, "_ensure_sse_file", lambda d: tmp_path / f"rzrqjygk{d}.xls")
+    monkeypatch.setattr(web.pd, "read_excel", lambda *a, **k: _sse_summary_raw())
+    out = web.fetch_margin_summary("20260618", "20260618", ["sh"], ["20260618"])
+    assert list(out.columns) == web._SUMMARY_OUT_COLS
+    assert len(out) == 1
+    assert out.iloc[0]['exchange_code'] == 'SH'
+
+
+def test_fetch_margin_summary_download_failure_returns_empty(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("net down")
+    monkeypatch.setattr(web, "_ensure_sse_file", boom)
+    monkeypatch.setattr(web, "_download_szse_file", boom)
+    out = web.fetch_margin_summary("20260618", "20260618", ["all"], ["20260618"])
+    assert list(out.columns) == web._SUMMARY_OUT_COLS
+    assert out.empty
+
+
+def test_fetch_margin_detail_sz_success(monkeypatch, tmp_path):
+    raw = pd.DataFrame({
+        '证券代码': ['000001'], '证券简称': ['平安银行'],
+        '融资买入额(元)': ['1'], '融资余额(元)': ['2'],
+        '融券卖出量(股/份)': ['0'], '融券余量(股/份)': ['0'],
+        '融券余额(元)': ['0'], '融资融券余额(元)': ['2'],
+    })
+    monkeypatch.setattr(web, "_download_szse_file", lambda d, tab: tmp_path / "x.xlsx")
+    monkeypatch.setattr(web.pd, "read_excel", lambda *a, **k: raw)
+    out = web.fetch_margin_detail("20260618", ["sz"])
+    assert list(out.columns) == web._DETAIL_OUT_COLS
+    assert out.iloc[0]['code'] == '000001.SZ'

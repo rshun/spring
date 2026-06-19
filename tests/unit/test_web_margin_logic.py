@@ -81,3 +81,42 @@ def test_http_download_raises_after_retries(tmp_path):
         with pytest.raises(RuntimeError):
             web._http_download("http://x/y", dest, timeout=5, tries=3, delay=0)
     assert mget.call_count == 3
+
+
+def test_clean_szse_summary_strips_commas_no_scaling():
+    raw = pd.DataFrame({
+        '融资买入额(元)':   ['166,476,286,758'],
+        '融资余额(元)':     ['1,433,639,152,915'],
+        '融券卖出量(股/份)': ['23,358,661'],
+        '融券余量(股/份)':  ['880,313,065'],
+        '融券余额(元)':     ['7,631,187,003'],
+        '融资融券余额(元)': ['1,441,270,339,918'],
+    })
+    out = web._clean_szse_summary(raw, TD)
+    assert list(out.columns) == web._SUMMARY_OUT_COLS
+    assert out.iloc[0]['margin_balance'] == 1433639152915.0   # 原值，未 ×1e8
+    assert out.iloc[0]['exchange_code'] == 'SZ'
+    assert out.iloc[0]['short_balance_amount'] == 7631187003.0
+
+
+def test_clean_szse_detail_preserves_leading_zeros():
+    raw = pd.DataFrame({
+        '证券代码':         ['000001', '000002', '159915', '301687'],  # 159915=ETF 过滤
+        '证券简称':         ['平安银行', '万科A', '创业板ETF', '新广益'],
+        '融资买入额(元)':   ['96,987,355', '55,065,272', '1', '43,520,546'],
+        '融资余额(元)':     ['5,239,155,555', '2,488,937,846', '1', '155,840,011'],
+        '融券卖出量(股/份)': ['58,200', '49,800', '0', '0'],
+        '融券余量(股/份)':  ['1,744,100', '1,954,800', '0', '0'],
+        '融券余额(元)':     ['18,801,398', '6,040,332', '0', '0'],
+        '融资融券余额(元)': ['5,257,956,953', '2,494,978,178', '1', '155,840,011'],
+    })
+    out = web._clean_szse_detail(raw, TD)
+    assert list(out.columns) == web._DETAIL_OUT_COLS
+    assert set(out['symbol']) == {'000001', '000002', '301687'}  # ETF 过滤、前导零保留
+    assert out.loc[out['symbol'] == '000001', 'code'].iloc[0] == '000001.SZ'
+    assert out['margin_repay_amount'].isna().all()
+
+
+def test_clean_szse_detail_missing_column_raises():
+    with pytest.raises(ValueError):
+        web._clean_szse_detail(pd.DataFrame({'证券代码': ['000001']}), TD)

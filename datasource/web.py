@@ -2,6 +2,7 @@
 #   2026-05-22  Claude  从 dlhttp.py 重命名为 web.py，定位为通用 http/https 文件下载数据源
 #   2026-06-19  Claude  抽出通用 _http_download；新增沪深融资融券官网文件下载/清洗(fetch_margin_summary/detail)作为 akstock 回退
 #   2026-06-19  Claude  新增上交所融资融券汇总/明细清洗函数(_clean_sse_summary/_clean_sse_detail)
+#   2026-06-19  Claude  新增深交所融资融券汇总/明细清洗函数(_clean_szse_summary/_clean_szse_detail)
 """通用 http/https 文件下载数据源
 
 通过 http/https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。
@@ -204,4 +205,52 @@ def _clean_sse_detail(raw_df, trade_date):
     df['exchange_code'] = 'SH'
     df['short_balance_amount'] = None
     df['margin_short_balance'] = None
+    return df.reindex(columns=_DETAIL_OUT_COLS).reset_index(drop=True)
+
+
+_SZSE_SUMMARY_MAP = {
+    '融资买入额(元)':   'margin_buy_amount',
+    '融资余额(元)':     'margin_balance',
+    '融券卖出量(股/份)': 'short_sell_volume',
+    '融券余量(股/份)':  'short_balance_volume',
+    '融券余额(元)':     'short_balance_amount',
+    '融资融券余额(元)': 'margin_short_balance',
+}
+_SZSE_DETAIL_MAP = {
+    '证券代码':         'symbol',
+    '融资买入额(元)':   'margin_buy_amount',
+    '融资余额(元)':     'margin_balance',
+    '融券卖出量(股/份)': 'short_sell_volume',
+    '融券余量(股/份)':  'short_balance_volume',
+    '融券余额(元)':     'short_balance_amount',
+    '融资融券余额(元)': 'margin_short_balance',
+}
+
+
+def _clean_szse_summary(raw_df, trade_date):
+    _require_columns(raw_df, _SZSE_SUMMARY_MAP, "SZSE 汇总")
+    df = raw_df.rename(columns=_SZSE_SUMMARY_MAP)
+    for col in _SZSE_SUMMARY_MAP.values():
+        df[col] = _to_num(df[col])             # 仅去逗号，深圳官网已是 元/股，不 ×1e8
+    df = df.dropna(subset=['margin_balance']).copy()
+    df['trade_date'] = trade_date
+    df['exchange_code'] = 'SZ'
+    df['margin_repay_amount'] = None
+    df['short_repay_volume'] = None
+    return df.reindex(columns=_SUMMARY_OUT_COLS).reset_index(drop=True)
+
+
+def _clean_szse_detail(raw_df, trade_date):
+    _require_columns(raw_df, _SZSE_DETAIL_MAP, "SZSE 明细")
+    df = raw_df.rename(columns=_SZSE_DETAIL_MAP)
+    df['symbol'] = df['symbol'].astype(str).str.strip().str.zfill(6)
+    df = df[df['symbol'].str.match(r'^[03]\d{5}$')].copy()
+    for col in _SZSE_DETAIL_MAP.values():
+        if col != 'symbol':
+            df[col] = _to_num(df[col])
+    df['code'] = df['symbol'] + '.SZ'
+    df['trade_date'] = trade_date
+    df['exchange_code'] = 'SZ'
+    df['margin_repay_amount'] = None
+    df['short_repay_volume'] = None
     return df.reindex(columns=_DETAIL_OUT_COLS).reset_index(drop=True)

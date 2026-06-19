@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-06-19  Claude  akstock 取数失败时按交易所回退到交易所官网文件下载(datasource.web)；新增 --download 强制官网
 """
 功能: 获取沪深两市融资融券汇总和明细数据
 输入参数:
@@ -11,8 +13,10 @@
 import argparse
 import duckdb
 import logging
+import pandas as pd
 from util import dbutil, myutil
 from util import validators as pv
+from datasource import web
 
 logger = logging.getLogger("etl.sync_margin")
 
@@ -66,6 +70,12 @@ def parse_arguments() -> argparse.Namespace:
         help='强制运行, 即使当前日期不是交易日'
     )
 
+    parser.add_argument(
+        '--download',
+        action='store_true',
+        help='强制直接从交易所官网下载文件取数，不经 akstock'
+    )
+
     return parser.parse_args()
 
 
@@ -80,6 +90,30 @@ def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
     if not forcerun:
         validators.append(pv.v_single_day_must_be_trading_day("begin", "end"))
     return pv.run(ctx, validators)
+
+
+def _requested_codes(exchanges: list[str]) -> set[str]:
+    target = {e.lower() for e in exchanges}
+    codes: set[str] = set()
+    if 'all' in target or 'sh' in target:
+        codes.add('SH')
+    if 'all' in target or 'sz' in target:
+        codes.add('SZ')
+    return codes
+
+
+def _fill_missing_exchanges(df, requested: set[str], fallback_fn):
+    """对 akstock 未返回的交易所调用 fallback_fn(缺失交易所小写列表)，合并结果。"""
+    present = set(df['exchange_code'].unique()) if df is not None and not df.empty else set()
+    missing = requested - present
+    if not missing:
+        return df if df is not None else pd.DataFrame()
+    logger.warning(f"akstock 未取到 {sorted(missing)} 数据，回退官网下载...")
+    df_web = fallback_fn([c.lower() for c in sorted(missing)])
+    frames = [d for d in (df, df_web) if d is not None and not d.empty]
+    if not frames:
+        return df if df is not None else pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def main() -> None:
@@ -115,27 +149,42 @@ def main() -> None:
 
         # ── 汇总 ──────────────────────────────────────────
         if args.only in ('summary', 'all'):
-            if not hasattr(module, 'fetch_margin_summary'):
+            logger.info("\n[Step] 获取融资融券汇总数据...")
+            requested = _requested_codes(args.exchanges)
+            if args.download:
+                df_summary = web.fetch_margin_summary(args.begin, args.end, args.exchanges, trade_dates)
+            elif not hasattr(module, 'fetch_margin_summary'):
                 logger.error(f"模块 '{args.source}' 中没有定义 'fetch_margin_summary' 方法。")
+                df_summary = pd.DataFrame()
             else:
-                logger.info("\n[Step] 获取融资融券汇总数据...")
-                df_summary = module.fetch_margin_summary(
-                    args.begin, args.end, args.exchanges, trade_dates
+                df_ak = module.fetch_margin_summary(args.begin, args.end, args.exchanges, trade_dates)
+                df_summary = _fill_missing_exchanges(
+                    df_ak, requested,
+                    lambda ex: web.fetch_margin_summary(args.begin, args.end, ex, trade_dates),
                 )
-                if df_summary is not None and not df_summary.empty:
-                    dbutil.save_margin_summary_to_db(df_summary, conn)
-                else:
-                    logger.warning("未获取到融资融券汇总数据，跳过数据库写入。")
+            if df_summary is not None and not df_summary.empty:
+                dbutil.save_margin_summary_to_db(df_summary, conn)
+            else:
+                logger.warning("未获取到融资融券汇总数据，跳过数据库写入。")
 
         # ── 明细 ──────────────────────────────────────────
         if args.only in ('detail', 'all'):
-            if not hasattr(module, 'fetch_margin_detail'):
+            logger.info("\n[Step] 逐日获取融资融券明细数据...")
+            requested = _requested_codes(args.exchanges)
+            has_ak_detail = hasattr(module, 'fetch_margin_detail')
+            if not args.download and not has_ak_detail:
                 logger.error(f"模块 '{args.source}' 中没有定义 'fetch_margin_detail' 方法。")
             else:
-                logger.info("\n[Step] 逐日获取融资融券明细数据...")
                 for i, d in enumerate(trade_dates, 1):
                     logger.info(f"  ({i}/{len(trade_dates)}) {d}")
-                    df_detail = module.fetch_margin_detail(d, args.exchanges)
+                    if args.download:
+                        df_detail = web.fetch_margin_detail(d, args.exchanges)
+                    else:
+                        df_ak = module.fetch_margin_detail(d, args.exchanges)
+                        df_detail = _fill_missing_exchanges(
+                            df_ak, requested,
+                            lambda ex, d=d: web.fetch_margin_detail(d, ex),
+                        )
                     if df_detail is not None and not df_detail.empty:
                         dbutil.save_margin_detail_to_db(df_detail, conn)
                     else:

@@ -10,6 +10,7 @@ StockClassifyUse_stock.xls 并解析为与 akstock.fetch_stock_industry_clf_hist
 """
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,40 @@ _CLASSIFY_COL_MAP = {
     '计入日期': 'start_date',
     '行业代码': 'industry_code',
     '更新日期': 'update_time',
+}
+
+_SUMMARY_OUT_COLS = [
+    'trade_date', 'exchange_code',
+    'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
+    'short_sell_volume', 'short_repay_volume',
+    'short_balance_volume', 'short_balance_amount',
+    'margin_short_balance',
+]
+_DETAIL_OUT_COLS = [
+    'trade_date', 'exchange_code', 'symbol', 'code',
+    'margin_buy_amount', 'margin_repay_amount', 'margin_balance',
+    'short_sell_volume', 'short_repay_volume',
+    'short_balance_volume', 'short_balance_amount',
+    'margin_short_balance',
+]
+
+# 官网中文列 → 标准英文列
+_SSE_SUMMARY_MAP = {
+    '本日融资余额(元)':     'margin_balance',
+    '本日融资买入额(元)':   'margin_buy_amount',
+    '本日融券余量':         'short_balance_volume',
+    '本日融券余量金额(元)': 'short_balance_amount',
+    '本日融券卖出量':       'short_sell_volume',
+    '本日融资融券余额(元)': 'margin_short_balance',
+}
+_SSE_DETAIL_MAP = {
+    '标的证券代码':     'symbol',
+    '本日融资余额(元)': 'margin_balance',
+    '本日融资买入额(元)': 'margin_buy_amount',
+    '本日融资偿还额(元)': 'margin_repay_amount',
+    '本日融券余量':     'short_balance_volume',
+    '本日融券卖出量':   'short_sell_volume',
+    '本日融券偿还量':   'short_repay_volume',
 }
 
 
@@ -128,3 +163,44 @@ def fetch_stock_industry_clf_hist_sw() -> pd.DataFrame:
     except Exception as e:
         logger.error(f"下载/解析申万行业分类文件失败: {e}")
         return pd.DataFrame(columns=_INDUSTRY_OUT_COLS)
+
+
+def _to_num(series):
+    """去千分位逗号后转 float64（非数值→NaN）。"""
+    cleaned = series.astype(str).str.replace(',', '', regex=False).str.strip()
+    return pd.to_numeric(cleaned, errors='coerce').astype('float64')
+
+
+def _require_columns(df, mapping, name):
+    missing = [c for c in mapping if c not in df.columns]
+    if missing:
+        raise ValueError(f"{name} 缺少字段: {missing}，实际列: {list(df.columns)}")
+
+
+def _clean_sse_summary(raw_df, trade_date):
+    _require_columns(raw_df, _SSE_SUMMARY_MAP, "SSE 汇总")
+    df = raw_df.rename(columns=_SSE_SUMMARY_MAP)
+    for col in _SSE_SUMMARY_MAP.values():
+        df[col] = _to_num(df[col])
+    df = df.dropna(subset=['margin_balance']).copy()   # 丢弃空行/说明行
+    df['trade_date'] = trade_date
+    df['exchange_code'] = 'SH'
+    df['margin_repay_amount'] = None
+    df['short_repay_volume'] = None
+    return df.reindex(columns=_SUMMARY_OUT_COLS).reset_index(drop=True)
+
+
+def _clean_sse_detail(raw_df, trade_date):
+    _require_columns(raw_df, _SSE_DETAIL_MAP, "SSE 明细")
+    df = raw_df.rename(columns=_SSE_DETAIL_MAP)
+    df['symbol'] = df['symbol'].astype(str).str.strip().str.zfill(6)
+    df = df[df['symbol'].str.match(r'^6\d{5}$')].copy()
+    for col in _SSE_DETAIL_MAP.values():
+        if col != 'symbol':
+            df[col] = _to_num(df[col])
+    df['code'] = df['symbol'] + '.SH'
+    df['trade_date'] = trade_date
+    df['exchange_code'] = 'SH'
+    df['short_balance_amount'] = None
+    df['margin_short_balance'] = None
+    return df.reindex(columns=_DETAIL_OUT_COLS).reset_index(drop=True)

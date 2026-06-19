@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-05-22  Claude  从 dlhttp.py 重命名为 web.py，定位为通用 http/https 文件下载数据源
+#   2026-06-19  Claude  抽出通用 _http_download；新增沪深融资融券官网文件下载/清洗(fetch_margin_summary/detail)作为 akstock 回退
 """通用 http/https 文件下载数据源
 
 通过 http/https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。
@@ -37,28 +38,25 @@ def _get_sws_config() -> dict:
     return get_config()["sws"]
 
 
-def _download(url: str, dest: Path) -> Path:
-    """下载 url 到 dest，带简单重试。失败抛异常。"""
+def _http_download(url, dest, *, timeout=30, tries=3, delay=3, verify=True, headers=None):
+    """通用 http(s) 文件下载，带简单重试。成功返回 dest，重试耗尽抛异常。"""
     import requests
 
-    cfg = _get_sws_config()
-    tries = cfg.get("tries", 3)
-    delay = cfg.get("retry_delay", 3)
-    timeout = cfg.get("request_timeout", 30)
-    verify = cfg.get("verify_ssl", False)
-    headers = {
+    base_headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                       '(KHTML, like Gecko) Chrome/87.0.4280.141',
     }
+    if headers:
+        base_headers.update(headers)
     if not verify:
-        # 申万官网证书链不完整，关闭校验时抑制 InsecureRequestWarning
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+    dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(1, tries + 1):
         try:
-            resp = requests.get(url, headers=headers, timeout=timeout, verify=verify)
+            resp = requests.get(url, headers=base_headers, timeout=timeout, verify=verify)
             resp.raise_for_status()
             dest.write_bytes(resp.content)
             return dest
@@ -67,6 +65,18 @@ def _download(url: str, dest: Path) -> Path:
             if attempt == tries:
                 raise
             time.sleep(delay)
+
+
+def _download(url: str, dest: Path) -> Path:
+    """下载 url 到 dest（sws 配置），带简单重试。失败抛异常。"""
+    cfg = _get_sws_config()
+    return _http_download(
+        url, dest,
+        timeout=cfg.get("request_timeout", 30),
+        tries=cfg.get("tries", 3),
+        delay=cfg.get("retry_delay", 3),
+        verify=cfg.get("verify_ssl", False),
+    )
 
 
 def read_classify_xls(path: Path) -> pd.DataFrame:

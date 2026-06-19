@@ -35,6 +35,8 @@ baostock:
   retry_delay_login: 0.2
   # Broken pipe 断管后重新登录的等待时间（秒）
   retry_delay_pipe: 0.5
+  # 数据源偶发整批 turn(换手率) 为空时，重新登录后重试的等待时间（秒）
+  retry_delay_missing: 0.5
 
 # 申万宏源研究 (swsresearch.com) HTTP 文件下载源
 # 作为 sync_industry akshare 取数失败时的回退数据源
@@ -50,6 +52,17 @@ sws:
   # 是否校验 HTTPS 证书：申万官网证书链不完整，开启校验会 CERTIFICATE_VERIFY_FAILED，
   # 故默认关闭。下载的是公开只读文件，风险较低；如所在网络可正常校验可改为 true。
   verify_ssl: false
+
+# 沪深交易所官网融资融券文件下载源（akstock 取数失败时的回退）
+margin_web:
+  # {date} = YYYYMMDD
+  sse_url_tpl: "https://www.sse.com.cn/market/dealingdata/overview/margin/a/rzrqjygk{date}.xls"
+  # {date} = YYYY-MM-DD, {tabkey} = tab1(汇总)/tab2(明细)
+  szse_url_tpl: "https://www.szse.cn/api/report/ShowReport?SHOWTYPE=xlsx&CATALOGID=1837_xxpl&txtDate={date}&TABKEY={tabkey}"
+  request_timeout: 30
+  tries: 3
+  retry_delay: 3
+  verify_ssl: true        # sse/szse 证书正常；如所在网络异常可改 false
 
 tdx:
   # 通达信行情服务器列表 (IP, 端口)，按经验优先级排序

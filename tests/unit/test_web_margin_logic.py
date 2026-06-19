@@ -33,6 +33,7 @@ def test_clean_sse_summary_drops_note_and_maps():
     assert row['margin_balance'] == 1495185799372.0
     assert row['short_balance_amount'] == 14089378242.0
     assert row['margin_repay_amount'] is None or pd.isna(row['margin_repay_amount'])
+    assert row['short_repay_volume'] is None or pd.isna(row['short_repay_volume'])
 
 
 def test_clean_sse_detail_filters_etf_and_sets_code():
@@ -52,6 +53,7 @@ def test_clean_sse_detail_filters_etf_and_sets_code():
     assert out.loc[out['symbol'] == '600000', 'code'].iloc[0] == '600000.SH'
     assert out['exchange_code'].unique().tolist() == ['SH']
     assert out['short_balance_amount'].isna().all()      # 沪市明细不披露
+    assert out['margin_short_balance'].isna().all()
 
 
 def test_clean_sse_summary_missing_column_raises():

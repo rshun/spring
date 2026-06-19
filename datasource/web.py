@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-05-22  Claude  从 dlhttp.py 重命名为 web.py，定位为通用 http/https 文件下载数据源
 #   2026-06-19  Claude  抽出通用 _http_download；新增沪深融资融券官网文件下载/清洗(fetch_margin_summary/detail)作为 akstock 回退
+#   2026-06-19  Claude  新增上交所融资融券汇总/明细清洗函数(_clean_sse_summary/_clean_sse_detail)
 """通用 http/https 文件下载数据源
 
 通过 http/https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。

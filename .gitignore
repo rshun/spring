@@ -9,4 +9,5 @@ csv/
 tmp/
 download/
 log/
+docs/
 __init__.py

@@ -1,3 +1,6 @@
+# 修改记录:
+#   2026-06-18  Claude  日线下载校验 turn：正常交易日(tradestatus=1)若 turn 为空，
+#                       视为数据源偶发抽风，重新登录重试，重试耗尽则停止下载
 import baostock as bs
 import logging
 import pandas as pd
@@ -21,6 +24,10 @@ def _get_retry_delay_pipe() -> float:
     return get_config()["baostock"]["retry_delay_pipe"]
 
 
+def _get_retry_delay_missing() -> float:
+    return get_config()["baostock"]["retry_delay_missing"]
+
+
 def relogin():
     try:
         bs.logout()
@@ -36,6 +43,11 @@ class BaoNotLoggedInError(RuntimeError):
 
 
 class BaoQueryError(RuntimeError):
+    pass
+
+
+class BaoMissingDataError(RuntimeError):
+    """正常交易日 turn(换手率) 为空，疑似数据源偶发抽风，可重登重试。"""
     pass
 
 
@@ -229,6 +241,17 @@ def fetch_stock_data(begin_date: str, end_date: str, bs_code: str) -> tuple[pd.D
 
     df_raw["isST"] = pd.to_numeric(df_raw["isST"], errors="coerce").fillna(0).astype(int)
 
+    # 数据完整性校验: 正常交易日(tradestatus=1)的 turn(换手率)必有值。
+    # 若整批/部分交易日 turn 为空(NaN)，多为数据源偶发抽风(K线正常但 turn 拿不到),
+    # 抛出可重试异常, 由上层重新登录后重试。停牌日(tradestatus!=1)的空值属正常, 跳过。
+    is_trading = df_raw["tradestatus"].astype("string").str.strip() == "1"
+    missing_turn = is_trading & df_raw["turn"].isna()
+    if missing_turn.any():
+        n_missing = int(missing_turn.sum())
+        raise BaoMissingDataError(
+            f"{bs_code}: 交易日 turn(换手率)缺失 {n_missing} 行"
+        )
+
     df_daily = pd.DataFrame({
         "code":         df_raw["std_code"],
         "date":         df_raw["date"],
@@ -309,6 +332,16 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
 
                     logger.warning(f"[Baostock] 会话恢复失败，跳过 {bs_code}")
                     break
+
+                except BaoMissingDataError as e:
+                    if attempt < _get_max_fetch_attempts() - 1:
+                        logger.warning(f"[Baostock] 换手率缺失({bs_code}): {e}，重新登录后重试...")
+                        relogin()
+                        time.sleep(_get_retry_delay_missing())
+                        continue
+
+                    logger.error(f"[Baostock] 换手率缺失重试耗尽，停止下载: {e}")
+                    raise
 
                 except Exception as e:
                     if _is_broken_pipe_error(e) and attempt < _get_max_fetch_attempts() - 1:

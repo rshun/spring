@@ -8,6 +8,7 @@ from datasource.bstock import (
     _raise_for_query_error,
     BaoNotLoggedInError,
     BaoQueryError,
+    BaoMissingDataError,
     fetch_stock_info,
     fetch_stock_data,
     fetch_index_data,
@@ -218,6 +219,38 @@ def test_fetch_stock_data_not_logged_in_raises():
     with patch("datasource.bstock.bs.query_history_k_data_plus", return_value=rs):
         with pytest.raises(BaoNotLoggedInError):
             fetch_stock_data("2023-01-03", "2023-01-03", "sh.600519")
+
+
+# ── turn(换手率) 完整性校验 ───────────────────────────────────────────────────
+
+def test_fetch_stock_data_trading_day_with_turn_ok():
+    """正例: 正常交易日(tradestatus=1)且 turn 有值，正常返回不报错。"""
+    row = ["2023-01-03", "sh.600519", "1800", "1850", "1780", "1820",
+           "1790", "10000", "180000000", "3", "1.5", "1", "1.5", "0", "35.2", "12.1"]
+    rs = _make_kdata_rs([row])
+    with patch("datasource.bstock.bs.query_history_k_data_plus", return_value=rs):
+        _, df_basic = fetch_stock_data("2023-01-03", "2023-01-03", "sh.600519")
+    assert df_basic.iloc[0]["turnover_rate"] == 1.5
+
+
+def test_fetch_stock_data_trading_day_missing_turn_raises():
+    """反例: 正常交易日(tradestatus=1)但 turn 为空 → 抛 BaoMissingDataError 以触发重试。"""
+    row = ["2023-01-03", "sh.600519", "1800", "1850", "1780", "1820",
+           "1790", "10000", "180000000", "3", "", "1", "1.5", "0", "35.2", "12.1"]
+    rs = _make_kdata_rs([row])
+    with patch("datasource.bstock.bs.query_history_k_data_plus", return_value=rs):
+        with pytest.raises(BaoMissingDataError):
+            fetch_stock_data("2023-01-03", "2023-01-03", "sh.600519")
+
+
+def test_fetch_stock_data_suspended_day_missing_turn_ok():
+    """边界: 停牌日(tradestatus=0)turn 为空属正常，不应报错。"""
+    row = ["2023-01-03", "sh.600519", "", "", "", "",
+           "1790", "0", "0", "3", "", "0", "0", "0", "", ""]
+    rs = _make_kdata_rs([row])
+    with patch("datasource.bstock.bs.query_history_k_data_plus", return_value=rs):
+        _, df_basic = fetch_stock_data("2023-01-03", "2023-01-03", "sh.600519")
+    assert pd.isna(df_basic.iloc[0]["turnover_rate"])
 
 
 # ── fetch_index_data ──────────────────────────────────────────────────────────

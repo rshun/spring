@@ -2,6 +2,7 @@
 #   2026-05-26  Claude  新增 save_capital_detail_to_db (从 etl/sync_capital.py 迁入)
 #   2026-05-29  Claude  新增 save_finance_report_to_db (专业财务报表 cw 数据入库)
 #   2026-05-30  Claude  新增 fill_daily_basic_turnover (换手率, 支持 overwrite 开关并返回更新行数)
+#   2026-06-20  Claude  新增 get_last_trade_date (取严格早于指定日的最近一个交易日)
 import logging
 import duckdb
 import pandas as pd
@@ -791,6 +792,31 @@ def save_finance_report_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
             conn.unregister("temp_finance_report")
         except Exception:
             pass
+
+
+def get_last_trade_date(before: Optional[str] = None) -> Optional[str]:
+    """返回严格早于 before 的最近一个交易日，YYYYMMDD 格式。
+
+    参数 before: YYYYMMDD，默认今天。查不到(日历表为空/无更早交易日)返回 None。
+    """
+    if before is None:
+        before = datetime.now().strftime("%Y%m%d")
+    before_iso = datetime.strptime(before, "%Y%m%d").strftime("%Y-%m-%d")
+    conn: duckdb.DuckDBPyConnection | None = None
+    try:
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT cal_date FROM TRADE_CAL WHERE is_open = 1 AND cal_date < ? "
+            "ORDER BY cal_date DESC LIMIT 1",
+            [before_iso],
+        ).fetchone()
+        return row[0].strftime("%Y%m%d") if row else None
+    except Exception as e:
+        logger.error(f"获取上一个交易日失败: {e}")
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def get_trade_dates(start_date: str, end_date: str) -> list[str]:

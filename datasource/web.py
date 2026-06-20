@@ -4,6 +4,8 @@
 #   2026-06-19  Claude  新增上交所融资融券汇总/明细清洗函数(_clean_sse_summary/_clean_sse_detail)
 #   2026-06-19  Claude  新增深交所融资融券汇总/明细清洗函数(_clean_szse_summary/_clean_szse_detail)
 #   2026-06-19  Claude  新增官网下载编排 fetch_margin_summary/fetch_margin_detail
+#   2026-06-20  Claude  兼容历史(约 2015 前)上交所文件融券数量列带 (股) 后缀的列名(_normalize_sse_cols)
+#   2026-06-20  Claude  _normalize_sse_cols 增加列名首尾空白清理(2014 等年份的 ' 标的证券代码' 带前导空格)
 """通用 http/https 文件下载数据源
 
 通过 http/https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。
@@ -180,7 +182,25 @@ def _require_columns(df, mapping, name):
         raise ValueError(f"{name} 缺少字段: {missing}，实际列: {list(df.columns)}")
 
 
+# 历史(约 2015 前)上交所文件的融券数量列带 (股) 后缀(如 本日融券余量(股)),
+# 新版已去掉; 统一剥掉该后缀以匹配标准映射。注意金额列是 (元), 不受影响。
+_SSE_VOL_SUFFIX = '(股)'
+
+
+def _normalize_sse_cols(raw_df):
+    """规整上交所列名以兼容历年文件: 去掉列名首尾空白(部分年份如 2014 的
+    ' 标的证券代码' 带前导空格); 剥掉融券数量列末尾的 (股) 后缀。"""
+    def _norm(c):
+        c = str(c).strip()
+        if c.endswith(_SSE_VOL_SUFFIX):
+            c = c[:-len(_SSE_VOL_SUFFIX)]
+        return c
+    rename = {c: _norm(c) for c in raw_df.columns if _norm(c) != c}
+    return raw_df.rename(columns=rename) if rename else raw_df
+
+
 def _clean_sse_summary(raw_df, trade_date):
+    raw_df = _normalize_sse_cols(raw_df)
     _require_columns(raw_df, _SSE_SUMMARY_MAP, "SSE 汇总")
     df = raw_df.rename(columns=_SSE_SUMMARY_MAP)
     for col in _SSE_SUMMARY_MAP.values():
@@ -194,6 +214,7 @@ def _clean_sse_summary(raw_df, trade_date):
 
 
 def _clean_sse_detail(raw_df, trade_date):
+    raw_df = _normalize_sse_cols(raw_df)
     _require_columns(raw_df, _SSE_DETAIL_MAP, "SSE 明细")
     df = raw_df.rename(columns=_SSE_DETAIL_MAP)
     df['symbol'] = df['symbol'].astype(str).str.strip().str.zfill(6)

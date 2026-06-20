@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from util.dbutil import check_is_trading_day, get_trade_dates
+from util.dbutil import check_is_trading_day, get_trade_dates, get_last_trade_date
 from tests.conftest import insert_trade_cal
 
 
@@ -67,3 +67,44 @@ def test_get_trade_dates_no_trading_days_returns_empty(mem_db):
     with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)):
         result = get_trade_dates("2023-01-07", "2023-01-07")
     assert result == []
+
+
+# ── get_last_trade_date ───────────────────────────────────────────────────────
+
+def test_get_last_trade_date_returns_most_recent_before(mem_db):
+    """正例：返回严格早于 before 的最近一个交易日，YYYYMMDD。"""
+    for d, o in [("2023-01-03", 1), ("2023-01-04", 1), ("2023-01-05", 1)]:
+        insert_trade_cal(mem_db, d, o)
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)):
+        assert get_last_trade_date("20230105") == "20230104"
+
+
+def test_get_last_trade_date_skips_weekend(mem_db):
+    """正例：周一(20230109)取上一交易日应跨过周末回到周五(20230106)。"""
+    for d, o in [("2023-01-06", 1),   # 周五 交易日
+                 ("2023-01-07", 0),   # 周六
+                 ("2023-01-08", 0)]:  # 周日
+        insert_trade_cal(mem_db, d, o)
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)):
+        assert get_last_trade_date("20230109") == "20230106"
+
+
+def test_get_last_trade_date_strictly_before(mem_db):
+    """正例：before 当天即使是交易日也不算，必须严格早于。"""
+    for d in ["2023-01-03", "2023-01-04"]:
+        insert_trade_cal(mem_db, d, 1)
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)):
+        assert get_last_trade_date("20230104") == "20230103"
+
+
+def test_get_last_trade_date_no_earlier_returns_none(mem_db):
+    """反例：没有更早的交易日 → None。"""
+    insert_trade_cal(mem_db, "2023-01-03", 1)
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)):
+        assert get_last_trade_date("20230103") is None
+
+
+def test_get_last_trade_date_empty_calendar_returns_none(mem_db):
+    """反例：日历表为空 → None，不抛异常。"""
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)):
+        assert get_last_trade_date("20230103") is None

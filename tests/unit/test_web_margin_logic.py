@@ -56,6 +56,63 @@ def test_clean_sse_detail_filters_etf_and_sets_code():
     assert out['margin_short_balance'].isna().all()
 
 
+def test_clean_sse_summary_legacy_share_suffix():
+    # 历史(约 2015 前)上交所文件融券数量列带 (股) 后缀, 应被正常识别
+    raw = pd.DataFrame({
+        '本日融资余额(元)':     ['1495185799372'],
+        '本日融资买入额(元)':   ['179607982680'],
+        '本日融券余量(股)':     ['2444063656'],
+        '本日融券余量金额(元)': ['14089378242'],
+        '本日融券卖出量(股)':   ['41813060'],
+        '本日融资融券余额(元)': ['1509275177614'],
+    })
+    out = web._clean_sse_summary(raw, TD)
+    assert list(out.columns) == web._SUMMARY_OUT_COLS
+    assert len(out) == 1
+    row = out.iloc[0]
+    assert row['short_balance_volume'] == 2444063656.0
+    assert row['short_sell_volume'] == 41813060.0
+    assert row['short_balance_amount'] == 14089378242.0
+
+
+def test_clean_sse_detail_legacy_share_suffix():
+    # 历史上交所明细文件融券数量列带 (股) 后缀
+    raw = pd.DataFrame({
+        '标的证券代码':       ['600000'],
+        '标的证券简称':       ['浦发银行'],
+        '本日融资余额(元)':   ['2'],
+        '本日融资买入额(元)': ['5'],
+        '本日融资偿还额(元)': ['8'],
+        '本日融券余量(股)':   ['10'],
+        '本日融券卖出量(股)': ['20'],
+        '本日融券偿还量(股)': ['30'],
+    })
+    out = web._clean_sse_detail(raw, TD)
+    assert list(out.columns) == web._DETAIL_OUT_COLS
+    assert out.iloc[0]['code'] == '600000.SH'
+    assert out.iloc[0]['short_balance_volume'] == 10.0
+    assert out.iloc[0]['short_sell_volume'] == 20.0
+    assert out.iloc[0]['short_repay_volume'] == 30.0
+
+
+def test_clean_sse_detail_strips_column_whitespace():
+    # 历史(如 2014)上交所明细文件列名带前导空格, 应被去白后正常识别
+    raw = pd.DataFrame({
+        ' 标的证券代码':      ['600000'],
+        '标的证券简称':       ['浦发银行'],
+        '本日融资余额(元)':   ['2'],
+        '本日融资买入额(元)': ['5'],
+        '本日融资偿还额(元)': ['8'],
+        '本日融券余量':       ['10'],
+        '本日融券卖出量':     ['20'],
+        '本日融券偿还量':     ['30'],
+    })
+    out = web._clean_sse_detail(raw, TD)
+    assert list(out.columns) == web._DETAIL_OUT_COLS
+    assert out.iloc[0]['symbol'] == '600000'
+    assert out.iloc[0]['code'] == '600000.SH'
+
+
 def test_clean_sse_summary_missing_column_raises():
     bad = _sse_summary_raw().drop(columns=['本日融资余额(元)'])
     with pytest.raises(ValueError):

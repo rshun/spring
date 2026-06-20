@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-06-19  Claude  akstock 取数失败时按交易所回退到交易所官网文件下载(datasource.web)；新增 --download 强制官网
+#   2026-06-20  Claude  默认日期由"自然日昨天"改为"上一个交易日"(深市数据次交易日才可得, 自然日昨天会漏抓且周一被跳过)
 """
 功能: 获取沪深两市融资融券汇总和明细数据
 输入参数:
@@ -29,15 +30,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-b', '--begin',
         type=str,
-        default=myutil.get_yesterday(),
-        help='指定起始日期 (格式: YYYYMMDD)，默认为 T-1 日 (昨天)'
+        default=None,
+        help='指定起始日期 (格式: YYYYMMDD)，默认为上一个交易日'
     )
 
     parser.add_argument(
         '-e', '--end',
         type=str,
-        default=myutil.get_yesterday(),
-        help='指定结束日期 (格式: YYYYMMDD)，默认为 T-1 日 (昨天)'
+        default=None,
+        help='指定结束日期 (格式: YYYYMMDD)，默认为上一个交易日'
     )
 
     parser.add_argument(
@@ -121,6 +122,20 @@ def _fill_missing_exchanges(df, requested: set[str], fallback_fn):
 def main() -> None:
     myutil.configure_etl_logging()
     args = parse_arguments()
+
+    # 未显式指定日期时，默认取"上一个交易日"。
+    # 深市融资融券要到次一交易日才可得，若按自然日昨天取，节假日/周末后会漏抓深市；
+    # 且"上一个交易日"本身一定是交易日，可避开周一(昨天=周日)被交易日校验直接跳过的问题。
+    if args.begin is None or args.end is None:
+        last_td = dbutil.get_last_trade_date()
+        if last_td is None:
+            logger.error("无法确定上一个交易日(交易日历为空?)，请用 -b/-e 显式指定日期。")
+            return
+        if args.begin is None:
+            args.begin = last_td
+        if args.end is None:
+            args.end = last_td
+
     if not check_parameters(args.begin, args.end, args.forcerun):
         return
 

@@ -3,6 +3,7 @@
 #   2026-05-29  Claude  新增 save_finance_report_to_db (专业财务报表 cw 数据入库)
 #   2026-05-30  Claude  新增 fill_daily_basic_turnover (换手率, 支持 overwrite 开关并返回更新行数)
 #   2026-06-20  Claude  新增 get_last_trade_date (取严格早于指定日的最近一个交易日)
+#   2026-06-24  Claude  沪深主板 ST 涨跌停 2026-07-06 起由 5% 调整为 10%
 import logging
 import duckdb
 import pandas as pd
@@ -467,7 +468,9 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                         )
                         WHEN board = 'BJ' THEN (CASE WHEN days_count = 1 THEN 0.0 ELSE 0.3 END)
                         WHEN board = 'MAIN' THEN (
-                            CASE WHEN date >= '2023-04-10' THEN (CASE WHEN days_count <= 5 THEN 0.0 WHEN is_st = 1 THEN 0.05 ELSE 0.1 END)
+                            -- 2026-07-06 起沪深主板 ST 涨跌停由 5% 调整为 10%
+                            CASE WHEN date >= '2026-07-06' THEN (CASE WHEN days_count <= 5 THEN 0.0 ELSE 0.1 END)
+                                 WHEN date >= '2023-04-10' THEN (CASE WHEN days_count <= 5 THEN 0.0 WHEN is_st = 1 THEN 0.05 ELSE 0.1 END)
                                  ELSE (CASE WHEN days_count = 1 THEN 0.44 WHEN is_st = 1 THEN 0.05 ELSE 0.1 END) END
                         )
                         ELSE 0.1

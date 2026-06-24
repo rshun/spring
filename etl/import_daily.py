@@ -57,6 +57,12 @@ def parse_arguments() -> argparse.Namespace:
         help='指定数据源类型: lday (本地day文件)  bstock数据源, tdx (通达信在线) (默认 bstock数据源)'
     )
 
+    parser.add_argument(
+        '-p', '--print-only',
+        action='store_true',
+        help='仅将获取结果（含列名）输出到屏幕，不写入数据库'
+    )
+
     return parser.parse_args()
 
 
@@ -103,14 +109,21 @@ def main() -> None:
 
     conn: duckdb.DuckDBPyConnection | None = None
     try:
-        conn = dbutil.get_connection(is_read_only=False)
-
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_batch_data'):
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_batch_data' 方法。")
             return
 
         stock_data, basic_df = module.fetch_batch_data(candidate_codes)
+
+        if args.print_only:
+            print("stock_data:")
+            print(stock_data.to_string(index=False) if stock_data is not None else "None")
+            print("\nbasic_df:")
+            print(basic_df.to_string(index=False) if basic_df is not None else "None")
+            return
+
+        conn = dbutil.get_connection(is_read_only=False)
         if stock_data is not None and not stock_data.empty:
             dbutil.save_daily_to_db(stock_data, conn)
         else:

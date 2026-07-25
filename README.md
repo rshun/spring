@@ -6,7 +6,7 @@ Spring 是一个专为 AI 驱动的量化交易和金融分析设计的 A 股数
 
 - **自动化数据 ETL**：集成 `AKShare`、`Baostock`、`pytdx` 及本地通达信日线（`lday`），支持自动化拉取和更新 A 股日线数据、交易日历、复权因子、申万行业分类、融资融券及股本变动信息。
 - **高性能本地存储**：以 DuckDB 为底层数据库，提供极速的列式数据查询与统计能力，轻松处理海量历史金融数据。
-- **AI 智能体无缝集成**：内置基于 FastMCP 实现的 `duckdb-quant-readonly` 服务端，大模型可通过标准化 Tool 直接调用金融数据接口、计算技术指标或执行探索性 SQL 检索。
+- **AI 智能体无缝集成**：配套独立项目 [quant-mcp](https://github.com/rshun/quant-mcp) 提供基于 FastMCP 的 `duckdb-quant-readonly` 只读服务端，大模型可通过标准化 Tool 直接调用金融数据接口、计算技术指标或执行探索性 SQL 检索。
 
 ## 📂 项目结构
 
@@ -31,8 +31,6 @@ spring/
 │   ├── bstock.py        # Baostock 数据源
 │   ├── tdx.py           # 通达信 pytdx 在线接口
 │   └── lday.py          # 本地通达信日线文件
-├── mcp_server/          # MCP 服务端代码
-│   └── server.py        # DuckDB 供大模型调用的 FastMCP 核心服务
 ├── sql/                 # 数据库定义与管理
 │   └── schema.sql       # DuckDB 核心表结构定义（如 STOCK_INFO, STOCK_DAILY 等）
 ├── tools/               # 工具类
@@ -72,10 +70,7 @@ python -m tools.check_daily
 ```
 
 **启动 MCP 服务**
-用于对接 Claude 或其他支持 MCP 协议的客户端：
-```bash
-  python mcp_server/server.py
-```
+MCP 只读服务已拆分为独立项目 [quant-mcp](https://github.com/rshun/quant-mcp)，用于对接 Claude 或其他支持 MCP 协议的客户端。安装与客户端配置详见该项目的 README。
 
 ### **ETL**  
 #### 初始化表  
@@ -197,7 +192,7 @@ python -m etl.sync_finance --codes 000001,600519
 
 ## 🤖 MCP 工具能力 (Tools)
 
-通过 `mcp_server/server.py`，项目向 AI 模型提供了丰富的量化工具，大模型可以直接调用以下功能：
+通过配套独立项目 [quant-mcp](https://github.com/rshun/quant-mcp)（只读 DuckDB 数据），项目向 AI 模型提供了丰富的量化工具，大模型可以直接调用以下功能：
 
 - `search_stock` / `get_stock_info`: 股票检索及基本面信息获取
 - `get_stock_daily` / `get_daily_basic`: 获取指定股票的历史 K 线及每日核心指标（换手率、PE、PB、量比等）

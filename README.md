@@ -34,7 +34,9 @@ spring/
 ├── sql/                 # 数据库定义与管理
 │   └── schema.sql       # DuckDB 核心表结构定义（如 STOCK_INFO, STOCK_DAILY 等）
 ├── tools/               # 工具类
-│   └── check_daily.py   # 校验数据是否完整
+│   ├── check_daily.py          # 校验数据是否完整
+│   ├── export_etl_tables.py    # 按程序导出其写入的表 (跨机器搬运数据)
+│   └── import_etl_tables.py    # 导入上面导出的 parquet (幂等 upsert)
 ├── util/                # 核心工具包
 │   ├── dbutil.py        # 数据库连接与执行工具
 │   ├── myutil.py        # 通用辅助函数
@@ -67,6 +69,20 @@ spring/
 **校验数据是否完整**
 ```bash
 python -m tools.check_daily
+```
+
+**跨机器搬运某个程序的产出数据**
+
+某台机器的 ETL 执行失败、而另一台执行成功时，可按程序把成功机器的数据导出再导入。
+涉及的表: `import_daily` -> STOCK_DAILY(个股) + DAILY_BASIC(四列)；`fetch_index` -> STOCK_DAILY(指数)；
+`adjust` -> ADJ_FACTOR + ADJ_FACTOR_RAW。导入为幂等 upsert，只覆盖各程序负责的列。
+```bash
+# 成功的机器上导出 (可指定一个或多个程序)
+python -m tools.export_etl_tables -p import_daily adjust -b 20260817 -e 20260818 -o D:/sync/out
+
+# 失败的机器上先干跑, 再导入
+python -m tools.import_etl_tables -p import_daily adjust -i D:/sync/out --dry-run
+python -m tools.import_etl_tables -p import_daily adjust -i D:/sync/out
 ```
 
 **启动 MCP 服务**

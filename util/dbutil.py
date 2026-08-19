@@ -4,6 +4,7 @@
 #   2026-05-30  Claude  新增 fill_daily_basic_turnover (换手率, 支持 overwrite 开关并返回更新行数)
 #   2026-06-20  Claude  新增 get_last_trade_date (取严格早于指定日的最近一个交易日)
 #   2026-06-24  Claude  沪深主板 ST 涨跌停 2026-07-06 起由 5% 调整为 10%
+#   2026-08-19  Claude  新增 get_trading_day_status，区分「休市」与「日历无记录」
 import logging
 import duckdb
 import pandas as pd
@@ -24,8 +25,21 @@ _DAILY_BASIC_SHARE_EVENT_CATEGORIES = (
 )
 
 
-def check_is_trading_day(date_str: str) -> bool:
-    """检查指定日期是否为交易日，参数格式 YYYY-MM-DD，返回 True/False"""
+# 交易日历查询的三种状态
+TRADING_DAY_OPEN = "open"        # 日历有记录，且为交易日
+TRADING_DAY_CLOSED = "closed"    # 日历有记录，但休市
+TRADING_DAY_UNKNOWN = "unknown"  # 日历无该日期记录，或查询失败
+
+
+def get_trading_day_status(date_str: str) -> str:
+    """查询指定日期在交易日历中的状态，参数格式 YYYY-MM-DD
+
+    返回 TRADING_DAY_OPEN / TRADING_DAY_CLOSED / TRADING_DAY_UNKNOWN。
+
+    为什么要区分 CLOSED 与 UNKNOWN：两者都不能下载数据，但成因和处置完全不同。
+    CLOSED 是正常休市，无需处理；UNKNOWN 通常意味着 TRADE_CAL 尚未同步到该日期
+    （需运行 etl.trade_cal），若一律报「休市」会把排查引向错误方向。
+    """
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = get_connection()
@@ -35,17 +49,29 @@ def check_is_trading_day(date_str: str) -> bool:
         ).fetchone()
 
         if result is None:
-            logger.warning(f"日历表中不存在日期 {date_str} 的记录。")
-            return False
+            logger.warning(
+                f"日历表中不存在日期 {date_str} 的记录，"
+                f"TRADE_CAL 可能未同步到该日期（可运行 etl.trade_cal 补齐）。"
+            )
+            return TRADING_DAY_UNKNOWN
 
-        return True if result[0] == 1 else False
+        return TRADING_DAY_OPEN if result[0] == 1 else TRADING_DAY_CLOSED
 
     except Exception as e:
         logger.error(f"检查日历表失败: {e}")
-        return False
+        return TRADING_DAY_UNKNOWN
     finally:
         if conn is not None:
             conn.close()
+
+
+def check_is_trading_day(date_str: str) -> bool:
+    """检查指定日期是否为交易日，参数格式 YYYY-MM-DD，返回 True/False
+
+    保留此函数是为了兼容既有调用方；需要区分「休市」与「日历无记录」时，
+    请改用 get_trading_day_status()。
+    """
+    return get_trading_day_status(date_str) == TRADING_DAY_OPEN
 
 
 def get_candidate_codes(

@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-08-19  Claude  非交易日校验区分「休市」与「日历无记录」，后者给出可执行提示
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -100,9 +102,19 @@ def v_single_day_must_be_trading_day(
             return []
 
         day_str = bd.strftime("%Y-%m-%d")
-        if not dbutil.check_is_trading_day(day_str):
-            field_name = f"{begin_field}=={end_field}" if begin_field else "today"
-            return [ValidationError(field_name, f"{tip_prefix}: {day_str} 为非交易日（休市）")]
-        return []
+        status = dbutil.get_trading_day_status(day_str)
+        if status == dbutil.TRADING_DAY_OPEN:
+            return []
+
+        field_name = f"{begin_field}=={end_field}" if begin_field else "today"
+        if status == dbutil.TRADING_DAY_UNKNOWN:
+            # 日历里没有这一天，多半是 TRADE_CAL 没同步到该日期，
+            # 报成「休市」会把排查引偏，因此单独给出可执行的提示。
+            return [ValidationError(
+                field_name,
+                f"{tip_prefix}: 交易日历中无 {day_str} 的记录，"
+                f"TRADE_CAL 可能未同步到该日期（可运行 python -m etl.trade_cal 补齐）"
+            )]
+        return [ValidationError(field_name, f"{tip_prefix}: {day_str} 为非交易日（休市）")]
 
     return _v

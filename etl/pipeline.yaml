@@ -5,6 +5,17 @@
 #
 # requires: 本程序开始前必须已完成的程序列表(直接依赖，不需要展开传递依赖)。
 # 空列表表示无前置依赖，可作为拓扑排序的起点。
+#
+# 注意: requires 只描述「同一批补数任务内部的执行顺序」，不包含下面这类
+# 「长期数据前置」——它们不该每次补数都跑，因此不写进 requires：
+#
+#   TRADE_CAL  ← etl.trade_cal，每年年底公布次年节假日后跑一次。
+#                日历一旦耗尽，所有含 v_single_day_must_be_trading_day 校验的
+#                程序都会把当天判成非交易日而失败。
+#   STOCK_INFO ← etl.sync_basic，README 要求每天运行。
+#                该表不更新则新上市股票不会进入 get_candidate_codes 的候选，
+#                且不报错，属静默漏采。
+#   CAPITAL_DETAIL ← etl.sync_capital，fill_shares 的数据前置(见其 requires)。
 
 import_daily:
   requires: []

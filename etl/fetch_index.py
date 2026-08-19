@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 #   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
+#   2026-08-19  Claude  写连接延后到下载完成之后，下载期间不持写锁，便于卡死时安全 kill
 """A股指数历史行情数据入库工具 (支持多源、多代码、指定日期)"""
 import argparse
 import duckdb
@@ -104,14 +105,15 @@ def main() -> int:
 
     conn: duckdb.DuckDBPyConnection | None = None
     try:
-        conn = dbutil.get_connection(is_read_only=False)
-
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_batch_index'):
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_batch_index' 方法。")
             return 1
 
         index_data = module.fetch_batch_index(candidate_index_codes)
+
+        # 写连接在下载完成之后才获取，理由同 adjust：下载期间不持写锁
+        conn = dbutil.get_connection(is_read_only=False)
 
         if index_data is not None and not index_data.empty:
             dbutil.save_index_to_db(index_data, conn)

@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-05-30  Claude  get_default_dbfile 支持 prod/test 库切换(local_paths.db_active)
+#   2026-08-19  Claude  修正 configure_etl_logging docstring 的日志路径笔误(实为项目根 log/)
 import time
 import os
 import pkgutil
@@ -16,7 +17,7 @@ logger = logging.getLogger("etl.util.myutil")
 def configure_etl_logging() -> None:
     """配置 ETL 共享日志输出
 
-    日志文件: ~/log/stockdailyYYYYMMDD.log
+    日志文件: <项目根>/log/stockdailyYYYYMMDD.log
     每行格式: HH:MM:SS [module_name] [LEVEL] message
     """
     etl_logger = logging.getLogger("etl")

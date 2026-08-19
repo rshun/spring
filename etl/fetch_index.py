@@ -1,7 +1,10 @@
+# 修改记录:
+#   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 """A股指数历史行情数据入库工具 (支持多源、多代码、指定日期)"""
 import argparse
 import duckdb
 import logging
+import sys
 from util import myutil, dbutil
 from util import validators as pv
 
@@ -64,12 +67,12 @@ def check_parameters(begin: str, end: str) -> bool:
     return pv.run(ctx, validators)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
     if not check_parameters(args.begin, args.end):
-        return
+        return 1
 
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
@@ -92,7 +95,7 @@ def main() -> None:
 
     if not candidate_index_codes:
         logger.warning("警告: 数据库中没有找到符合条件的指数。")
-        return
+        return 1
 
     conn: duckdb.DuckDBPyConnection | None = None
     try:
@@ -101,7 +104,7 @@ def main() -> None:
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_batch_index'):
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_batch_index' 方法。")
-            return
+            return 1
 
         index_data = module.fetch_batch_index(candidate_index_codes)
 
@@ -110,14 +113,18 @@ def main() -> None:
         else:
             logger.warning("未获取到任何指数数据，跳过数据库写入。")
 
+        return 0
+
     except ImportError:
         logger.error(f"无法导入模块 {args.source}，请检查文件名是否存在。")
+        return 1
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

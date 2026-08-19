@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 """
 功能: 获取指定日期范围的所有股票交易数据, 已退市的股票暂不获取
 输入参数:
@@ -10,6 +12,7 @@
 import argparse
 import duckdb
 import logging
+import sys
 from util import dbutil, myutil
 from util import validators as pv
 
@@ -78,11 +81,11 @@ def check_parameters(begin: str, end: str) -> bool:
     return pv.run(ctx, validators)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
     args = parse_arguments()
     if not check_parameters(args.begin, args.end):
-        return
+        return 1
 
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
@@ -105,14 +108,14 @@ def main() -> None:
 
     if not candidate_codes:
         logger.warning("警告: 数据库中没有找到符合条件的股票")
-        return
+        return 1
 
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_batch_data'):
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_batch_data' 方法。")
-            return
+            return 1
 
         stock_data, basic_df = module.fetch_batch_data(candidate_codes)
 
@@ -121,7 +124,7 @@ def main() -> None:
             print(stock_data.to_string(index=False) if stock_data is not None else "None")
             print("\nbasic_df:")
             print(basic_df.to_string(index=False) if basic_df is not None else "None")
-            return
+            return 0
 
         conn = dbutil.get_connection(is_read_only=False)
         if stock_data is not None and not stock_data.empty:
@@ -134,14 +137,18 @@ def main() -> None:
         else:
             logger.warning("未获取到股票基本数据，跳过数据库写入。")
 
+        return 0
+
     except ImportError:
         logger.error(f"无法导入模块 {args.source}，请检查文件名是否存在。")
+        return 1
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

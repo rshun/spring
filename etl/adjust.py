@@ -1,7 +1,10 @@
+# 修改记录:
+#   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 import argparse
 import duckdb
 import logging
 import pandas as pd
+import sys
 from util import myutil, dbutil
 from util import validators as pv
 
@@ -231,12 +234,12 @@ def check_parameters(begin: str, end: str) -> bool:
     return pv.run(ctx, validators)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
     if not check_parameters(args.begin, args.end):
-        return
+        return 1
 
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
@@ -259,7 +262,7 @@ def main() -> None:
 
     if not candidate_codes:
         logger.warning("警告: 数据库中没有找到符合条件的股票")
-        return
+        return 1
 
     conn: duckdb.DuckDBPyConnection | None = None
     try:
@@ -268,7 +271,7 @@ def main() -> None:
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_adjust_factors'):
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_adjust_factors' 方法。")
-            return
+            return 1
 
         adjust = module.fetch_adjust_factors(candidate_codes)
 
@@ -284,14 +287,18 @@ def main() -> None:
         else:
             logger.info("未获取到新复权因子，已执行每日数据补齐。")
 
+        return 0
+
     except ImportError:
         logger.error(f"模块 '{args.source}' 不存在，请检查数据源配置。")
+        return 1
     except Exception as e:
         logger.error(f"处理复权因子时发生错误：{e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

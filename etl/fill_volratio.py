@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 """
 补齐量比指标
   前置条件:
@@ -6,6 +8,7 @@
 import argparse
 import duckdb
 import logging
+import sys
 from util import dbutil, myutil
 from util import validators as pv
 
@@ -77,13 +80,13 @@ def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
     return pv.run(ctx, validators)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
 
     if not check_parameters(args.begin, args.end, args.forcerun):
-        return
+        return 1
 
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
@@ -105,7 +108,7 @@ def main() -> None:
         )
         if not candidate_codes:
             logger.warning("没有找到符合条件的股票代码")
-            return
+            return 1
         codes = [f"{t[0]}.{t[1]}" for t in candidate_codes]
     else:
         codes = None
@@ -114,12 +117,14 @@ def main() -> None:
     try:
         conn = dbutil.get_connection(is_read_only=False)
         dbutil.fill_daily_basic_volume_ratio(begin_date, end_date, codes, conn=conn)
+        return 0
     except Exception as e:
         logger.error(f"补全量比数据时发生错误：{e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

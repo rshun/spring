@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
+#   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
 """
 功能: 获取指定日期范围的所有股票交易数据, 已退市的股票暂不获取
 输入参数:
@@ -19,7 +20,7 @@ from util import validators as pv
 logger = logging.getLogger("etl.import_daily")
 
 
-def parse_arguments() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="A股历史行情数据入库工具 (支持多源、多代码、指定日期)"
     )
@@ -66,7 +67,11 @@ def parse_arguments() -> argparse.Namespace:
         help='仅将获取结果（含列名）输出到屏幕，不写入数据库'
     )
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def check_parameters(begin: str, end: str) -> bool:

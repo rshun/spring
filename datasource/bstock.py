@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-06-18  Claude  日线下载校验 turn：正常交易日(tradestatus=1)若 turn 为空，
 #                       视为数据源偶发抽风，重新登录重试，重试耗尽则停止下载
+#   2026-08-19  Claude  3 处批量采集的进度日志改「条数或时间」双条件触发(契约 C1b)，
+#                       提供稳定心跳供外部判定卡死
 import baostock as bs
 import logging
 import pandas as pd
@@ -26,6 +28,10 @@ def _get_retry_delay_pipe() -> float:
 
 def _get_retry_delay_missing() -> float:
     return get_config()["baostock"]["retry_delay_missing"]
+
+
+def _get_progress_heartbeat_seconds() -> float:
+    return get_config()["baostock"]["progress_heartbeat_seconds"]
 
 
 def relogin():
@@ -288,6 +294,8 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     """
     total = len(stock_list)
     processed = 0
+    heartbeat = _get_progress_heartbeat_seconds()
+    last_progress_at = time.monotonic()
     all_daily_data: list[pd.DataFrame] = []
     all_basic_data: list[pd.DataFrame] = []
 
@@ -357,8 +365,10 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
                     logger.warning(f"获取失败: {symbol}.{market.upper()} | 原因: {e}")
                     break
 
-            if processed % 100 == 0:
+            now = time.monotonic()
+            if processed % 100 == 0 or now - last_progress_at >= heartbeat:
                 logger.info(f"   已处理: {processed}/{total}")
+                last_progress_at = now
 
         final_daily = pd.concat(all_daily_data, ignore_index=True) if all_daily_data else pd.DataFrame()
         final_basic = pd.concat(all_basic_data, ignore_index=True) if all_basic_data else pd.DataFrame()
@@ -382,6 +392,8 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
     all_dfs: list[pd.DataFrame] = []
     total_stocks = len(stock_list)
     count = 0
+    heartbeat = _get_progress_heartbeat_seconds()
+    last_progress_at = time.monotonic()
 
     socket.setdefaulttimeout(30)
     lg = bs.login()
@@ -454,8 +466,10 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
                     logger.warning(f"[Baostock] 获取复权因子失败({bs_code}): {e}")
                     break
 
-            if count % 100 == 0:
+            now = time.monotonic()
+            if count % 100 == 0 or now - last_progress_at >= heartbeat:
                 logger.info(f"   已处理: {count}/{total_stocks}")
+                last_progress_at = now
 
         return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
     finally:
@@ -528,6 +542,8 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
     """
     total = len(index_list)
     processed = 0
+    heartbeat = _get_progress_heartbeat_seconds()
+    last_progress_at = time.monotonic()
     all_daily_data: list[pd.DataFrame] = []
 
     socket.setdefaulttimeout(30)
@@ -584,8 +600,10 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
                     logger.warning(f"获取失败: {symbol}.{market.upper()} | 原因: {e}")
                     break
 
-            if processed % 100 == 0:
+            now = time.monotonic()
+            if processed % 100 == 0 or now - last_progress_at >= heartbeat:
                 logger.info(f"   已处理: {processed}/{total}")
+                last_progress_at = now
 
         final_daily = pd.concat(all_daily_data, ignore_index=True) if all_daily_data else pd.DataFrame()
 

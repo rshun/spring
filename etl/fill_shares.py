@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
+#   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
 """
 根据 CAPITAL_DETAIL 表回填 DAILY_BASIC 的 total_shares 和 float_shares
   前置条件:
@@ -19,7 +20,7 @@ from util import validators as pv
 logger = logging.getLogger("etl.fill_shares")
 
 
-def parse_arguments() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="根据CAPITAL_DETAIL回填DAILY_BASIC的总股本和流通股本"
     )
@@ -58,7 +59,11 @@ def parse_arguments() -> argparse.Namespace:
         help='强制运行, 即使当前日期不是交易日'
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    args = build_parser().parse_args()
 
     # 默认日期: 仅指定 -b 时, -e 取今天; 否则两端都默认 T-1
     if args.begin is None:

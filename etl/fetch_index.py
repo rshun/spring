@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
+#   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
 """A股指数历史行情数据入库工具 (支持多源、多代码、指定日期)"""
 import argparse
 import duckdb
@@ -11,7 +12,7 @@ from util import validators as pv
 logger = logging.getLogger("etl.fetch_index")
 
 
-def parse_arguments() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="A股指数历史行情数据入库工具 (支持多源、多代码、指定日期)"
     )
@@ -52,7 +53,11 @@ def parse_arguments() -> argparse.Namespace:
         help='指定数据源类型: lday (本地day文件)  bstock数据源 (默认 bstock数据源)'
     )
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def check_parameters(begin: str, end: str) -> bool:

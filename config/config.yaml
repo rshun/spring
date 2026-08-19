@@ -37,6 +37,9 @@ baostock:
   retry_delay_pipe: 0.5
   # 数据源偶发整批 turn(换手率) 为空时，重新登录后重试的等待时间（秒）
   retry_delay_missing: 0.5
+  # 批量采集进度日志的心跳间隔（秒）——距上次输出超过此值即强制打一行，
+  # 使外部调度方能凭「多久没输出」判定卡死，不受每 100 只这个条数间隔的影响
+  progress_heartbeat_seconds: 30
 
 # 申万宏源研究 (swsresearch.com) HTTP 文件下载源
 # 作为 sync_industry akshare 取数失败时的回退数据源

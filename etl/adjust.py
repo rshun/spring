@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
+#   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
 import argparse
 import duckdb
 import logging
@@ -11,7 +12,7 @@ from util import validators as pv
 logger = logging.getLogger("etl.adjust")
 
 
-def parse_arguments() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="A股复权因子入库 (支持多源、多代码)"
     )
@@ -52,7 +53,11 @@ def parse_arguments() -> argparse.Namespace:
         help='指定数据源类型: bstock数据源, (默认 bstock数据源)'
     )
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def process_and_save_adjust_factors(

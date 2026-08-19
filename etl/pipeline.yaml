@@ -1,0 +1,34 @@
+# ETL 程序依赖声明（契约 C3）
+#
+# 用途: 外部调度方(如 etl-quant-mcp)据此做拓扑排序，决定补数时的执行顺序。
+# 维护约定: 改 ETL 的人顺手维护本文件——新增程序或改变前置依赖时同步更新。
+#
+# requires: 本程序开始前必须已完成的程序列表(直接依赖，不需要展开传递依赖)。
+# 空列表表示无前置依赖，可作为拓扑排序的起点。
+
+import_daily:
+  requires: []
+  desc: 股票日线交易明细入库，多数补齐类程序的数据基础
+
+fetch_index:
+  requires: []
+  desc: 指数日线交易明细入库，与个股线互不依赖
+
+adjust:
+  requires: []
+  desc: 复权因子入库并稠密化到逐交易日
+
+fill_volratio:
+  requires: [import_daily]
+  desc: 由日线成交量推算量比，须先有当日日线
+
+update_limit:
+  requires: [import_daily]
+  desc: 计算涨跌停价，须先有当日日线
+
+fill_shares:
+  requires: [import_daily, sync_capital]
+  desc: >-
+    由 CAPITAL_DETAIL 回填总股本/流通股本及市值。
+    注意 sync_capital 无日期参数、暂未纳入 MCP，
+    若 CAPITAL_DETAIL 缺该股数据则该股被跳过（新股常见）。

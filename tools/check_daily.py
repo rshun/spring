@@ -2,6 +2,10 @@
 #   2026-06-18  Claude  新增 STOCK_DAILY / ADJ_FACTOR 字段级空值校验,
 #                       DAILY_BASIC 扩展 turnover_rate/total_mv/float_mv/涨跌停价校验
 #                       (依据下游 strategy 程序实际读取的字段;均为告警不阻断)
+#   2026-08-19  Claude  新增 --json 机器可读出口(供 etl-quant-mcp 的 check_data_gaps 调用),
+#                       _check_table 改返回结构化结果; 拆出 build_parser()
+#   2026-08-19  Claude  logger 更名为 "etl.tools.check_daily"：原名不在 etl 之下，
+#                       日志从未进过 ETL 日志文件(同目录另两个工具本就用 etl.tools.*)
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
       1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
@@ -16,6 +20,7 @@
   -c, --codes         指定股票代码 (可选)
   -i, --include-index 同时校验指数日线数据 (默认不校验)
   -f, --forcerun      强制运行，即使当前日期不是交易日
+  -j, --json          结果以 JSON 输出到 stdout，日志改走 stderr
 
 用法:
   python -m tools.check_daily -b 20260325
@@ -23,10 +28,19 @@
   python -m tools.check_daily -b 20260325 -x sh sz
   python -m tools.check_daily -b 20260325 -i
   python -m tools.check_daily -b 20260328 -f
+  python -m tools.check_daily -b 20260325 --json      # 供程序调用
+
+关于 --json 与退出码:
+  退出码沿用本工具原有语义 0=完整 / 1=有缺失 / 2=检查出错，**与 ETL 的退出码契约
+  不是同一套**(ETL 是 0=成功 / 1=失败 / 2=argparse 用法错误 / 3=部分成功)。
+  程序调用方应以 JSON 里的 status 字段为准，不要套用 ETL 的退出码解读逻辑——
+  本工具的 2 还会与 argparse 自身的用法错误码撞车。
 """
 import argparse
 import csv
+import json
 import logging
+import sys
 from pathlib import Path
 
 import duckdb
@@ -34,10 +48,21 @@ import duckdb
 from util import dbutil, myutil
 from util import validators as pv
 
-logger = logging.getLogger("tools.check_daily")
+# 挂在 "etl" 之下，日志才会进 configure_etl_logging 配置的 stockdailyYYYYMMDD.log；
+# 与同目录的 export_etl_tables / import_etl_tables 命名保持一致。
+logger = logging.getLogger("etl.tools.check_daily")
+
+# --json 输出中 missing_codes 的默认条数上限。全市场缺一天就是 5000+ 条，
+# 不设限会灌爆调用方的上下文；完整明细始终以 CSV 落盘，路径在 csv_path 里。
+DEFAULT_JSON_MAX_DETAIL = 200
+
+# JSON 输出的 status 取值
+STATUS_COMPLETE = "complete"      # 核心日线完整
+STATUS_GAPS_FOUND = "gaps_found"  # 核心日线有缺失
+STATUS_ERROR = "error"            # 检查本身出错
 
 
-def parse_arguments() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="A股每日数据完整性检查工具"
     )
@@ -82,7 +107,25 @@ def parse_arguments() -> argparse.Namespace:
         help='强制运行, 即使当前日期不是交易日'
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        '-j', '--json',
+        action='store_true',
+        help='把检查结果以 JSON 输出到 stdout(日志改走 stderr)，供程序调用'
+    )
+
+    parser.add_argument(
+        '--json-max-detail',
+        type=int,
+        default=DEFAULT_JSON_MAX_DETAIL,
+        help=f'JSON 输出中 missing_codes 的最大条数, 超出会截断并标记 '
+             f'(默认 {DEFAULT_JSON_MAX_DETAIL}; 完整明细见 csv_path)'
+    )
+
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
@@ -679,17 +722,40 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
                  begin_date: str, end_date: str,
                  ex_filter: str, code_filter: str, code_params: list[str],
                  is_self_table: bool = False,
-                 board_sql: str = "board NOT IN ('INDEX', 'BJ')") -> int:
-    """通用检查: 先按日汇总找缺口日期，再逐日展开明细，全量写 CSV"""
+                 board_sql: str = "board NOT IN ('INDEX', 'BJ')") -> dict:
+    """通用检查: 先按日汇总找缺口日期，再逐日展开明细，全量写 CSV
+
+    返回结构化结果(供 --json 出口使用)::
+
+        {"label", "table", "missing", "gap_dates": [...], "missing_codes": [...], "csv_path"}
+
+    gap_dates 始终完整(每项只是几个数字，很紧凑)；missing_codes 是逐日展开的明细，
+    可能极大(全市场缺一天就是 5000+ 条)，因此调用方需自行按需截断，
+    完整明细以 CSV 落盘。
+    """
     gap_dates = _find_gap_dates(conn, table, date_col,
                                 begin_date, end_date,
                                 ex_filter, code_filter, code_params,
                                 is_self_table=is_self_table, board_sql=board_sql)
+    result: dict = {
+        "label": label.strip(),
+        "table": table,
+        "missing": 0,
+        "gap_dates": [],
+        "missing_codes": [],
+        "csv_path": None,
+    }
     if not gap_dates:
         logger.info(f"[{label}]    完整 OK")
-        return 0
+        return result
 
     total_missing = sum(exp - act for _, exp, act in gap_dates)
+    result["missing"] = total_missing
+    result["gap_dates"] = [
+        {"date": str(d), "expected": int(exp), "actual": int(act),
+         "missing": int(exp - act)}
+        for d, exp, act in gap_dates
+    ]
 
     csv_rows: list[tuple] = []
     for cal_date, expected, actual in gap_dates:
@@ -698,6 +764,9 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
                                    ex_filter, code_filter, code_params,
                                    board_sql=board_sql)
         csv_rows.extend((dt, code, name) for code, name in rows)
+        result["missing_codes"].extend(
+            {"date": dt, "code": code, "name": name} for code, name in rows
+        )
 
     if csv_rows:
         csv_dir = Path(__file__).parent.parent / "csv"
@@ -708,19 +777,66 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
             writer = csv.writer(f)
             writer.writerow(["date", "code", "name"])
             writer.writerows(csv_rows)
+        result["csv_path"] = str(csv_file)
         logger.warning(f"[{label}]    发现 {total_missing} 条缺失，明细已写入: {csv_file}")
     else:
         logger.warning(f"[{label}]    发现 {total_missing} 条缺失记录，但未能定位具体代码，请手动核查")
 
-    return total_missing
+    return result
+
+
+def _emit_json(payload: dict) -> None:
+    """JSON 只写 stdout；日志已在 main() 里改走 stderr，两者不会混。"""
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
+
+def _truncate_detail(checks: list[dict], limit: int) -> bool:
+    """按总条数截断各检查项的 missing_codes，返回是否发生过截断。
+
+    gap_dates 不截断——它每项只是几个数字，即使跨十年也很紧凑，
+    而它恰恰是调用方定位「哪几天要补」最需要的东西。
+    """
+    if limit is None or limit < 0:
+        return False
+    budget = limit
+    truncated = False
+    for check in checks:
+        codes = check.get("missing_codes") or []
+        if len(codes) > budget:
+            check["missing_codes"] = codes[:budget]
+            check["missing_codes_truncated"] = True
+            check["missing_codes_total"] = len(codes)
+            truncated = True
+            budget = 0
+        else:
+            check["missing_codes_truncated"] = False
+            check["missing_codes_total"] = len(codes)
+            budget -= len(codes)
+    return truncated
 
 
 def main() -> int:
     """返回值: 0=核心日线完整, 1=核心日线有缺失, 2=检查出错
-    (除权前收价/指标空值/is_st 仅告警写 CSV，不影响返回码)"""
-    myutil.configure_etl_logging()
+    (除权前收价/指标空值/is_st 仅告警写 CSV，不影响返回码)
+
+    注意这套退出码与 ETL 的契约不是同一套，程序调用方请以 --json 的 status 为准。
+    """
+    # 先解析参数再配日志：--json 时 stdout 必须只有 JSON，日志得改走 stderr
     args = parse_arguments()
+    myutil.configure_etl_logging(console_stream=sys.stderr if args.json else None)
+
     if not check_parameters(args.begin, args.end, args.forcerun):
+        if args.json:
+            _emit_json({
+                "tool": "check_daily",
+                "status": STATUS_ERROR,
+                "exit_code": 2,
+                "error": "参数校验失败，详见 stderr 日志",
+                "params": {"begin": args.begin, "end": args.end,
+                           "exchanges": args.exchanges, "codes": args.codes,
+                           "include_index": args.include_index,
+                           "forcerun": args.forcerun},
+            })
         return 2
 
     begin_date = myutil.trans_datestr_format(args.begin)
@@ -745,46 +861,87 @@ def main() -> int:
         conn = dbutil.get_connection()
 
         # 核心日线缺记录 -> 阻断管道(返回 1)
-        core_missing = 0
-        core_missing += _check_table(conn, "日线数据    ", "STOCK_DAILY", "date",
-                                     begin_date, end_date, ex_filter, code_filter, code_params,
-                                     is_self_table=True)
-        core_missing += _check_table(conn, "复权因子数据", "ADJ_FACTOR", "trade_date",
-                                     begin_date, end_date, ex_filter, code_filter, code_params)
-        core_missing += _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
-                                     begin_date, end_date, ex_filter, code_filter, code_params)
+        core_checks = [
+            _check_table(conn, "日线数据    ", "STOCK_DAILY", "date",
+                         begin_date, end_date, ex_filter, code_filter, code_params,
+                         is_self_table=True),
+            _check_table(conn, "复权因子数据", "ADJ_FACTOR", "trade_date",
+                         begin_date, end_date, ex_filter, code_filter, code_params),
+            _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
+                         begin_date, end_date, ex_filter, code_filter, code_params),
+        ]
         if args.include_index:
-            core_missing += _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
-                                         begin_date, end_date, ex_filter, code_filter, code_params,
-                                         is_self_table=True, board_sql="board = 'INDEX'")
+            core_checks.append(
+                _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
+                             begin_date, end_date, ex_filter, code_filter, code_params,
+                             is_self_table=True, board_sql="board = 'INDEX'"))
+        core_missing = sum(c["missing"] for c in core_checks)
 
         # 以下几类: 继续检查、写 CSV、打日志告警，但不阻断管道
-        warn_missing = 0
-        warn_missing += _check_stock_daily_nulls(conn, begin_date, end_date,
-                                                 ex_filter, code_filter, code_params)
-        warn_missing += _check_adj_factor_nulls(conn, begin_date, end_date,
-                                                ex_filter, code_filter, code_params)
-        warn_missing += _check_is_st_null(conn, begin_date, end_date,
-                                          ex_filter, code_filter, code_params)
-        warn_missing += _check_daily_basic_nulls(conn, begin_date, end_date,
-                                                 ex_filter, code_filter, code_params)
-        warn_missing += _check_xdr_preclose(conn, begin_date, end_date,
-                                            ex_filter, code_filter, code_params)
+        warn_checks = [
+            ("日线价量空值", _check_stock_daily_nulls(conn, begin_date, end_date,
+                                                      ex_filter, code_filter, code_params)),
+            ("复权因子空值", _check_adj_factor_nulls(conn, begin_date, end_date,
+                                                     ex_filter, code_filter, code_params)),
+            ("is_st 空值", _check_is_st_null(conn, begin_date, end_date,
+                                             ex_filter, code_filter, code_params)),
+            ("指标空值", _check_daily_basic_nulls(conn, begin_date, end_date,
+                                                  ex_filter, code_filter, code_params)),
+            ("除权前收价", _check_xdr_preclose(conn, begin_date, end_date,
+                                               ex_filter, code_filter, code_params)),
+        ]
+        warn_missing = sum(count for _, count in warn_checks)
 
         logger.info("-" * 60)
         if warn_missing:
             logger.warning(f"非阻断检查: 共发现 {warn_missing} 条告警记录"
                            f"(日线价量/复权因子/指标空值/is_st/除权前收价，"
                            f"已写 CSV，不阻断管道)")
+        exit_code = 0 if core_missing == 0 else 1
         if core_missing == 0:
             logger.info("检查完成: 核心日线数据完整 OK")
-            return 0
         else:
             logger.warning(f"检查完成: 核心日线发现 {core_missing} 条缺失记录")
-            return 1
+
+        if args.json:
+            detail_truncated = _truncate_detail(core_checks, args.json_max_detail)
+            _emit_json({
+                "tool": "check_daily",
+                "status": STATUS_COMPLETE if core_missing == 0 else STATUS_GAPS_FOUND,
+                "exit_code": exit_code,
+                "params": {"begin": begin_date, "end": end_date,
+                           "exchanges": args.exchanges, "codes": args.codes,
+                           "include_index": args.include_index,
+                           "forcerun": args.forcerun},
+                "core": {
+                    "missing_total": core_missing,
+                    "checks": core_checks,
+                    "detail_truncated": detail_truncated,
+                    "json_max_detail": args.json_max_detail,
+                },
+                "warnings": {
+                    "total": warn_missing,
+                    "checks": [{"label": label, "count": count}
+                               for label, count in warn_checks],
+                    "note": "告警类仅写 CSV 与日志，不影响 status 与退出码",
+                },
+                "error": None,
+            })
+        return exit_code
 
     except Exception as e:
         logger.error(f"检查过程中发生错误: {e}")
+        if args.json:
+            _emit_json({
+                "tool": "check_daily",
+                "status": STATUS_ERROR,
+                "exit_code": 2,
+                "error": str(e),
+                "params": {"begin": args.begin, "end": args.end,
+                           "exchanges": args.exchanges, "codes": args.codes,
+                           "include_index": args.include_index,
+                           "forcerun": args.forcerun},
+            })
         return 2
     finally:
         if conn is not None:

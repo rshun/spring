@@ -605,3 +605,84 @@ def test_afnull_no_daily_row_excluded(mem_db):
     _ins_adj_fields(mem_db, "600519.SH", "2024-03-05", back=None)
     n = _check_adj_factor_nulls(mem_db, "2024-03-05", "2024-03-05", "", "", [])
     assert n == 0
+
+
+# ── _check_table 结构化返回（供 --json 出口）──────────────────────────────────
+# 2026-08-19 起 _check_table 不再只返回计数，而是返回结构化结果：
+# gap_dates（缺口日期及数量）+ missing_codes（逐日缺失明细）+ csv_path。
+# etl-quant-mcp 的 check_data_gaps 直接消费这份结构，因此形状必须稳定。
+
+def _check_stock_daily_table(conn, begin, end, codes=None):
+    from tools.check_daily import _build_code_filter, _check_table
+    code_filter, code_params = _build_code_filter(codes)
+    return _check_table(conn, "日线数据", "STOCK_DAILY", "date",
+                        begin, end, "", code_filter, code_params,
+                        is_self_table=True)
+
+
+def test_check_table_returns_zero_missing_when_complete(mem_db):
+    """正例: 数据完整时 missing=0、gap_dates 为空、无 CSV"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2026-08-17"])
+    _ins_daily(mem_db, "600519.SH", "2026-08-17", close=100, pre_close=99)
+
+    result = _check_stock_daily_table(mem_db, "2026-08-17", "2026-08-17")
+    assert result["missing"] == 0
+    assert result["gap_dates"] == []
+    assert result["missing_codes"] == []
+    assert result["csv_path"] is None
+
+
+def test_check_table_reports_gap_dates_and_codes(mem_db, tmp_path, monkeypatch):
+    """正例(核心): 有缺口时报出「哪天缺、缺几条、缺哪些代码」
+
+    这三样正是补数闭环需要的：日期喂给 -b/-e，代码喂给 -c。
+    """
+    import tools.check_daily as cd
+    monkeypatch.setattr(cd, "__file__", str(tmp_path / "tools" / "check_daily.py"))
+
+    _seed_stock(mem_db, "600519")
+    _seed_stock(mem_db, "000001", "SZ")
+    _ins_cal(mem_db, ["2026-08-17", "2026-08-18"])
+    # 只有 600519 在 08-17 有数据，其余三格全缺
+    _ins_daily(mem_db, "600519.SH", "2026-08-17", close=100, pre_close=99)
+
+    result = _check_stock_daily_table(mem_db, "2026-08-17", "2026-08-18")
+
+    assert result["missing"] == 3
+    assert [g["date"] for g in result["gap_dates"]] == ["2026-08-17", "2026-08-18"]
+    assert {"date": "2026-08-17", "expected": 2, "actual": 1, "missing": 1} in result["gap_dates"]
+    assert {"date": "2026-08-18", "expected": 2, "actual": 0, "missing": 2} in result["gap_dates"]
+
+    missing = {(m["date"], m["code"]) for m in result["missing_codes"]}
+    assert missing == {
+        ("2026-08-17", "000001.SZ"),
+        ("2026-08-18", "000001.SZ"),
+        ("2026-08-18", "600519.SH"),
+    }
+    assert result["csv_path"] is not None
+
+
+def test_check_table_suspended_not_counted_as_missing(mem_db):
+    """反例: 停牌记录不算缺失——否则每天都会误报一堆"""
+    _seed_stock(mem_db)
+    _ins_cal(mem_db, ["2026-08-17"])
+    _ins_daily(mem_db, "600519.SH", "2026-08-17", close=0, pre_close=99, tradestatus=0)
+
+    result = _check_stock_daily_table(mem_db, "2026-08-17", "2026-08-17")
+    assert result["missing"] == 0
+
+
+def test_check_table_respects_code_filter(mem_db, tmp_path, monkeypatch):
+    """正例: 指定 -c 时只检查该代码，不把别的股票算进来"""
+    import tools.check_daily as cd
+    monkeypatch.setattr(cd, "__file__", str(tmp_path / "tools" / "check_daily.py"))
+
+    _seed_stock(mem_db, "600519")
+    _seed_stock(mem_db, "000001", "SZ")
+    _ins_cal(mem_db, ["2026-08-17"])
+
+    result = _check_stock_daily_table(mem_db, "2026-08-17", "2026-08-17",
+                                      codes=["600519"])
+    assert result["missing"] == 1
+    assert [m["code"] for m in result["missing_codes"]] == ["600519.SH"]

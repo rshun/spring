@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-05-30  Claude  get_default_dbfile 支持 prod/test 库切换(local_paths.db_active)
 #   2026-08-19  Claude  修正 configure_etl_logging docstring 的日志路径笔误(实为项目根 log/)
+#   2026-08-19  Claude  configure_etl_logging 支持指定控制台输出流，供 --json 类工具把日志改走 stderr
 import time
 import os
 import pkgutil
@@ -14,11 +15,15 @@ from types import ModuleType
 
 logger = logging.getLogger("etl.util.myutil")
 
-def configure_etl_logging() -> None:
+def configure_etl_logging(console_stream=None) -> None:
     """配置 ETL 共享日志输出
 
     日志文件: <项目根>/log/stockdailyYYYYMMDD.log
     每行格式: HH:MM:SS [module_name] [LEVEL] message
+
+    console_stream: 控制台输出流，默认 sys.stdout。
+        需要把 stdout 留给机器可读输出的程序(如 check_daily --json)必须传 sys.stderr，
+        否则日志会与 JSON 混在一起，调用方无法解析。
     """
     etl_logger = logging.getLogger("etl")
     if getattr(etl_logger, "_configured", False):
@@ -43,7 +48,7 @@ def configure_etl_logging() -> None:
     except Exception as e:
         print(f"[etl.util.myutil] 配置文件日志失败: {e}", file=sys.stderr)
 
-    ch = logging.StreamHandler(sys.stdout)
+    ch = logging.StreamHandler(console_stream if console_stream is not None else sys.stdout)
     ch.setFormatter(fmt)
     etl_logger.addHandler(ch)
     etl_logger._configured = True

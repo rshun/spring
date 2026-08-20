@@ -7,6 +7,7 @@ Spring 是一个专为 AI 驱动的量化交易和金融分析设计的 A 股数
 - **自动化数据 ETL**：集成 `AKShare`、`Baostock`、`pytdx` 及本地通达信日线（`lday`），支持自动化拉取和更新 A 股日线数据、交易日历、复权因子、申万行业分类、融资融券及股本变动信息。
 - **高性能本地存储**：以 DuckDB 为底层数据库，提供极速的列式数据查询与统计能力，轻松处理海量历史金融数据。
 - **AI 智能体无缝集成**：配套独立项目 [quant-mcp](https://github.com/rshun/quant-mcp) 提供基于 FastMCP 的 `duckdb-quant-readonly` 只读服务端，大模型可通过标准化 Tool 直接调用金融数据接口、计算技术指标或执行探索性 SQL 检索。
+- **AI 驱动的管道运维**：配套独立项目 [etl-quant-mcp](https://github.com/rshun/etl-quant-mcp) 提供 `quant-etl` 服务端，让大模型能触发本项目的 ETL、判定夜跑是否卡死、并按数据缺口定向补数。与只读侧对称：那边读数据，这边跑管道。
 
 ## 📂 项目结构
 
@@ -217,6 +218,34 @@ python -m etl.sync_finance --codes 000001,600519
 - `get_margin_summary` / `get_margin_detail`: 获取交易所级融资融券每日汇总及个股明细
 - `get_stock_industry` / `get_stock_industry_history`: 查询股票的申万行业（一/二/三级）归属及历史变动
 - `query`: 提供安全的只读 SQL 查询接口，方便 AI 进行复杂的交叉分析
+
+### 写入侧：ETL 调度
+
+另有独立项目 [etl-quant-mcp](https://github.com/rshun/etl-quant-mcp)（服务名 `quant-etl`），
+把本项目的 ETL 程序以子进程方式暴露给模型，解决的是**夜跑卡死**这个具体问题——
+故障形态不是崩溃而是停在下载处，既不报错也不退出，退出码对此完全失效。
+
+它提供 13 个 Tool，分四类：
+
+- **执行**：`etl_import_daily` / `etl_adjust` / `etl_fetch_index` / `etl_fill_indicators`
+- **任务管理**：`list_jobs` / `get_job` / `get_job_output` / `cancel_job`——靠心跳判定 `stalled`，可中途取消
+- **日志**：`list_etl_logs` / `read_etl_log` / `summarize_etl_log`——复盘 cron 昨晚那一次
+- **校验**：`check_data_gaps`（转发 `tools.check_daily --json`）/ `describe_etl_program`
+
+典型闭环：`summarize_etl_log` → `check_data_gaps` → 按缺口定向补 → 再 check。
+
+本项目为此提供三个稳定出口，改动 ETL 时需一并维护：
+
+| 出口 | 用途 | 由谁保证 |
+|------|------|---------|
+| `python -m etl.<prog>` + 退出码 | 执行 | `tests/unit/test_etl_exit_codes.py` |
+| `python -m tools.describe_cli <prog>` | 自省参数 | `tests/unit/test_cli_contract.py` |
+| `log/stockdailyYYYYMMDD.log` | 观测 | `util/myutil.py` 单点定义 |
+
+退出码约定：`0` 成功 / `1` 失败 / `2` argparse 用法错误（标准库写死）/ `3` 部分成功（暂未产出）。
+`etl/pipeline.yaml` 声明程序间的依赖顺序，改 ETL 的人顺手维护。
+
+完整设计说明见该仓库的 `docs/mcp_etl_plan.md`。
 
 ## 📊 数据表核心概览
 

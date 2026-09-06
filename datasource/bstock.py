@@ -3,6 +3,10 @@
 #                       视为数据源偶发抽风，重新登录重试，重试耗尽则停止下载
 #   2026-08-19  Claude  3 处批量采集的进度日志改「条数或时间」双条件触发(契约 C1b)，
 #                       提供稳定心跳供外部判定卡死
+#   2026-09-06  Claude  新增按交易日整市场下载(query_daily_history_k_AStock /
+#                       query_daily_adjust_factor)；复权因子按当日事件过滤，避免
+#                       同一事件被区间内每个交易日重复带回；网络类错误码(10002xxx)
+#                       归入可重试通道，避免一次抖动丢弃整段已下载区间
 import baostock as bs
 import logging
 import pandas as pd
@@ -70,10 +74,20 @@ def _is_broken_pipe_error(exc: Exception) -> bool:
     return "Broken pipe" in str(exc)
 
 
-def _raise_for_query_error(bs_code: str, error_msg: str | None) -> None:
+def _is_network_error(error_code: str | None) -> bool:
+    """baostock 的网络类错误码统一为 10002xxx(连接/收发失败或超时)。
+
+    这类是瞬时故障，重登重试可自愈；若归到 BaoQueryError，按日路径会
+    因为一次抖动直接中止整段区间，把已下载的交易日全部丢弃。
+    """
+    return str(error_code or "").startswith("10002")
+
+
+def _raise_for_query_error(bs_code: str, error_msg: str | None,
+                           error_code: str | None = None) -> None:
     if _is_not_logged_in(error_msg):
         raise BaoNotLoggedInError(f"{bs_code}: {error_msg}")
-    if _is_broken_pipe_error(RuntimeError(error_msg or "")):
+    if _is_network_error(error_code) or _is_broken_pipe_error(RuntimeError(error_msg or "")):
         raise BrokenPipeError(error_msg or "Broken pipe")
     raise BaoQueryError(f"{bs_code}: {error_msg}")
 
@@ -231,6 +245,14 @@ def fetch_stock_data(begin_date: str, end_date: str, bs_code: str) -> tuple[pd.D
 
     df_raw = pd.DataFrame(data_list, columns=rs.fields)
 
+    return _convert_stock_data(df_raw, bs_code)
+
+
+def _convert_stock_data(df_raw: pd.DataFrame, context: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """新旧日线接口共用字段转换及换手率校验。"""
+    if df_raw.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
     parts = df_raw["code"].astype("string").str.split(".", n=1, expand=True)
     if parts.shape[1] != 2:
         return pd.DataFrame(), pd.DataFrame()
@@ -255,7 +277,7 @@ def fetch_stock_data(begin_date: str, end_date: str, bs_code: str) -> tuple[pd.D
     if missing_turn.any():
         n_missing = int(missing_turn.sum())
         raise BaoMissingDataError(
-            f"{bs_code}: 交易日 turn(换手率)缺失 {n_missing} 行"
+            f"{context}: 交易日 turn(换手率)缺失 {n_missing} 行"
         )
 
     df_daily = pd.DataFrame({
@@ -281,6 +303,139 @@ def fetch_stock_data(begin_date: str, end_date: str, bs_code: str) -> tuple[pd.D
     })
 
     return df_daily, df_basic
+
+
+def _read_query_frame(query, context: str) -> pd.DataFrame:
+    if query.error_code != "0":
+        if "you don't login" in (query.error_msg or "").lower():
+            raise BaoNotLoggedInError(f"{context}: {query.error_msg}")
+        _raise_for_query_error(context, query.error_msg, query.error_code)
+    rows = []
+    while query.next():
+        rows.append(query.get_row_data())
+    if query.error_code != "0":
+        _raise_for_query_error(context, query.error_msg, query.error_code)
+    return pd.DataFrame(rows, columns=query.fields)
+
+
+def _retry_market_query(operation, context: str):
+    for attempt in range(_get_max_fetch_attempts()):
+        try:
+            return operation()
+        except Exception as exc:
+            if isinstance(exc, BaoNotLoggedInError):
+                delay = _get_retry_delay_login()
+            elif isinstance(exc, BaoMissingDataError):
+                delay = _get_retry_delay_missing()
+            elif _is_broken_pipe_error(exc):
+                delay = _get_retry_delay_pipe()
+            else:
+                raise
+            if attempt == _get_max_fetch_attempts() - 1:
+                raise
+            logger.warning(f"[Baostock] {context} 查询失败，重新登录后重试: {exc}")
+            relogin()
+            time.sleep(delay)
+    raise BaoQueryError(f"{context}: max_fetch_attempts 必须大于 0")
+
+
+def _fetch_market_by_date(stock_list: list[tuple], begin_date: str, end_date: str,
+                          *, factors: bool):
+    api_name = "query_daily_adjust_factor" if factors else "query_daily_history_k_AStock"
+    query_api = getattr(bs, api_name, None)
+    if query_api is None:
+        raise RuntimeError(f"当前 baostock 缺少 {api_name}，请使用包含该接口的版本。")
+
+    targets = pd.DataFrame([
+        (f"{str(market).lower()}.{symbol}", start, end)
+        for symbol, market, start, end, status in stock_list
+        if not str(symbol).startswith("9") and status != "D"
+    ], columns=["code", "_start", "_end"]).drop_duplicates()
+    all_data, all_basic = [], []
+    if targets.empty:
+        return pd.DataFrame() if factors else (pd.DataFrame(), pd.DataFrame())
+
+    socket.setdefaulttimeout(30)
+    login = bs.login()
+    if login.error_code != "0":
+        raise BaoQueryError(f"[Baostock] 登录失败: {login.error_msg}")
+    try:
+        calendar = _retry_market_query(
+            lambda: _read_query_frame(bs.query_trade_dates(
+                start_date=begin_date, end_date=end_date), "交易日历"), "交易日历"
+        )
+        dates = calendar.loc[
+            calendar["is_trading_day"].astype(str) == "1", "calendar_date"
+        ].sort_values().drop_duplicates().tolist()
+        heartbeat = _get_progress_heartbeat_seconds()
+        last_progress_at = time.monotonic()
+        logger.info(f"[Baostock] {api_name} 按日采集，共 {len(dates)} 个交易日")
+        for count, day in enumerate(dates, 1):
+            active = targets.loc[(targets["_start"] <= day) & (targets["_end"] >= day)]
+            if active.empty:
+                continue
+
+            def fetch_day():
+                raw = _read_query_frame(query_api(date=day), day)
+                if raw.empty:
+                    return pd.DataFrame() if factors else (pd.DataFrame(), pd.DataFrame())
+                raw = raw.merge(active, on="code", how="inner")
+                if factors:
+                    # 按日接口实际返回 adjustFacto，旧接口使用 adjustFactor。
+                    if "adjustFactor" not in raw.columns and "adjustFacto" in raw.columns:
+                        raw = raw.rename(columns={"adjustFacto": "adjustFactor"})
+                    raw = raw.rename(columns={
+                        "dividOperateDate": "date",
+                        "foreAdjustFactor": "fore_factor",
+                        "backAdjustFactor": "back_factor",
+                        "adjustFactor": "adjust_factor",
+                    })
+                    # 只保留除权事件恰好发生在当日的行。按日接口若返回的是「当日生效
+                    # 的因子」，同一条历史事件会被区间内每个交易日重复带回来；按区间
+                    # 过滤放行不了这种重复，按当日过滤才与旧接口的事件集语义一致。
+                    # active 已保证 _start <= day <= _end，无需再按区间裁剪。
+                    raw = raw.loc[raw["date"] == day].copy()
+                    if raw.empty:
+                        return pd.DataFrame()
+                    parts = raw["code"].str.split(".", n=1, expand=True)
+                    raw["code"] = parts[1] + "." + parts[0].str.upper()
+                    return raw[["code", "date", "fore_factor", "back_factor", "adjust_factor"]]
+                raw = raw.loc[raw["date"] == day].copy()
+                return _convert_stock_data(raw, day)
+
+            result = _retry_market_query(fetch_day, day)
+            if factors:
+                if not result.empty:
+                    all_data.append(result)
+            else:
+                daily, basic = result
+                if not daily.empty:
+                    all_data.append(daily)
+                if not basic.empty:
+                    all_basic.append(basic)
+            now = time.monotonic()
+            if count % 100 == 0 or count == len(dates) or now - last_progress_at >= heartbeat:
+                logger.info(f"   已处理交易日: {count}/{len(dates)} ({day})")
+                last_progress_at = now
+        data = pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
+        if factors:
+            return data
+        basic = pd.concat(all_basic, ignore_index=True) if all_basic else pd.DataFrame()
+        return data, basic
+    finally:
+        bs.logout()
+
+
+@timer
+def fetch_daily_data_by_date(stock_list: list[tuple], begin_date: str, end_date: str):
+    """只传日期时，按交易日获取全市场日线，并保留原候选股票范围。"""
+    return _fetch_market_by_date(stock_list, begin_date, end_date, factors=False)
+
+
+@timer
+def fetch_adjust_factors_by_date(stock_list: list[tuple], begin_date: str, end_date: str):
+    """只传日期时，按交易日获取全市场复权因子。"""
+    return _fetch_market_by_date(stock_list, begin_date, end_date, factors=True)
 
 
 @timer

@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 #   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
+#   2026-09-06  Claude  只传起止日期时改走 bstock 按交易日接口；新增 --by-date 开关，
+#                       把该路由暴露到 CLI 自省出口(契约 C4)并支持强制开关
 """
 功能: 获取指定日期范围的所有股票交易数据, 已退市的股票暂不获取
 输入参数:
@@ -67,11 +69,40 @@ def build_parser() -> argparse.ArgumentParser:
         help='仅将获取结果（含列名）输出到屏幕，不写入数据库'
     )
 
+    parser.add_argument(
+        '--by-date',
+        type=str.lower,
+        choices=['auto', 'on', 'off'],
+        default='auto',
+        help='bstock 按交易日整市场下载(query_daily_history_k_AStock): '
+             'auto=仅当命令行只给出 -b/-e 时启用(默认), on=强制启用, off=强制走逐股接口'
+    )
+
     return parser
 
 
+def resolve_by_date(mode: str) -> bool:
+    """决定是否走 bstock 的按交易日接口。
+
+    auto 的判定是「命令行上除 -b/-e 外没有显式给出任何参数」。显式参数用一个
+    default 全部置 None 的探针 parser 重解析 argv 得到——它与主 parser 同源，
+    缩写、--begin=X 等写法的解析结果天然一致，不需要另行维护一份参数表。
+    """
+    if mode != 'auto':
+        return mode == 'on'
+
+    probe = build_parser()
+    for action in probe._actions:
+        action.default = None
+    given = {dest for dest, value in vars(probe.parse_args()).items() if value is not None}
+    given.discard('by_date')          # 显式写 --by-date auto 不应否定 auto 自身
+    return given == {'begin', 'end'}
+
+
 def parse_arguments() -> argparse.Namespace:
-    return build_parser().parse_args()
+    args = build_parser().parse_args()
+    args.date_range_only = resolve_by_date(args.by_date)
+    return args
 
 
 def check_parameters(begin: str, end: str) -> bool:
@@ -122,7 +153,12 @@ def main() -> int:
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_batch_data' 方法。")
             return 1
 
-        stock_data, basic_df = module.fetch_batch_data(candidate_codes)
+        if args.source == 'bstock' and getattr(args, 'date_range_only', False):
+            stock_data, basic_df = module.fetch_daily_data_by_date(
+                candidate_codes, begin_date, end_date
+            )
+        else:
+            stock_data, basic_df = module.fetch_batch_data(candidate_codes)
 
         if args.print_only:
             print("stock_data:")

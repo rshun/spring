@@ -50,6 +50,54 @@ spring/
 
 ## 🛠️ 安装与配置
 
+### Baostock 按日期批量下载
+
+仅同时传入起止日期时，日线和复权因子分别使用
+`query_daily_history_k_AStock(date=...)` 和 `query_daily_adjust_factor(date=...)`，
+按区间内交易日逐日请求，并保留原候选股票、上市日期和退市过滤规则。
+
+```bash
+python -m etl.import_daily -b 20260901 -e 20260904
+python -m etl.adjust -b 20260901 -e 20260904
+```
+
+以上命令会按原有流程写入数据库。额外传入 `-c`、`-x`（包括 `-x all`）、
+`-s` 或 `-p` 等参数，或者没有同时显式提供起止日期时，继续使用原接口。
+指数下载、其他数据源、字段转换及复权因子补齐规则保持不变。
+
+该路由由 `--by-date` 显式控制，也会出现在 `python -m tools.describe_cli` 的
+自省输出里，供 etl-quant-mcp 一类的外部调度方发现和指定：
+
+| 取值 | 含义 |
+|------|------|
+| `auto` | 默认。命令行上只给出 `-b`/`-e` 时走按日接口，多给任何参数都退回逐股接口 |
+| `on`   | 强制按日接口，即使同时显式写了 `-x all`、`-s bstock` 这类等于默认值的参数 |
+| `off`  | 强制逐股接口 |
+
+```bash
+python -m etl.import_daily -b 20260901 -e 20260904 -x all -s bstock --by-date on
+```
+
+复权因子按日采集时只保留「除权事件恰好发生在当日」的行，与逐股接口按区间
+返回事件集的语义一致，避免同一条历史事件被区间内每个交易日重复带回。
+baostock 的网络类错误码（`10002xxx`，连接/收发失败或超时）按瞬时故障处理，
+重登重试；重试耗尽或遇到非瞬时错误仍然中止且不写入部分数据。
+
+运行环境需包含上述两个接口（已核对官方 PyPI 的 baostock 0.9.3 发布包）。
+可先检查当前解释器，以下命令不访问网络、不写数据库：
+
+```bash
+python -c "import baostock as bs; print(bs.__file__); print(hasattr(bs, 'query_daily_history_k_AStock'), hasattr(bs, 'query_daily_adjust_factor'))"
+```
+
+若结果不是两个 `True`，需在目标虚拟环境中手动升级；升级会替换该环境中的
+baostock，执行前应记录原版本，以便必要时恢复。仅 `pip install baostock`
+可能保留已经安装的旧版，升级命令为：
+
+```bash
+python -m pip install --upgrade baostock -i https://pypi.org/simple
+```
+
 ### **环境准备**
    确保已安装 Python 3.10+（代码使用 `X | None` 等 PEP 604 写法，3.9 无法运行），并安装所需依赖：
 ```bash

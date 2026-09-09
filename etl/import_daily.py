@@ -1,8 +1,13 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 #   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
-#   2026-09-06  Claude  只传起止日期时改走 bstock 按交易日接口；新增 --by-date 开关，
+#   2026-09-07  Claude  只传起止日期时改走 bstock 按交易日接口；新增 --by-date 开关，
 #                       把该路由暴露到 CLI 自省出口(契约 C4)并支持强制开关
+#   2026-09-07  Claude  by-date auto 放宽为「只要不带非日期参数即启用」：不带参数
+#                       跑当天全市场、或只给一端日期，都走按日接口
+#   2026-09-07  Claude  删除 --by-date 开关：路由完全由参数形态推断，强制开关没有
+#                       实际使用场景(带非日期参数时逐股本就更划算)；数据源判断收进
+#                       resolve_by_date；模块能力守卫改为检查实际要调用的方法
 """
 功能: 获取指定日期范围的所有股票交易数据, 已退市的股票暂不获取
 输入参数:
@@ -69,39 +74,36 @@ def build_parser() -> argparse.ArgumentParser:
         help='仅将获取结果（含列名）输出到屏幕，不写入数据库'
     )
 
-    parser.add_argument(
-        '--by-date',
-        type=str.lower,
-        choices=['auto', 'on', 'off'],
-        default='auto',
-        help='bstock 按交易日整市场下载(query_daily_history_k_AStock): '
-             'auto=仅当命令行只给出 -b/-e 时启用(默认), on=强制启用, off=强制走逐股接口'
-    )
-
     return parser
 
 
-def resolve_by_date(mode: str) -> bool:
-    """决定是否走 bstock 的按交易日接口。
+def resolve_by_date(source: str = 'bstock') -> bool:
+    """决定是否走 bstock 的按交易日接口。没有开关，完全由参数形态推断。
 
-    auto 的判定是「命令行上除 -b/-e 外没有显式给出任何参数」。显式参数用一个
-    default 全部置 None 的探针 parser 重解析 argv 得到——它与主 parser 同源，
-    缩写、--begin=X 等写法的解析结果天然一致，不需要另行维护一份参数表。
+    只有 bstock 提供按日整市场接口，其余源一律返回 False。
+
+    其次按「命令行没有给出任何非日期参数」判断——日期可以给区间、只给一端，也
+    可以完全不给(缺省为当天)，都算「只带日期」，走按日接口拉全市场；一旦出现
+    -c/-x/-s/-p 之一就退回逐股接口，因为那些参数意味着只要一部分股票或另一个
+    数据源，此时逐股请求本就比拉全市场再筛更划算。
+
+    显式参数用一个 default 全部置 None 的探针 parser 重解析 argv 得到——它与主
+    parser 同源，缩写、--begin=X 等写法的解析结果天然一致，不需要另行维护一份
+    参数表。
     """
-    if mode != 'auto':
-        return mode == 'on'
+    if source != 'bstock':
+        return False
 
     probe = build_parser()
     for action in probe._actions:
         action.default = None
     given = {dest for dest, value in vars(probe.parse_args()).items() if value is not None}
-    given.discard('by_date')          # 显式写 --by-date auto 不应否定 auto 自身
-    return given == {'begin', 'end'}
+    return given <= {'begin', 'end'}
 
 
 def parse_arguments() -> argparse.Namespace:
     args = build_parser().parse_args()
-    args.date_range_only = resolve_by_date(args.by_date)
+    args.date_range_only = resolve_by_date(args.source)
     return args
 
 
@@ -149,11 +151,16 @@ def main() -> int:
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         module = myutil.import_source_module(args.source)
-        if not hasattr(module, 'fetch_batch_data'):
-            logger.error(f"模块 '{args.source}' 中没有定义 'fetch_batch_data' 方法。")
+
+        # 守卫检查的方法必须与下面实际调用的一致，否则模块能力缺失会漏到
+        # 最后的 except Exception 里，跟网络故障、数据库锁混在一起
+        by_date = getattr(args, 'date_range_only', False)
+        required = 'fetch_daily_data_by_date' if by_date else 'fetch_batch_data'
+        if not hasattr(module, required):
+            logger.error(f"模块 '{args.source}' 中没有定义 '{required}' 方法。")
             return 1
 
-        if args.source == 'bstock' and getattr(args, 'date_range_only', False):
+        if by_date:
             stock_data, basic_df = module.fetch_daily_data_by_date(
                 candidate_codes, begin_date, end_date
             )

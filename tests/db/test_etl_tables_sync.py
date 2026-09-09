@@ -105,7 +105,7 @@ def test_export_two_programs_covers_both_boards(seeded, tmp_path):
 
 def test_export_adjust_only(seeded, tmp_path):
     counts = export_tables(seeded, resolve_table_specs(["adjust"]), D1, D2, tmp_path)
-    assert counts == {"ADJ_FACTOR": 2, "ADJ_FACTOR_RAW": 1}
+    assert counts == {"ADJ_FACTOR": 2, "ADJ_FACTOR_RAW": 1, "ADJ_FACTOR_LOCAL": 0, "ADJ_FACTOR_LOCAL_STATE": 0}
 
 
 # ---------- 正例: 日期区间 ----------
@@ -284,5 +284,29 @@ def test_import_rolls_back_on_error(seeded, tmp_path, monkeypatch):
             mod.import_tables(target, tmp_path, list(specs))
         # STOCK_DAILY 在出错表之前已执行，回滚后应为 0
         assert target.execute("SELECT COUNT(*) FROM STOCK_DAILY").fetchone()[0] == 0
+    finally:
+        target.close()
+
+
+def test_all_factor_tables_have_sync_mapping(mem_db):
+    from tools.import_etl_tables import UPSERT_SQL
+    tables = {r[0] for r in mem_db.execute("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'ADJ_FACTOR%'").fetchall()}
+    assert tables <= set(resolve_table_specs(["adjust"]))
+    assert tables <= set(UPSERT_SQL)
+
+
+def test_local_factor_roundtrip_updated_since_and_idempotency(mem_db, tmp_path):
+    mem_db.execute("INSERT INTO ADJ_FACTOR_LOCAL VALUES ('000001.SZ', '2020-01-02', 0.5, 3.9, 3.9, '2020-01-01', '2026-08-18')")
+    specs = resolve_table_specs(["adjust"])
+    counts = export_tables(mem_db, specs, D2, D2, tmp_path, updated_since=D2)
+    assert counts["ADJ_FACTOR_LOCAL"] == 1
+    target = _fresh_db()
+    try:
+        target.execute("INSERT INTO ADJ_FACTOR_LOCAL VALUES ('000001.SZ', '2020-01-02', 1, 1, 1, '2019-01-01', '2020-01-01')")
+        for _ in range(2):
+            import_tables(target, tmp_path, list(specs))
+        rows = target.execute("SELECT fore_factor, back_factor, adjust_factor, CAST(created_at AS DATE), CAST(updated_at AS DATE) FROM ADJ_FACTOR_LOCAL").fetchall()
+        from datetime import date
+        assert rows == [(0.5, 3.9, 3.9, date(2019, 1, 1), date(2026, 8, 18))]
     finally:
         target.close()

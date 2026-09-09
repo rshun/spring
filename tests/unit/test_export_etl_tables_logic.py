@@ -70,8 +70,8 @@ def test_specs_fetch_index_only():
 
 def test_specs_adjust_only():
     specs = resolve_table_specs(["adjust"])
-    assert set(specs) == {"ADJ_FACTOR", "ADJ_FACTOR_RAW"}
-    assert all(s.date_col == "trade_date" for s in specs.values())
+    assert set(specs) == {"ADJ_FACTOR", "ADJ_FACTOR_RAW", "ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE"}
+    assert all(s.date_col == "trade_date" for name, s in specs.items() if name != "ADJ_FACTOR_LOCAL_STATE")
 
 
 def test_specs_two_programs_merge_stock_daily_scope():
@@ -83,7 +83,7 @@ def test_specs_two_programs_merge_stock_daily_scope():
 
 def test_specs_all_covers_four_tables():
     assert set(resolve_table_specs(["all"])) == {
-        "STOCK_DAILY", "DAILY_BASIC", "ADJ_FACTOR", "ADJ_FACTOR_RAW"
+        "STOCK_DAILY", "DAILY_BASIC", "ADJ_FACTOR", "ADJ_FACTOR_RAW", "ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE"
     }
 
 

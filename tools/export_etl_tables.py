@@ -7,7 +7,7 @@
 各程序写入的表(只导出"写入表"，STOCK_INFO / TRADE_CAL 属只读依赖，不在此列):
   import_daily  -> STOCK_DAILY(个股)、DAILY_BASIC(仅 turnover_rate/pe/pb/is_st 四列)
   fetch_index   -> STOCK_DAILY(指数)
-  adjust        -> ADJ_FACTOR、ADJ_FACTOR_RAW
+  adjust        -> ADJ_FACTOR、ADJ_FACTOR_RAW、ADJ_FACTOR_LOCAL
 
 说明:
   1) STOCK_DAILY 为个股与指数共用表，按 STOCK_INFO.board 区分:
@@ -21,7 +21,7 @@
   -e, --end           结束日期 (格式: YYYYMMDD)，默认为当天
   -o, --out           输出目录 (默认 tmp/db_sync/out)
       --db            源库路径 (默认取 config.yaml 中当前生效的库)
-      --updated-since 额外导出 updated_at >= 该时间的 ADJ_FACTOR/ADJ_FACTOR_RAW 行
+      --updated-since 额外导出 updated_at >= 该时间的 ADJ_FACTOR/ADJ_FACTOR_RAW/ADJ_FACTOR_LOCAL 行
                       (格式 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS)
 
 用法:
@@ -31,6 +31,8 @@
   python -m tools.export_etl_tables -p adjust -b 20260818 --updated-since 2026-08-18
 """
 import argparse
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -51,13 +53,15 @@ TABLE_META: dict[str, tuple[str, str]] = {
     "DAILY_BASIC": ("code, trade_date, turnover_rate, pe, pb, is_st", "trade_date"),
     "ADJ_FACTOR": ("*", "trade_date"),
     "ADJ_FACTOR_RAW": ("*", "trade_date"),
+    "ADJ_FACTOR_LOCAL": ("*", "trade_date"),
+    "ADJ_FACTOR_LOCAL_STATE": ("*", "updated_at"),
 }
 
 # 程序 -> {表名: board 范围}；board 范围为 None 表示该表不区分个股/指数
 PROGRAM_TABLES: dict[str, dict[str, str | None]] = {
     "import_daily": {"STOCK_DAILY": "stock", "DAILY_BASIC": None},
     "fetch_index": {"STOCK_DAILY": "index"},
-    "adjust": {"ADJ_FACTOR": None, "ADJ_FACTOR_RAW": None},
+    "adjust": {"ADJ_FACTOR": None, "ADJ_FACTOR_RAW": None, "ADJ_FACTOR_LOCAL": None, "ADJ_FACTOR_LOCAL_STATE": None},
 }
 
 _BOARD_FILTER = {
@@ -155,20 +159,41 @@ def export_tables(conn: duckdb.DuckDBPyConnection,
     """按规格导出为 parquet，返回 {表名: 行数}"""
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    counts: dict[str, int] = {}
-    for table, spec in specs.items():
-        where = build_where(spec, begin, end, updated_since)
-        target = out_dir / parquet_name(table)
-        conn.execute(
-            f"COPY (SELECT {spec.columns} FROM {table} WHERE {where}) "
-            f"TO '{target.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-        )
-        n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0]
-        counts[table] = n
-        scope_desc = {"stock": "个股", "index": "指数"}.get(spec.board_scope or "", "全部")
-        logger.info(f"[导出] {table:<16} {scope_desc:<4} {n:>9} 行 -> {target}")
+    conn.execute("BEGIN")
+    try:
+        counts: dict[str, int] = {}
+        for table, spec in specs.items():
+            where = build_where(spec, begin, end, updated_since)
+            if table in ("ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE"):
+                where = "TRUE"  # 完整事件快照 + 基准状态，包括已无事件的股票
+            elif table == "ADJ_FACTOR" and "ADJ_FACTOR_LOCAL_STATE" in specs:
+                where = f"({where}) OR code IN (SELECT code FROM ADJ_FACTOR_LOCAL_STATE)"
+            target = out_dir / parquet_name(table)
+            conn.execute(
+                f"COPY (SELECT {spec.columns} FROM {table} WHERE {where}) "
+                f"TO '{target.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            )
+            n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0]
+            counts[table] = n
+            scope_desc = {"stock": "个股", "index": "指数"}.get(spec.board_scope or "", "全部")
+            logger.info(f"[导出] {table:<16} {scope_desc:<4} {n:>9} 行 -> {target}")
 
-    return counts
+        if {"ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE"} <= set(specs):
+            hashes = {}
+            for name in ("ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE", "ADJ_FACTOR"):
+                if name in specs:
+                    with (out_dir / parquet_name(name)).open("rb") as stream:
+                        digest = hashlib.sha256()
+                        for block in iter(lambda: stream.read(1024 * 1024), b""):
+                            digest.update(block)
+                    hashes[name] = digest.hexdigest()
+            (out_dir / "local_snapshot_manifest.json").write_text(
+                json.dumps({"version": 1, "sha256": hashes}, indent=2), encoding="utf-8")
+        conn.execute("COMMIT")
+        return counts
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def warn_stale_files(out_dir: Path, specs: dict[str, TableSpec]) -> list[str]:

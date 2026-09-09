@@ -93,6 +93,26 @@ COMMENT ON COLUMN ADJ_FACTOR_RAW.adjust_factor IS '本次复权因子';
 COMMENT ON COLUMN ADJ_FACTOR_RAW.created_at IS '记录创建时间';
 COMMENT ON COLUMN ADJ_FACTOR_RAW.updated_at IS '记录最后更新时间';
 
+-- 复权因子本地自算（方案A主源：CAPITAL_DETAIL 除权事件 + STOCK_DAILY 收盘价，
+-- 见 docs/adj_factor_selfbuild.md；结构对齐 ADJ_FACTOR_RAW，语义保证 adjust_factor ≡ back_factor）
+CREATE TABLE IF NOT EXISTS ADJ_FACTOR_LOCAL (
+    code           VARCHAR(32) NOT NULL,
+    trade_date     DATE NOT NULL,
+    fore_factor    DOUBLE,
+    back_factor    DOUBLE,
+    adjust_factor  DOUBLE,
+    created_at     TIMESTAMP DEFAULT now(),
+    updated_at     TIMESTAMP,
+    PRIMARY KEY (code, trade_date)
+);
+COMMENT ON COLUMN ADJ_FACTOR_LOCAL.code IS '股票代码';
+COMMENT ON COLUMN ADJ_FACTOR_LOCAL.trade_date IS '交易日期';
+COMMENT ON COLUMN ADJ_FACTOR_LOCAL.fore_factor IS '前复权因子';
+COMMENT ON COLUMN ADJ_FACTOR_LOCAL.back_factor IS '后复权因子';
+COMMENT ON COLUMN ADJ_FACTOR_LOCAL.adjust_factor IS '本次复权因子(恒等于 back_factor)';
+COMMENT ON COLUMN ADJ_FACTOR_LOCAL.created_at IS '记录创建时间';
+COMMENT ON COLUMN ADJ_FACTOR_LOCAL.updated_at IS '记录最后更新时间';
+
 -- 每日指标表 (每日收盘后更新)
 CREATE TABLE IF NOT EXISTS DAILY_BASIC (
     code          VARCHAR(20),
@@ -449,3 +469,11 @@ CREATE OR REPLACE VIEW V_CASH_FLOW AS
 SELECT code, report_date,
        ocf_in, ocf_out, ocf_net, icf_net, fcf_net, cash_net_inc, cash_end_bal
 FROM FINANCE_REPORT;
+
+-- 本地累计链的固定基准；与完整事件快照同事务更新，不随每日水位反推。
+CREATE TABLE IF NOT EXISTS ADJ_FACTOR_LOCAL_STATE (
+    code VARCHAR(32) PRIMARY KEY,
+    base_factor DOUBLE NOT NULL CHECK (base_factor > 0),
+    created_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP
+);

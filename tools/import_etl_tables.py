@@ -8,7 +8,7 @@
   DAILY_BASIC     仅覆盖 turnover_rate/pe/pb/is_st，且来源为 NULL 时保留原值；
                   涨跌停价/量比/股本/市值等由其它程序生成的列不受影响
   ADJ_FACTOR      覆盖 fore/back/adjust_factor + updated_at，保留原 created_at
-  ADJ_FACTOR_RAW  同上
+  ADJ_FACTOR_RAW / ADJ_FACTOR_LOCAL  同上
 
 输入参数:
   -p, --programs  程序范围: adjust / import_daily / fetch_index / all (默认 all，可多选)
@@ -22,6 +22,8 @@
   python -m tools.import_etl_tables -p import_daily -i D:/sync/out
 """
 import argparse
+import hashlib
+import json
 import logging
 from pathlib import Path
 
@@ -87,6 +89,22 @@ UPSERT_SQL: dict[str, str] = {
             adjust_factor = EXCLUDED.adjust_factor,
             updated_at    = EXCLUDED.updated_at
     """,
+    "ADJ_FACTOR_LOCAL": """
+        INSERT INTO ADJ_FACTOR_LOCAL
+            (code, trade_date, fore_factor, back_factor, adjust_factor, created_at, updated_at)
+        SELECT code, trade_date, fore_factor, back_factor, adjust_factor, created_at, updated_at
+        FROM read_parquet('{src}')
+        ON CONFLICT (code, trade_date) DO UPDATE SET
+            fore_factor   = EXCLUDED.fore_factor,
+            back_factor   = EXCLUDED.back_factor,
+            adjust_factor = EXCLUDED.adjust_factor,
+            updated_at    = EXCLUDED.updated_at
+    """,
+    "ADJ_FACTOR_LOCAL_STATE": """
+        INSERT INTO ADJ_FACTOR_LOCAL_STATE SELECT * FROM read_parquet('{src}')
+        ON CONFLICT(code) DO UPDATE SET base_factor=EXCLUDED.base_factor,updated_at=EXCLUDED.updated_at
+    """,
+
 }
 
 
@@ -103,6 +121,36 @@ def import_tables(conn: duckdb.DuckDBPyConnection,
     if not dry_run:
         conn.execute("BEGIN")
     try:
+        if "ADJ_FACTOR_LOCAL_STATE" in tables:
+            if not {"ADJ_FACTOR", "ADJ_FACTOR_LOCAL"} <= set(tables):
+                raise ValueError("local 状态必须与事件和稠密表一起导入")
+            state_file = in_dir / parquet_name("ADJ_FACTOR_LOCAL_STATE")
+            local_file = in_dir / parquet_name("ADJ_FACTOR_LOCAL")
+            if state_file.exists() and not local_file.exists():
+                raise ValueError("local 状态快照缺少对应事件文件，拒绝导入")
+            if state_file.exists() and local_file.exists():
+                manifest_file = in_dir / "local_snapshot_manifest.json"
+                if not manifest_file.exists():
+                    raise ValueError("local 完整快照缺少校验清单，拒绝导入")
+                manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                hashes = manifest.get("sha256", {})
+                if manifest.get("version") != 1 or not {"ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE", "ADJ_FACTOR"} <= set(hashes):
+                    raise ValueError("local 快照清单不完整，拒绝导入")
+                for name in ("ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE", "ADJ_FACTOR"):
+                    with (in_dir / parquet_name(name)).open("rb") as stream:
+                        digest = hashlib.sha256()
+                        for block in iter(lambda: stream.read(1024 * 1024), b""):
+                            digest.update(block)
+                    if digest.hexdigest() != hashes[name]:
+                        raise ValueError("local 快照文件不匹配，拒绝混合批次导入")
+            if state_file.exists() and local_file.exists() and not dry_run:
+                # 文件由同一事务全量导出；空事件文件也能传播全部撤销。
+                conn.execute(f"""
+                    DELETE FROM ADJ_FACTOR_LOCAL WHERE code IN (
+                        SELECT code FROM read_parquet('{state_file.as_posix()}'))
+                    AND NOT EXISTS (SELECT 1 FROM read_parquet('{local_file.as_posix()}') e
+                        WHERE e.code=ADJ_FACTOR_LOCAL.code AND e.trade_date=ADJ_FACTOR_LOCAL.trade_date)
+                """)
         for table in tables:
             src = in_dir / parquet_name(table)
             if not src.exists():

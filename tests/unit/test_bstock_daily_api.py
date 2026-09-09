@@ -1,5 +1,5 @@
 # 修改记录:
-#   2026-09-06  Claude  新增：按日期接口的路由、字段转换、范围及失败处理测试
+#   2026-09-07  Claude  新增：按日期接口的路由、字段转换、范围及失败处理测试
 """按日期接口的路由、字段转换、范围及失败处理；不连接真实网络或数据库。"""
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch, call
@@ -16,15 +16,28 @@ from tools import describe_cli
 @pytest.mark.parametrize("argv, expected", [
     (["-b", "20260901", "-e", "20260904"], True),
     (["--begin=20260901", "--end=20260904"], True),
-    ([], False),
-    (["-b", "20260901"], False),
     (["-b", "20260901", "-e", "20260904", "-c", "600000"], False),
     (["-b", "20260901", "-e", "20260904", "-x", "all"], False),
     (["-b", "20260901", "-e", "20260904", "-s", "bstock"], False),
 ])
 def test_date_only_route(module, argv, expected):
+    """正反例: 给全日期区间走按日接口, 带任何非日期参数一律退回逐股接口"""
     with patch("sys.argv", ["etl"] + argv):
         assert module.parse_arguments().date_range_only is expected
+
+
+@pytest.mark.parametrize("argv", [[], ["-b", "20260901"], ["-e", "20260904"]])
+def test_import_daily_partial_or_absent_date_still_by_date(argv):
+    """正例: import_daily 的日期可缺省(当天)或只给一端, 仍算「只带日期」走按日接口"""
+    with patch("sys.argv", ["etl"] + argv):
+        assert import_daily.parse_arguments().date_range_only is True
+
+
+@pytest.mark.parametrize("argv", [[], ["-b", "20260901"], ["-e", "20260904"]])
+def test_adjust_still_requires_both_dates(argv):
+    """反例: adjust 未同步放宽, 仍要求 -b/-e 都显式给出——防止两个程序的语义被静默改掉"""
+    with patch("sys.argv", ["etl"] + argv):
+        assert adjust.parse_arguments().date_range_only is False
 
 
 @pytest.mark.parametrize("module, new_method, old_method", [
@@ -201,29 +214,57 @@ def test_factor_event_not_duplicated_across_days(market):
     assert data["date"].tolist() == ["2026-09-01"]
 
 
-# ── #5 --by-date 路由开关 ────────────────────────────────────────────────────
+# ── #5 按日路由的推断 ────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("module", [import_daily, adjust])
+def test_import_daily_has_no_by_date_switch():
+    """反例: import_daily 不应有 --by-date 开关, 路由完全由参数形态推断"""
+    dests = {a.dest for a in import_daily.build_parser()._actions}
+    assert "by_date" not in dests
+    assert "by_date" not in describe_cli.describe("import_daily")["arguments"]
+
+
+@pytest.mark.parametrize("source", ["lday", "tdx"])
+def test_non_bstock_source_never_uses_by_date_api(source):
+    """反例: 只有 bstock 提供按日接口, 其余源一律走逐股"""
+    with patch("sys.argv", ["etl", "-s", source]):
+        assert import_daily.parse_arguments().date_range_only is False
+    assert import_daily.resolve_by_date(source) is False
+
+
 @pytest.mark.parametrize("argv, expected", [
     (["-b", "20260901", "-e", "20260904", "--by-date", "on"], True),
     (["-b", "20260901", "-e", "20260904", "-x", "all", "--by-date", "on"], True),
     (["-b", "20260901", "-e", "20260904", "--by-date", "off"], False),
-    (["-b", "20260901", "-e", "20260904", "--by-date", "auto"], True),
     (["--by-date", "on"], True),
 ])
-def test_by_date_switch_overrides_auto(module, argv, expected):
-    """正反例: on/off 强制路由, auto 维持「只给 -b/-e 才启用」的推断"""
+def test_adjust_by_date_tristate(argv, expected):
+    """正反例: adjust 仍保留 auto/on/off 三态, 未随 import_daily 一起简化"""
     with patch("sys.argv", ["etl"] + argv):
-        assert module.parse_arguments().date_range_only is expected
+        assert adjust.parse_arguments().date_range_only is expected
 
 
-@pytest.mark.parametrize("name", ["import_daily", "adjust"])
-def test_by_date_is_discoverable(name):
-    """正例: 路由开关必须出现在 describe_cli 自省出口(契约 C4), 否则 MCP 侧看不见也控制不了"""
-    spec = describe_cli.describe(name)["arguments"]["by_date"]
+def test_adjust_by_date_is_discoverable():
+    """正例: adjust 的三态开关同样要能被自省到"""
+    spec = describe_cli.describe("adjust")["arguments"]["by_date"]
     assert spec["choices"] == ["auto", "on", "off"]
     assert spec["default"] == "auto"
     assert spec["help"]
+
+
+def test_missing_by_date_method_reports_clear_error():
+    """反例: 走按日分支但模块缺该方法时, 守卫要按方法名报错, 不漏到笼统的兜底 except"""
+    args = import_daily.build_parser().parse_args(["-b", "20260901", "-e", "20260904"])
+    args.date_range_only = True
+    source = MagicMock(spec=["fetch_batch_data"])          # 旧版模块: 只有逐股方法
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(import_daily, "parse_arguments", return_value=args))
+        stack.enter_context(patch.object(import_daily, "check_parameters", return_value=True))
+        util = stack.enter_context(patch.object(import_daily, "myutil"))
+        db = stack.enter_context(patch.object(import_daily, "dbutil"))
+        util.trans_datestr_format.side_effect = ["2026-09-01", "2026-09-04"]
+        util.import_source_module.return_value = source
+        db.get_candidate_codes.return_value = TARGETS
+        assert import_daily.main() == 1
 
 
 # ── #2 网络类错误码可重试 ────────────────────────────────────────────────────
@@ -250,3 +291,21 @@ def test_non_network_error_still_aborts(market):
         with pytest.raises(bstock.BaoQueryError):
             bstock.fetch_daily_data_by_date(TARGETS, "2026-09-01", "2026-09-03")
     relogin.assert_not_called()
+
+
+def test_adjust_missing_by_date_method_reports_clear_error():
+    """反例: adjust 走按日分支但 bstock 模块缺 fetch_adjust_factors_by_date 时,
+    守卫按方法名报错返回 1, 不漏到笼统的兜底 except"""
+    args = adjust.build_parser().parse_args(["-b", "20260901", "-e", "20260904"])
+    args.date_range_only = True
+    source = MagicMock(spec=["fetch_adjust_factors"])      # 旧版模块: 只有逐股方法
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(adjust, "parse_arguments", return_value=args))
+        stack.enter_context(patch.object(adjust, "check_parameters", return_value=True))
+        util = stack.enter_context(patch.object(adjust, "myutil"))
+        db = stack.enter_context(patch.object(adjust, "dbutil"))
+        util.trans_datestr_format.side_effect = ["2026-09-01", "2026-09-04"]
+        util.import_source_module.return_value = source
+        db.get_candidate_codes.return_value = TARGETS
+        assert adjust.main() == 1
+        source.fetch_adjust_factors.assert_not_called()

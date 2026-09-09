@@ -52,30 +52,36 @@ spring/
 
 ### Baostock 按日期批量下载
 
-仅同时传入起止日期时，日线和复权因子分别使用
+只带日期参数时，日线和复权因子分别使用
 `query_daily_history_k_AStock(date=...)` 和 `query_daily_adjust_factor(date=...)`，
 按区间内交易日逐日请求，并保留原候选股票、上市日期和退市过滤规则。
 
 ```bash
-python -m etl.import_daily -b 20260901 -e 20260904
+python -m etl.import_daily                          # 当天全市场，走按日接口
+python -m etl.import_daily -b 20260901 -e 20260904  # 区间，走按日接口
 python -m etl.adjust -b 20260901 -e 20260904
 ```
 
 以上命令会按原有流程写入数据库。额外传入 `-c`、`-x`（包括 `-x all`）、
-`-s` 或 `-p` 等参数，或者没有同时显式提供起止日期时，继续使用原接口。
+`-s` 或 `-p` 等参数时，继续使用原接口。
 指数下载、其他数据源、字段转换及复权因子补齐规则保持不变。
 
-该路由由 `--by-date` 显式控制，也会出现在 `python -m tools.describe_cli` 的
-自省输出里，供 etl-quant-mcp 一类的外部调度方发现和指定：
+`import_daily` 没有额外的路由开关，走哪条完全由参数形态决定：
 
-| 取值 | 含义 |
-|------|------|
-| `auto` | 默认。命令行上只给出 `-b`/`-e` 时走按日接口，多给任何参数都退回逐股接口 |
-| `on`   | 强制按日接口，即使同时显式写了 `-x all`、`-s bstock` 这类等于默认值的参数 |
-| `off`  | 强制逐股接口 |
+| 命令行 | 走哪条 |
+|--------|--------|
+| 不带参数 / 只带 `-b` / 只带 `-e` / `-b` `-e` 都带 | 按日接口 |
+| 带了 `-c`、`-x`、`-s`、`-p` 中任意一个 | 逐股接口 |
+
+带这些参数意味着只要一部分股票或换了数据源，此时逐股请求本就比拉全市场再筛
+更划算，所以不提供强制走按日接口的开关。按日接口也只有 bstock 源提供，
+`-s lday`、`-s tdx` 一律走逐股。
+
+`adjust` 目前仍保留 `--by-date auto|on|off` 三态开关，且 `auto` 要求 `-b` 和
+`-e` 都显式给出，不带日期时走逐股接口。
 
 ```bash
-python -m etl.import_daily -b 20260901 -e 20260904 -x all -s bstock --by-date on
+python -m etl.adjust -b 20260901 -e 20260904 -x all --by-date on
 ```
 
 复权因子按日采集时只保留「除权事件恰好发生在当日」的行，与逐股接口按区间
@@ -190,8 +196,11 @@ python -m etl.fetch_index -b 20000101 -s lday
 
 #### 同步复权因子  
 ```bash
-# 每天运行(获取当天)
-python -m etl.adjust  
+# 每天运行(获取当天, local 源自算并维护 ADJ_FACTOR 稠密表)
+python -m etl.adjust -s local
+
+# 留痕下载(bstock 源已降级为审计留痕: 只写 ADJ_FACTOR_RAW, 默认 densify off 不维护 ADJ_FACTOR 稠密表)
+python -m etl.adjust -s bstock
 
 # 从bstock数据源中获取从2000-01-01开始所有股票的复权因子
 python -m etl.adjust -b 20000101
@@ -373,3 +382,44 @@ pytest tests/integration/
 ## 📋️ TODO  
 - 根据除权除息资料校验pre_close是否准确
 - 补齐pb,pe
+
+
+### 本地复权源：固定基准与完整快照（2026-09-09）
+
+`local` 使用 `ADJ_FACTOR_LOCAL_STATE.base_factor` 保存一次初始化的固定基准，
+不会每天按稠密表末行重估。新库无历史时基准为 1；有历史时只接受首个可计算事件之前的
+存量水位。若旧库只有事件后的数据且没有状态行，程序会拒绝自动初始化，需要先审核迁移水位，
+不能用最后一行直接反推后强行续跑。
+
+升级前应先停止该库写入、备份完整 DuckDB 文件并验证备份可读，再在测试副本执行现有
+`python -m etl.init_db` 建立新增的 `ADJ_FACTOR_LOCAL_STATE` 表。
+确认表存在、迁移基准正确及回归通过后，再安排业务库升级；本次代码修复没有执行业务库升级。
+可用只读 SQL 检查状态表及初始化覆盖：
+
+```sql
+SELECT table_name FROM information_schema.tables
+WHERE table_name = 'ADJ_FACTOR_LOCAL_STATE';
+SELECT code, base_factor, updated_at FROM ADJ_FACTOR_LOCAL_STATE ORDER BY code;
+SELECT DISTINCT a.code FROM ADJ_FACTOR a
+LEFT JOIN ADJ_FACTOR_LOCAL_STATE s ON s.code = a.code
+WHERE s.code IS NULL;
+```
+
+完整源快照会在单事务内同步事件撤销、基准状态和稠密因子。有缺价或非法配股等不完整数据时，
+整批拒绝写入，避免把取数缺口当作撤销。事件链发生变化时重算该股已有稠密历史；未变化时仅补
+请求窗口，避免每晚重写全市场历史。完整撤销保留状态行，事件前因子使用固定基准。
+
+`-p adjust` 同步现在包含完整 LOCAL 事件、完整状态表，以及已初始化股票的完整稠密历史；
+这部分不受日期窗口裁剪，因此导出量可能增加。RAW 和未初始化股票仍按原日期条件导出。
+必须整体搬运同一次导出的 parquet 与 `local_snapshot_manifest.json`，不要混用不同批次文件。
+导入时校验 SHA-256 清单；完整快照可以传播撤销，事务失败整体回滚。升级后的源端和目标端都需要新状态表。
+运行前可先使用现有 `tools.import_etl_tables --dry-run` 检查文件；该选项不写库。
+
+本地各阶段默认最多 300 秒，沿用 `baostock.progress_heartbeat_seconds` 输出存活日志。
+可选配置 `local_xdr.stage_timeout_seconds` 调整阶段期限（有限正数，单位秒）；本次未改配置文件。
+阶段超时会输出错误并停止心跳，阶段返回后抛出 TimeoutError，禁止写入结果。
+超时机制不能强制终止底层阻塞调用；外部调度应在心跳停止后按 stalled 规则取消任务。
+不要把存活日志解释成已完成进度；全市场较慢时应先在测试副本测时，再设置合理期限。
+
+代码回滚可从 `tmp/bugfix-round3-backup/` 恢复本轮文件，需先确认没有后续编辑。
+业务库一旦执行了重算或快照撤销，代码回滚不会恢复数据，应恢复升级前经验证的数据库备份。

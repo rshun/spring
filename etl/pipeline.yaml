@@ -26,8 +26,12 @@ fetch_index:
   desc: 指数日线交易明细入库，与个股线互不依赖
 
 adjust:
-  requires: []
-  desc: 复权因子入库并稠密化到逐交易日
+  requires: [import_daily, sync_capital]
+  desc: >-
+    复权因子入库并稠密化到逐交易日。每日必须跑 local 源(-s local)才维护
+    ADJ_FACTOR 稠密表；local 源(主)：由 CAPITAL_DETAIL 除权事件 + STOCK_DAILY
+    收盘价自算，故需日线与股本变迁先行；bstock 源仅下载留痕写 ADJ_FACTOR_RAW，
+    默认不稠密化
 
 fill_volratio:
   requires: [import_daily]

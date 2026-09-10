@@ -14,6 +14,12 @@
 #                       稠密化写 1.0；快照路径 requested 套用与 local_xdr 相同的过滤，消除
 #                       每次全市场跑 344 只北交所的假告警；ROLLBACK/unregister 加异常保护
 #                       防吞原异常；by-date 分支的模块方法守卫改为检查实际调用的方法
+#   2026-09-10  Claude  新增运行前预检 check_dense_gaps：ADJ_FACTOR 在窗口起点前有漏跑/
+#                       上市日起未稠密化/区间内部空洞时报错退出并给出回填命令（B006/B007
+#                       改为拦截而非自动回填）
+#   2026-09-10  Claude  废弃 bstock 复权因子源：-s 默认改为 local，bstock 保留为留痕并打
+#                       废弃警告；移除仅服务 bstock 的 --by-date 开关与 resolve_by_date
+#                       （bstock.fetch_adjust_factors_by_date 代码与 ADJ_FACTOR_RAW 数据均保留）
 import argparse
 import duckdb
 import logging
@@ -62,19 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
         '-s', '--source',
         type=str,
         choices=['bstock', 'local'],
-        default='bstock',
-        help='指定数据源类型: bstock=baostock下载(留痕写RAW), '
-             'local=本地自算(CAPITAL_DETAIL+STOCK_DAILY, 写ADJ_FACTOR_LOCAL), (默认 bstock)'
-    )
-
-    parser.add_argument(
-        '--by-date',
-        type=str.lower,
-        choices=['auto', 'on', 'off'],
-        default='auto',
-        help='bstock 按交易日整市场下载(query_daily_adjust_factor): '
-             'auto=仅当命令行只给出 -b/-e 时启用(默认), on=强制启用, off=强制走逐股接口；'
-             '仅对 bstock 源有效, local 源强制不走按日接口'
+        default='local',
+        help='指定数据源类型: local=本地自算(CAPITAL_DETAIL+STOCK_DAILY, 写ADJ_FACTOR_LOCAL, 默认); '
+             'bstock=【已废弃】baostock 下载, 仅留痕写 ADJ_FACTOR_RAW, 不再维护稠密表'
     )
 
     parser.add_argument(
@@ -90,28 +86,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def resolve_by_date(mode: str, source: str = 'bstock') -> bool:
-    """决定是否走 bstock 的按交易日接口。
-
-    local 源是本地整链计算，没有按日整市场接口，一律强制 off。
-    auto 的判定是「命令行上除 -b/-e 外没有显式给出任何参数」。显式参数用一个
-    default 全部置 None 的探针 parser 重解析 argv 得到——它与主 parser 同源，
-    缩写、--begin=X 等写法的解析结果天然一致，不需要另行维护一份参数表。
-    """
-    if source != 'bstock':
-        return False
-    if mode != 'auto':
-        return mode == 'on'
-
-    probe = build_parser()
-    for action in probe._actions:
-        action.default = None
-    given = {dest for dest, value in vars(probe.parse_args()).items() if value is not None}
-    given.discard('by_date')          # 显式写 --by-date auto 不应否定 auto 自身
-    given.discard('densify')          # 稠密化开关与按日路由正交，同理剔除
-    return given == {'begin', 'end'}
-
-
 def resolve_densify(mode: str, source: str) -> bool:
     """决定是否稠密化写入 ADJ_FACTOR 逐日表。
 
@@ -124,9 +98,7 @@ def resolve_densify(mode: str, source: str) -> bool:
 
 
 def parse_arguments() -> argparse.Namespace:
-    args = build_parser().parse_args()
-    args.date_range_only = resolve_by_date(args.by_date, args.source)
-    return args
+    return build_parser().parse_args()
 
 
 # 事件表路由白名单：表名需拼进 SQL（参数绑定不支持表名），必须限定合法取值
@@ -485,6 +457,95 @@ def check_parameters(begin: str, end: str) -> bool:
     return pv.run(ctx, validators)
 
 
+def check_dense_gaps(conn: duckdb.DuckDBPyConnection, stock_list: list[tuple]) -> list[dict]:
+    """运行前预检：候选股票的 ADJ_FACTOR 稠密表在本次窗口起点之前是否有缺口。
+
+    缺口定义（三类，任一命中即拒绝运行，由调用方报错退出）：
+      tail  该股已有稠密行，但 (最后稠密日, start_date) 开区间内仍有交易日——日常跑批漏跑
+      init  该股尚无稠密行，但 [STOCK_INFO.list_date, start_date) 内有交易日——新股上市日被
+            sync_basic 滞后错过，或 --densify off 先写了 STATE 却从未稠密化
+      hole  该股稠密行 [min, max] 区间内部缺交易日——手工删行、半途失败
+    首次全量初始化（-b 早于所有上市日）时 start_date == list_date，三类都不会误报。
+    只读，不修改任何表。返回按首个缺失日排序的 dict 列表：
+      code / kind / last_dense(可空) / expected_from / start_date / first_missing / missing_days
+    """
+    # 只检查本次真的会被稠密化的股票：两个源（bstock.fetch_adjust_factors /
+    # local_xdr.fetch_adjust_factors）都跳过 9 开头与退市股，它们永远不会有稠密行，
+    # 不排除的话 344 只北交所会让每一次日常跑都被 init 规则拦下
+    targets = pd.DataFrame(
+        [(f"{str(s).strip()}.{str(m).strip().upper()}", str(b))
+         for s, m, b, _e, status, *_ in stock_list
+         if not str(s).strip().startswith("9") and status != "D"],
+        columns=["code", "start_date"],
+    ).drop_duplicates("code")
+    if targets.empty:
+        return []
+    conn.register("gap_targets", targets)
+    try:
+        rows = conn.execute("""
+            WITH t AS (
+                SELECT g.code, CAST(g.start_date AS DATE) AS start_date, si.list_date
+                FROM gap_targets g LEFT JOIN STOCK_INFO si ON si.code = g.code
+            ),
+            dense AS (
+                SELECT code, MIN(trade_date) AS d_min, MAX(trade_date) AS d_max
+                FROM ADJ_FACTOR WHERE code IN (SELECT code FROM t) GROUP BY code
+            ),
+            has_rows AS (SELECT t.*, d.d_min, d.d_max FROM t JOIN dense d USING(code)),
+            no_rows  AS (SELECT t.* FROM t LEFT JOIN dense d USING(code) WHERE d.code IS NULL),
+            tail AS (
+                SELECT h.code, 'tail' AS kind, h.d_max AS last_dense,
+                       h.d_max AS expected_from, h.start_date,
+                       MIN(c.cal_date) AS first_missing, COUNT(*) AS missing_days
+                FROM has_rows h JOIN TRADE_CAL c
+                  ON c.is_open = 1 AND c.cal_date > h.d_max AND c.cal_date < h.start_date
+                GROUP BY h.code, h.d_max, h.start_date
+            ),
+            init AS (
+                SELECT n.code, 'init' AS kind, NULL::DATE AS last_dense,
+                       n.list_date AS expected_from, n.start_date,
+                       MIN(c.cal_date) AS first_missing, COUNT(*) AS missing_days
+                FROM no_rows n JOIN TRADE_CAL c
+                  ON c.is_open = 1 AND c.cal_date >= n.list_date AND c.cal_date < n.start_date
+                WHERE n.list_date IS NOT NULL
+                GROUP BY n.code, n.list_date, n.start_date
+            ),
+            hole AS (
+                SELECT h.code, 'hole' AS kind, h.d_max AS last_dense,
+                       h.d_min AS expected_from, h.start_date,
+                       MIN(c.cal_date) AS first_missing, COUNT(*) AS missing_days
+                FROM has_rows h
+                JOIN TRADE_CAL c ON c.is_open = 1 AND c.cal_date BETWEEN h.d_min AND h.d_max
+                LEFT JOIN ADJ_FACTOR a ON a.code = h.code AND a.trade_date = c.cal_date
+                WHERE a.code IS NULL
+                GROUP BY h.code, h.d_min, h.d_max, h.start_date
+            )
+            SELECT * FROM tail UNION ALL SELECT * FROM init UNION ALL SELECT * FROM hole
+            ORDER BY first_missing, code
+        """).fetchall()
+    finally:
+        try:
+            conn.unregister("gap_targets")
+        except Exception:
+            pass
+    keys = ["code", "kind", "last_dense", "expected_from", "start_date", "first_missing", "missing_days"]
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def _report_gaps_and_suggest(gaps: list[dict], source: str, max_lines: int = 20) -> None:
+    """把缺口清单写进日志，并给出可直接复制的回填命令。"""
+    kind_cn = {"tail": "漏跑", "init": "上市日起未稠密化", "hole": "区间内部空洞"}
+    logger.error(f"ADJ_FACTOR 稠密表存在缺口，拒绝运行：共 {len(gaps)} 只（列出前 {min(len(gaps), max_lines)} 只）")
+    for g in gaps[:max_lines]:
+        last = f"最后稠密日 {g['last_dense']}" if g["last_dense"] else f"上市日 {g['expected_from']}"
+        logger.error(f"   {g['code']}  {kind_cn[g['kind']]}  {last} → 本次起点 {g['start_date']}，"
+                     f"缺 {g['missing_days']} 个交易日（首缺 {g['first_missing']}）")
+    earliest = min(g["first_missing"] for g in gaps).strftime("%Y%m%d")
+    codes = sorted({g["code"].split(".")[0] for g in gaps})
+    code_arg = f" -c {' '.join(codes)}" if len(codes) <= max_lines else ""
+    logger.error(f"请先回填：python -m etl.adjust -s {source} -b {earliest}{code_arg}")
+
+
 def main() -> int:
     myutil.configure_etl_logging()
 
@@ -497,6 +558,9 @@ def main() -> int:
 
     densify = resolve_densify(getattr(args, 'densify', 'auto'), args.source)
     event_table = "ADJ_FACTOR_LOCAL" if args.source == "local" else "ADJ_FACTOR_RAW"
+    if args.source == "bstock":
+        logger.warning("bstock 复权因子源已废弃（2026-09-10）：仅继续留痕写 ADJ_FACTOR_RAW，"
+                       "不再维护 ADJ_FACTOR 稠密表；日常请使用 -s local（现为默认）。")
 
     logger.info("=" * 60)
     logger.info("获取股票复权因子任务启动")
@@ -519,24 +583,28 @@ def main() -> int:
         logger.warning("警告: 数据库中没有找到符合条件的股票")
         return 1
 
+    # 预检：稠密表在本次窗口之前有缺口就拒绝运行（B006/B007），放在昂贵的取数之前。
+    # 只在会写 ADJ_FACTOR 时检查；densify=off 不触碰稠密表，无需拦。
+    if densify:
+        ro = dbutil.get_connection(is_read_only=True)
+        try:
+            gaps = check_dense_gaps(ro, candidate_codes)
+        finally:
+            ro.close()
+        if gaps:
+            _report_gaps_and_suggest(gaps, args.source)
+            return 1
+
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         # -s local 对应 datasource/local_xdr.py（文件名带 _xdr 后缀，与 CLI 名做个映射）
         module_name = "local_xdr" if args.source == "local" else args.source
         module = myutil.import_source_module(module_name)
-        # 守卫检查的方法必须与实际调用的一致，否则模块能力缺失会漏到兜底 except 里
-        by_date = args.source == 'bstock' and getattr(args, 'date_range_only', False)
-        required = 'fetch_adjust_factors_by_date' if by_date else 'fetch_adjust_factors'
-        if not hasattr(module, required):
-            logger.error(f"模块 '{module_name}' 中没有定义 '{required}' 方法。")
+        if not hasattr(module, 'fetch_adjust_factors'):
+            logger.error(f"模块 '{module_name}' 中没有定义 'fetch_adjust_factors' 方法。")
             return 1
 
-        if by_date:
-            adjust = module.fetch_adjust_factors_by_date(
-                candidate_codes, begin_date, end_date
-            )
-        else:
-            adjust = module.fetch_adjust_factors(candidate_codes)
+        adjust = module.fetch_adjust_factors(candidate_codes)
 
         if adjust is None:
             adjust = pd.DataFrame()

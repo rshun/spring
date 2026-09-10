@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新增：CLI 接口契约自测(build_parser / describe_cli / pipeline.yaml / C1b 心跳)
+#   2026-09-10  Claude  adjust 默认源改为 local（bstock 复权因子源废弃），默认值断言按程序分别钉住
 """
 CLI 契约自测——「spring 的对外接口是稳定的」
 
@@ -77,12 +78,17 @@ def test_exchanges_choices_consistent(name):
     assert action.default == ["all"]
 
 
-@pytest.mark.parametrize("name", ["adjust", "import_daily", "fetch_index"])
-def test_source_choices_include_bstock(name):
-    """正例: 三个下载型程序都必须支持 bstock(macOS 上唯一可用的数据源)"""
+@pytest.mark.parametrize("name, default", [
+    ("adjust", "local"),          # 2026-09-10 起 bstock 复权因子源废弃，默认 local(纯库内计算)
+    ("import_daily", "bstock"),
+    ("fetch_index", "bstock"),
+])
+def test_source_choices_include_bstock(name, default):
+    """正例: 三个程序都必须保留 bstock 选项(macOS 上下载型程序的唯一可用源)；
+    默认值按程序分别钉住，改动即为契约变更，需同步 MCP 侧"""
     action = _actions(MODULES[name])["source"]
     assert "bstock" in action.choices
-    assert action.default == "bstock"
+    assert action.default == default
 
 
 @pytest.mark.parametrize("name", ["fill_volratio", "update_limit", "fill_shares"])

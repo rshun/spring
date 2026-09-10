@@ -6,6 +6,7 @@
 #                       （BUG-008/014 下推 SQL）；新增 BUG-006 水位校准、BUG-007 fore 口径、
 #                       BUG-011 跳过统计、BUG-012① 未来事件、BUG-017 配股价缺失用例
 #   2026-09-09  Claude  事件日恰为日线首日 → 历史覆盖外(非缺口)的正反例（600018.SH 换股上市复现）
+#   2026-09-10  Claude  移除 adjust --by-date 相关用例（bstock 复权因子源废弃，开关已删）
 """datasource/local_xdr.py 纯函数与路由开关测试；不连接网络与生产库。"""
 import logging
 from unittest.mock import patch
@@ -485,22 +486,6 @@ def test_fetch_adjust_factors_empty_stock_list():
 def test_resolve_densify(mode, source, expected):
     """正反例: auto 下 local 稠密化 / bstock 只留痕；on/off 强制覆盖"""
     assert adjust.resolve_densify(mode, source) is expected
-
-
-@pytest.mark.parametrize("argv", [
-    ["-b", "20260901", "-e", "20260904", "-s", "local"],
-    ["-b", "20260901", "-e", "20260904", "-s", "local", "--by-date", "on"],
-])
-def test_local_source_never_by_date(argv):
-    """反例: local 源没有按日整市场接口，--by-date on 也必须强制 off"""
-    with patch("sys.argv", ["etl"] + argv):
-        assert adjust.parse_arguments().date_range_only is False
-
-
-def test_densify_does_not_break_by_date_auto():
-    """正例: 显式给 --densify 不应干扰 by-date auto 的「只给 -b/-e」判定"""
-    with patch("sys.argv", ["etl", "-b", "20260901", "-e", "20260904", "--densify", "on"]):
-        assert adjust.parse_arguments().date_range_only is True
 
 
 def test_densify_is_discoverable():

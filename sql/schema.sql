@@ -74,7 +74,9 @@ COMMENT ON COLUMN ADJ_FACTOR.adjust_factor IS '本次复权因子';
 COMMENT ON COLUMN ADJ_FACTOR.created_at IS '记录创建时间';
 COMMENT ON COLUMN ADJ_FACTOR.updated_at IS '记录最后更新时间';
 
--- 复权因子原始
+-- 复权因子原始（baostock 留痕）
+-- 【已废弃 2026-09-10】bstock 复权因子源已废弃：本表只进不出、不再喂 ADJ_FACTOR 稠密表，
+-- 数据保留供 tools/check_adjust.py 对账；主源见下方 ADJ_FACTOR_LOCAL
 CREATE TABLE IF NOT EXISTS ADJ_FACTOR_RAW (
     code           VARCHAR(32) NOT NULL,
     trade_date     DATE NOT NULL,
@@ -92,6 +94,7 @@ COMMENT ON COLUMN ADJ_FACTOR_RAW.back_factor IS '后复权因子';
 COMMENT ON COLUMN ADJ_FACTOR_RAW.adjust_factor IS '本次复权因子';
 COMMENT ON COLUMN ADJ_FACTOR_RAW.created_at IS '记录创建时间';
 COMMENT ON COLUMN ADJ_FACTOR_RAW.updated_at IS '记录最后更新时间';
+COMMENT ON TABLE ADJ_FACTOR_RAW IS '【已废弃 2026-09-10】baostock 复权因子留痕；不再喂 ADJ_FACTOR 稠密表，数据保留供对账';
 
 -- 复权因子本地自算（方案A主源：CAPITAL_DETAIL 除权事件 + STOCK_DAILY 收盘价，
 -- 见 docs/adj_factor_selfbuild.md；结构对齐 ADJ_FACTOR_RAW，语义保证 adjust_factor ≡ back_factor）

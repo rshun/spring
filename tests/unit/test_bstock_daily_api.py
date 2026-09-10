@@ -1,5 +1,9 @@
 # 修改记录:
 #   2026-09-07  Claude  新增：按日期接口的路由、字段转换、范围及失败处理测试
+#   2026-09-09  Claude  code review 修复回归：按当日事件过滤、无开关路由推断、网络错误码重试、
+#                       adjust 缺方法守卫
+#   2026-09-10  Claude  bstock 复权因子源废弃：移除 adjust --by-date 用例，新增无开关/默认 local/
+#                       废弃警告用例；test_main_dispatch 收敛为 import_daily
 """按日期接口的路由、字段转换、范围及失败处理；不连接真实网络或数据库。"""
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch, call
@@ -12,7 +16,7 @@ from etl import adjust, import_daily
 from tools import describe_cli
 
 
-@pytest.mark.parametrize("module", [import_daily, adjust])
+@pytest.mark.parametrize("module", [import_daily])
 @pytest.mark.parametrize("argv, expected", [
     (["-b", "20260901", "-e", "20260904"], True),
     (["--begin=20260901", "--end=20260904"], True),
@@ -33,42 +37,30 @@ def test_import_daily_partial_or_absent_date_still_by_date(argv):
         assert import_daily.parse_arguments().date_range_only is True
 
 
-@pytest.mark.parametrize("argv", [[], ["-b", "20260901"], ["-e", "20260904"]])
-def test_adjust_still_requires_both_dates(argv):
-    """反例: adjust 未同步放宽, 仍要求 -b/-e 都显式给出——防止两个程序的语义被静默改掉"""
-    with patch("sys.argv", ["etl"] + argv):
-        assert adjust.parse_arguments().date_range_only is False
-
-
-@pytest.mark.parametrize("module, new_method, old_method", [
-    (import_daily, "fetch_daily_data_by_date", "fetch_batch_data"),
-    (adjust, "fetch_adjust_factors_by_date", "fetch_adjust_factors"),
-])
 @pytest.mark.parametrize("date_only", [True, False])
-def test_main_dispatch(module, new_method, old_method, date_only):
-    args = module.build_parser().parse_args(["-b", "20260901", "-e", "20260904"])
+def test_main_dispatch(date_only):
+    """正反例: import_daily 按 date_range_only 分派到按日/逐股接口（adjust 已无按日分支）"""
+    args = import_daily.build_parser().parse_args(["-b", "20260901", "-e", "20260904"])
     args.date_range_only = date_only
     source = MagicMock()
-    result = (pd.DataFrame(), pd.DataFrame()) if module is import_daily else pd.DataFrame()
-    getattr(source, new_method).return_value = result
-    getattr(source, old_method).return_value = result
+    result = (pd.DataFrame(), pd.DataFrame())
+    source.fetch_daily_data_by_date.return_value = result
+    source.fetch_batch_data.return_value = result
     with ExitStack() as stack:
-        stack.enter_context(patch.object(module, "parse_arguments", return_value=args))
-        stack.enter_context(patch.object(module, "check_parameters", return_value=True))
-        util = stack.enter_context(patch.object(module, "myutil"))
-        db = stack.enter_context(patch.object(module, "dbutil"))
+        stack.enter_context(patch.object(import_daily, "parse_arguments", return_value=args))
+        stack.enter_context(patch.object(import_daily, "check_parameters", return_value=True))
+        util = stack.enter_context(patch.object(import_daily, "myutil"))
+        db = stack.enter_context(patch.object(import_daily, "dbutil"))
         util.trans_datestr_format.side_effect = ["2026-09-01", "2026-09-04"]
         util.import_source_module.return_value = source
         db.get_candidate_codes.return_value = TARGETS
-        if module is adjust:
-            stack.enter_context(patch.object(module, "process_and_save_adjust_factors"))
-        assert module.main() == 0
+        assert import_daily.main() == 0
         if date_only:
-            getattr(source, new_method).assert_called_once_with(TARGETS, "2026-09-01", "2026-09-04")
-            getattr(source, old_method).assert_not_called()
+            source.fetch_daily_data_by_date.assert_called_once_with(TARGETS, "2026-09-01", "2026-09-04")
+            source.fetch_batch_data.assert_not_called()
         else:
-            getattr(source, old_method).assert_called_once_with(TARGETS)
-            getattr(source, new_method).assert_not_called()
+            source.fetch_batch_data.assert_called_once_with(TARGETS)
+            source.fetch_daily_data_by_date.assert_not_called()
 
 
 TARGETS = [
@@ -231,24 +223,12 @@ def test_non_bstock_source_never_uses_by_date_api(source):
     assert import_daily.resolve_by_date(source) is False
 
 
-@pytest.mark.parametrize("argv, expected", [
-    (["-b", "20260901", "-e", "20260904", "--by-date", "on"], True),
-    (["-b", "20260901", "-e", "20260904", "-x", "all", "--by-date", "on"], True),
-    (["-b", "20260901", "-e", "20260904", "--by-date", "off"], False),
-    (["--by-date", "on"], True),
-])
-def test_adjust_by_date_tristate(argv, expected):
-    """正反例: adjust 仍保留 auto/on/off 三态, 未随 import_daily 一起简化"""
-    with patch("sys.argv", ["etl"] + argv):
-        assert adjust.parse_arguments().date_range_only is expected
-
-
-def test_adjust_by_date_is_discoverable():
-    """正例: adjust 的三态开关同样要能被自省到"""
-    spec = describe_cli.describe("adjust")["arguments"]["by_date"]
-    assert spec["choices"] == ["auto", "on", "off"]
-    assert spec["default"] == "auto"
-    assert spec["help"]
+def test_adjust_has_no_by_date_switch():
+    """反例: bstock 复权因子源废弃后 adjust 不应再有 --by-date（仅服务 bstock 按日接口）"""
+    dests = {a.dest for a in adjust.build_parser()._actions}
+    assert "by_date" not in dests
+    assert "by_date" not in describe_cli.describe("adjust")["arguments"]
+    assert not hasattr(adjust, "resolve_by_date")
 
 
 def test_missing_by_date_method_reports_clear_error():
@@ -293,19 +273,47 @@ def test_non_network_error_still_aborts(market):
     relogin.assert_not_called()
 
 
-def test_adjust_missing_by_date_method_reports_clear_error():
-    """反例: adjust 走按日分支但 bstock 模块缺 fetch_adjust_factors_by_date 时,
-    守卫按方法名报错返回 1, 不漏到笼统的兜底 except"""
+def test_adjust_missing_fetch_method_reports_clear_error():
+    """反例: 源模块缺 fetch_adjust_factors 时守卫报错返回 1, 不漏到笼统的兜底 except"""
     args = adjust.build_parser().parse_args(["-b", "20260901", "-e", "20260904"])
-    args.date_range_only = True
-    source = MagicMock(spec=["fetch_adjust_factors"])      # 旧版模块: 只有逐股方法
+    source = MagicMock(spec=[])                              # 残缺模块: 没有任何取数方法
     with ExitStack() as stack:
         stack.enter_context(patch.object(adjust, "parse_arguments", return_value=args))
         stack.enter_context(patch.object(adjust, "check_parameters", return_value=True))
+        stack.enter_context(patch.object(adjust, "check_dense_gaps", return_value=[]))
         util = stack.enter_context(patch.object(adjust, "myutil"))
         db = stack.enter_context(patch.object(adjust, "dbutil"))
         util.trans_datestr_format.side_effect = ["2026-09-01", "2026-09-04"]
         util.import_source_module.return_value = source
         db.get_candidate_codes.return_value = TARGETS
         assert adjust.main() == 1
-        source.fetch_adjust_factors.assert_not_called()
+
+
+def test_adjust_bstock_source_is_deprecated_but_still_writes_raw(caplog):
+    """正例(废弃但保留): -s bstock 仍可运行——打废弃警告, 事件表 RAW, densify 关(仅留痕),
+    且因不写稠密表而跳过缺口预检"""
+    args = adjust.build_parser().parse_args(["-s", "bstock", "-b", "20260901", "-e", "20260904"])
+    source = MagicMock()
+    source.fetch_adjust_factors.return_value = pd.DataFrame()
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(adjust, "parse_arguments", return_value=args))
+        stack.enter_context(patch.object(adjust, "check_parameters", return_value=True))
+        chk = stack.enter_context(patch.object(adjust, "check_dense_gaps", return_value=[]))
+        save = stack.enter_context(patch.object(adjust, "process_and_save_adjust_factors"))
+        util = stack.enter_context(patch.object(adjust, "myutil"))
+        db = stack.enter_context(patch.object(adjust, "dbutil"))
+        util.trans_datestr_format.side_effect = ["2026-09-01", "2026-09-04"]
+        util.import_source_module.return_value = source
+        db.get_candidate_codes.return_value = TARGETS
+        with caplog.at_level("WARNING", logger="etl.adjust"):
+            assert adjust.main() == 0
+    assert "已废弃" in caplog.text
+    chk.assert_not_called()
+    assert save.call_args.kwargs == {"event_table": "ADJ_FACTOR_RAW", "densify": False}
+
+
+def test_adjust_default_source_is_local():
+    """正例: 不带 -s 时默认 local（纯库内计算, 稠密化开）"""
+    args = adjust.build_parser().parse_args([])
+    assert args.source == "local"
+    assert adjust.resolve_densify(args.densify, args.source) is True

@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 #   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
+#   2026-09-10  Claude  -x/--exchanges 原本只接受不生效，现传入 dbutil 按交易所过滤；
+#                       库层失败改为重抛，退出码 1 真正可达
 """
 补齐量比指标
   前置条件:
@@ -118,10 +120,13 @@ def main() -> int:
     else:
         codes = None
 
+    # 与 fill_shares / fill_turnover 一致：all → 不过滤，否则按交易所过滤
+    exchanges = None if 'all' in args.exchanges else [x.upper() for x in args.exchanges]
+
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         conn = dbutil.get_connection(is_read_only=False)
-        dbutil.fill_daily_basic_volume_ratio(begin_date, end_date, codes, conn=conn)
+        dbutil.fill_daily_basic_volume_ratio(begin_date, end_date, codes, exchanges, conn=conn)
         return 0
     except Exception as e:
         logger.error(f"补全量比数据时发生错误：{e}")

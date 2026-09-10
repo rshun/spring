@@ -1,4 +1,9 @@
+# 修改记录:
+#   2026-09-10  Claude  新增反例：库层失败必须重抛（此前吞异常并返回 0 行）
+from unittest.mock import MagicMock
+
 import pandas as pd
+import pytest
 
 from util.dbutil import fill_daily_basic_turnover
 from tests.conftest import insert_stock_info
@@ -132,3 +137,13 @@ def test_turnover_code_filter(mem_db):
     assert updated == 1
     assert _turnover(mem_db, "600519.SH", "2023-01-03") == 10.0
     assert _turnover(mem_db, "000001.SZ", "2023-01-03") is None
+
+
+# ── 2026-09-10：库层失败必须重抛（契约 C1）──────────────────────────────────────
+
+def test_db_failure_raises_instead_of_returning_zero():
+    """反例: 连接执行抛错时必须重抛, 不能吞成「更新 0 行」（CLI 会据此退出 0）"""
+    conn = MagicMock()
+    conn.execute.side_effect = RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"):
+        fill_daily_basic_turnover("2026-09-01", "2026-09-08", None, None, conn=conn)

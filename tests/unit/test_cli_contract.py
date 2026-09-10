@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新增：CLI 接口契约自测(build_parser / describe_cli / pipeline.yaml / C1b 心跳)
 #   2026-09-10  Claude  adjust 默认源改为 local（bstock 复权因子源废弃），默认值断言按程序分别钉住
+#   2026-09-10  Claude  fill_turnover 纳入契约（7 个程序）：注册表、-f、pipeline 依赖（含 fill_shares 前置）
 """
 CLI 契约自测——「spring 的对外接口是稳定的」
 
@@ -19,7 +20,8 @@ import pandas as pd
 import pytest
 import yaml
 
-from etl import adjust, fetch_index, fill_shares, fill_volratio, import_daily, update_limit
+from etl import (adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
+                 import_daily, update_limit)
 from tools import describe_cli
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +34,7 @@ MODULES = {
     "fill_volratio": fill_volratio,
     "update_limit":  update_limit,
     "fill_shares":   fill_shares,
+    "fill_turnover": fill_turnover,
 }
 
 # 6 个程序共有的参数, MCP 侧的通用调用面
@@ -91,9 +94,9 @@ def test_source_choices_include_bstock(name, default):
     assert action.default == default
 
 
-@pytest.mark.parametrize("name", ["fill_volratio", "update_limit", "fill_shares"])
+@pytest.mark.parametrize("name", ["fill_volratio", "update_limit", "fill_shares", "fill_turnover"])
 def test_fill_programs_have_forcerun(name):
-    """正例: 三个补齐型程序都必须有 -f/--forcerun"""
+    """正例: 四个补齐型程序都必须有 -f/--forcerun"""
     action = _actions(MODULES[name])["forcerun"]
     assert "-f" in action.option_strings
     assert action.default is False
@@ -229,9 +232,14 @@ def test_pipeline_is_acyclic(pipeline):
 
 
 def test_pipeline_fill_programs_depend_on_import_daily(pipeline):
-    """正例: 三个补齐程序都依赖日线, 这是补数顺序的关键事实"""
-    for name in ("fill_volratio", "update_limit", "fill_shares"):
+    """正例: 四个补齐程序都依赖日线, 这是补数顺序的关键事实"""
+    for name in ("fill_volratio", "update_limit", "fill_shares", "fill_turnover"):
         assert "import_daily" in pipeline[name]["requires"]
+
+
+def test_pipeline_fill_turnover_depends_on_fill_shares(pipeline):
+    """正例: 换手率用 float_shares 做分母, 必须排在 fill_shares 之后（记忆中的刷新顺序）"""
+    assert "fill_shares" in pipeline["fill_turnover"]["requires"]
 
 
 # ── 四、C1b 心跳（进度日志「条数或时间」双条件）────────────────────────────────

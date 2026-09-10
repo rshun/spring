@@ -47,3 +47,9 @@ fill_shares:
     由 CAPITAL_DETAIL 回填总股本/流通股本及市值。
     注意 sync_capital 无日期参数、暂未纳入 MCP，
     若 CAPITAL_DETAIL 缺该股数据则该股被跳过（新股常见）。
+
+fill_turnover:
+  requires: [import_daily, fill_shares]
+  desc: >-
+    由 STOCK_DAILY.volume / DAILY_BASIC.float_shares 回填换手率。默认仅补空
+    （baostock turn 缺失的行），-o 覆盖重算；须先有当日日线与流通股本。

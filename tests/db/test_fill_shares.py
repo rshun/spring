@@ -1,4 +1,10 @@
-from util.dbutil import fill_daily_basic_shares
+# 修改记录:
+#   2026-09-10  Claude  新增反例：库层失败必须重抛（此前 fill_daily_basic_shares / _mv 吞异常）
+from unittest.mock import MagicMock
+
+import pytest
+
+from util.dbutil import fill_daily_basic_shares, fill_daily_basic_mv
 from tests.conftest import insert_stock_info
 
 
@@ -90,3 +96,15 @@ def test_fill_shares_ignores_private_placement_plan_events(mem_db):
         "SELECT float_shares, total_shares FROM DAILY_BASIC"
     ).fetchone()
     assert row == (None, None)
+
+
+# ── 2026-09-10：库层失败必须重抛（契约 C1，CLI 才能返回退出码 1）─────────────────
+
+@pytest.mark.parametrize("func", [fill_daily_basic_shares, fill_daily_basic_mv],
+                         ids=["shares", "mv"])
+def test_db_failure_raises_instead_of_swallowing(func):
+    """反例: 连接执行抛错时函数必须把异常抛给调用方, 不能 logger.error 后静默返回"""
+    conn = MagicMock()
+    conn.execute.side_effect = RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"):
+        func("2026-09-01", "2026-09-08", None, None, conn=conn)

@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新增：验证 6 个 ETL 的 main() 退出码契约(0成功/1失败)
+#   2026-09-10  Claude  纳入 fill_turnover（第 7 个，此前 main() 返回 None 且无 sys.exit）；
+#                       新增三个 fill_* 的「库层抛错 → 1」用例
 """
 ETL 退出码契约测试
 
@@ -17,9 +19,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from etl import adjust, fetch_index, fill_shares, fill_volratio, import_daily, update_limit
+from etl import (adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
+                 import_daily, update_limit)
 
-ETL_MODULES = [adjust, fetch_index, fill_shares, fill_volratio, import_daily, update_limit]
+ETL_MODULES = [adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
+               import_daily, update_limit]
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────
@@ -291,6 +295,64 @@ def test_fill_volratio_fill_raises_returns_1():
          patch.object(fill_volratio, "check_parameters", return_value=True):
         dbutil.fill_daily_basic_volume_ratio.side_effect = RuntimeError("SQL 执行失败")
         assert fill_volratio.main() == 1
+
+
+def test_fill_volratio_passes_exchanges_through():
+    """正例(本次修复): -x sh 必须传到 dbutil（此前只接受不生效, 静默全市场重算）"""
+    with patch.object(fill_volratio, "myutil"), \
+         patch.object(fill_volratio, "dbutil") as dbutil, \
+         patch.object(fill_volratio, "parse_arguments",
+                      return_value=_args(forcerun=False, exchanges=["sh"])), \
+         patch.object(fill_volratio, "check_parameters", return_value=True):
+        assert fill_volratio.main() == 0
+        args, kwargs = dbutil.fill_daily_basic_volume_ratio.call_args
+        assert args[3] == ["SH"]
+
+
+# ── fill_turnover ─────────────────────────────────────────────────────────────
+
+def _turnover_args(**kw):
+    return _args(forcerun=False, overwrite=False, **kw)
+
+
+def test_fill_turnover_success_returns_0():
+    """正例: 正常回填 → 0（08-19 之前 main() 返回 None, 调用方无法判定）"""
+    with patch.object(fill_turnover, "myutil"), \
+         patch.object(fill_turnover, "dbutil") as dbutil, \
+         patch.object(fill_turnover, "parse_arguments", return_value=_turnover_args()), \
+         patch.object(fill_turnover, "check_parameters", return_value=True):
+        dbutil.fill_daily_basic_turnover.return_value = 3
+        assert fill_turnover.main() == 0
+        dbutil.fill_daily_basic_turnover.assert_called_once()
+
+
+def test_fill_turnover_invalid_params_returns_1():
+    """反例: 参数校验失败 → 1"""
+    with patch.object(fill_turnover, "myutil"), \
+         patch.object(fill_turnover, "parse_arguments", return_value=_turnover_args()), \
+         patch.object(fill_turnover, "check_parameters", return_value=False):
+        assert fill_turnover.main() == 1
+
+
+def test_fill_turnover_no_candidates_returns_1():
+    """反例: -c 指定的代码不存在 → 1"""
+    with patch.object(fill_turnover, "myutil"), \
+         patch.object(fill_turnover, "dbutil") as dbutil, \
+         patch.object(fill_turnover, "parse_arguments",
+                      return_value=_turnover_args(codes=["NOSUCH"])), \
+         patch.object(fill_turnover, "check_parameters", return_value=True):
+        dbutil.get_candidate_codes.return_value = []
+        assert fill_turnover.main() == 1
+
+
+def test_fill_turnover_fill_raises_returns_1():
+    """反例: 库层抛错 → 1（dbutil 层现已重抛, 不再被吞成「更新 0 行」+ 退出 0）"""
+    with patch.object(fill_turnover, "myutil"), \
+         patch.object(fill_turnover, "dbutil") as dbutil, \
+         patch.object(fill_turnover, "parse_arguments", return_value=_turnover_args()), \
+         patch.object(fill_turnover, "check_parameters", return_value=True):
+        dbutil.fill_daily_basic_turnover.side_effect = RuntimeError("SQL 执行失败")
+        assert fill_turnover.main() == 1
 
 
 # ── update_limit ──────────────────────────────────────────────────────────────

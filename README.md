@@ -212,6 +212,9 @@ python -m etl.update_limit
 # 根据CAPITAL_DETAIL回填DAILY_BASIC的总股本和流通股本(默认补齐T-1日，每天运行)  
 # 由于新股上市会有数据上窗口空缺, 所以回填数据以15天为限来保证股本数据有值  
 python  -m etl.fill_shares -b 20260501 -e 20260515  
+
+# 回填换手率(成交量/流通股本; 默认只补 baostock turn 为空的行, -o 覆盖重算; 须在 fill_shares 之后)
+python -m etl.fill_turnover
 ```
 
 #### 同步申万行业数据  

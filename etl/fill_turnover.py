@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-05-30  Claude  新建: 依据 CAPITAL_DETAIL 回填的流通股本计算换手率
+#   2026-09-10  Claude  补齐 08-19 漏掉的契约改造：拆出 build_parser() 供自省；main() 返回
+#                       退出码并由 sys.exit 传出；注册进 describe_cli / pipeline.yaml
 """
 回填换手率 turnover_rate
   换手率(%) = 当日成交量(股) / 流通股本(股) × 100
@@ -14,13 +16,14 @@
 import argparse
 import duckdb
 import logging
+import sys
 from util import dbutil, myutil
 from util import validators as pv
 
 logger = logging.getLogger("etl.fill_turnover")
 
 
-def parse_arguments() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="A股换手率回填工具 (支持多代码、指定日期、覆盖开关)"
     )
@@ -65,7 +68,11 @@ def parse_arguments() -> argparse.Namespace:
         help='强制运行, 即使当前日期不是交易日'
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    args = build_parser().parse_args()
 
     # 默认日期: 仅指定 -b 时, -e 取今天; 否则两端都默认 T-1
     if args.begin is None:
@@ -91,13 +98,13 @@ def check_parameters(begin: str, end: str, forcerun: bool) -> bool:
     return pv.run(ctx, validators)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
 
     if not check_parameters(args.begin, args.end, args.forcerun):
-        return
+        return 1
 
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
@@ -117,7 +124,7 @@ def main() -> None:
         )
         if not candidate_codes:
             logger.warning("没有找到符合条件的股票代码")
-            return
+            return 1
         codes = [f"{t[0]}.{t[1]}" for t in candidate_codes]
 
     logger.info("=" * 60)
@@ -137,12 +144,14 @@ def main() -> None:
             overwrite=args.overwrite, conn=conn
         )
         logger.info(f"本次共更新换手率 {updated} 行")
+        return 0
     except Exception as e:
         logger.error(f"回填换手率时发生错误：{e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

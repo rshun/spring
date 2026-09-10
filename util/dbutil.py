@@ -5,6 +5,8 @@
 #   2026-06-20  Claude  新增 get_last_trade_date (取严格早于指定日的最近一个交易日)
 #   2026-06-24  Claude  沪深主板 ST 涨跌停 2026-07-06 起由 5% 调整为 10%
 #   2026-08-19  Claude  新增 get_trading_day_status，区分「休市」与「日历无记录」
+#   2026-09-10  Claude  四个 fill_daily_basic_* 在 logger.error 后重抛（此前吞异常导致 CLI 失败仍退出 0）；
+#                       fill_daily_basic_volume_ratio 新增 exchanges 过滤（-x 原本只接受不生效）
 import logging
 import duckdb
 import pandas as pd
@@ -567,12 +569,17 @@ def update_price_limits_by_range(start_date: str, end_date: str,
 
 
 def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
-                                  codes: list[str],
+                                  codes: list[str] | None = None,
+                                  exchanges: list[str] | None = None,
                                   conn: duckdb.DuckDBPyConnection | None = None) -> None:
-    """补齐量比数据（前5交易日均量之比）"""
+    """补齐量比数据（前5交易日均量之比）。
+    params 顺序: [*code_params, *exchange_params, start, end, start, end, *code_params]。
+    """
     code_filter = ""
     update_code_filter = ""
+    exchange_filter = ""
     code_params: list[str] = []
+    exchange_params: list[str] = []
 
     if codes:
         if isinstance(codes, str):
@@ -582,6 +589,13 @@ def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
         code_filter = f"AND d.code IN ({placeholders})"
         update_code_filter = f"AND DAILY_BASIC.code IN ({placeholders})"
         code_params = list(codes)
+
+    # 交易所过滤只放在 valid_daily_data：ratio_result 由它派生，UPDATE 又按 src 关联，
+    # 口径与 fill_daily_basic_shares / turnover / mv 的 i.exchange 过滤一致
+    if exchanges:
+        placeholders = ", ".join(["?"] * len(exchanges))
+        exchange_filter = f"AND i.exchange IN ({placeholders})"
+        exchange_params = list(exchanges)
 
     sql = f"""
         WITH valid_daily_data AS (
@@ -595,6 +609,7 @@ def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
                 i.board NOT IN ('INDEX','BOND','ETF')
                 AND d.tradestatus = 1
                 {code_filter}
+                {exchange_filter}
         ),
 
         calc_ma AS (
@@ -631,8 +646,8 @@ def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
           {update_code_filter};
     """
 
-    # params 顺序: ratio_result 的 date 过滤 × 1组, UPDATE 的 date 过滤 × 1组, 各自带 code_params
-    params: list = [*code_params, start_date, end_date, start_date, end_date, *code_params]
+    # params 顺序: valid_daily_data 的 code/exchange 过滤, ratio_result 的日期, UPDATE 的日期, UPDATE 的 code 过滤
+    params: list = [*code_params, *exchange_params, start_date, end_date, start_date, end_date, *code_params]
 
     need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
@@ -641,7 +656,9 @@ def fill_daily_basic_volume_ratio(start_date: str, end_date: str,
         con.execute(sql, params)
         logger.info("更新成功")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「失败退出 0」（契约 C1）
         logger.error(f"量比更新失败: {e}")
+        raise
     finally:
         if need_close and con is not None:
             con.close()
@@ -1114,6 +1131,7 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
 
     except Exception as e:
         logger.error(f"更新股本数据失败: {e}")
+        raise
     finally:
         if need_close and con is not None:
             con.close()
@@ -1206,7 +1224,7 @@ def fill_daily_basic_turnover(start_date: str, end_date: str,
 
     except Exception as e:
         logger.error(f"更新换手率失败: {e}")
-        return 0
+        raise
     finally:
         if need_close and con is not None:
             con.close()
@@ -1277,6 +1295,7 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
 
     except Exception as e:
         logger.error(f"更新市值数据失败: {e}")
+        raise
     finally:
         if need_close and con is not None:
             con.close()

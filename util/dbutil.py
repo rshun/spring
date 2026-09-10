@@ -7,6 +7,9 @@
 #   2026-08-19  Claude  新增 get_trading_day_status，区分「休市」与「日历无记录」
 #   2026-09-10  Claude  四个 fill_daily_basic_* 在 logger.error 后重抛（此前吞异常导致 CLI 失败仍退出 0）；
 #                       fill_daily_basic_volume_ratio 新增 exchanges 过滤（-x 原本只接受不生效）
+#   2026-09-10  Claude  save_index_to_db / save_daily_to_db / save_base_to_db 写库失败后重抛
+#                       （此前吞异常，fetch_index / import_daily 写库失败仍退出 0）；空表显式
+#                       早退——此前空表触发的 Binder Error 也是被吞掉才「不报错」的
 import logging
 import duckdb
 import pandas as pd
@@ -210,6 +213,9 @@ def _normalize_daily_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
     """写入每日指标数据到 DAILY_BASIC 表，使用 ON CONFLICT 避免覆盖其他来源写入的字段"""
+    if df is None or df.empty:
+        logger.info("无每日指标数据，跳过写入。")
+        return
     try:
         conn.register("temp_daily_basic", df)
         conn.execute("""
@@ -232,6 +238,7 @@ def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
         logger.info(f"[入库] 成功合并 {len(df)} 条每日指标数据")
     except Exception as e:
         logger.error(f"写入 DAILY_BASIC 表失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_daily_basic")
@@ -263,6 +270,9 @@ def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None
 
 def save_daily_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
     """写入股票行情明细数据到 STOCK_DAILY 表"""
+    if df is None or df.empty:
+        logger.info("无行情明细数据，跳过写入。")
+        return
     logger.info(f"正在将 {len(df)} 条行情明细写入数据库...")
     try:
         df = _normalize_daily_df(df)
@@ -290,6 +300,7 @@ def save_daily_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
         logger.info("行情数据入库成功。")
     except Exception as e:
         logger.error(f"写入 STOCK_DAILY 表失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_stock_daily")
@@ -331,6 +342,9 @@ def save_calendar_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection):
 
 def save_index_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
     """将指数行情明细数据写入 STOCK_DAILY 表"""
+    if df is None or df.empty:
+        logger.info("无指数明细数据，跳过写入。")
+        return
     logger.info(f"正在将 {len(df)} 条指数明细写入数据库...")
     try:
         df = _normalize_daily_df(df)
@@ -366,7 +380,9 @@ def save_index_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
         """)
         logger.info("指数数据入库成功。")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"数据库写入失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_index_daily")

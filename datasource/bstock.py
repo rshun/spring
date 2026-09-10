@@ -7,6 +7,9 @@
 #                       query_daily_adjust_factor)；复权因子按当日事件过滤，避免
 #                       同一事件被区间内每个交易日重复带回；网络类错误码(10002xxx)
 #                       归入可重试通道，避免一次抖动丢弃整段已下载区间
+#   2026-09-10  Claude  三个批量取数函数首次登录失败改为抛 BaoQueryError（此前返回空表，CLI 当作
+#                       「无数据」退出 0）；逐股/逐指数路径的 _raise_for_query_error 补传 error_code，
+#                       网络类错误码 10002xxx 进入既有 broken-pipe 重试分支而非静默跳过该股
 import baostock as bs
 import logging
 import pandas as pd
@@ -234,7 +237,7 @@ def fetch_stock_data(begin_date: str, end_date: str, bs_code: str) -> tuple[pd.D
     )
 
     if rs.error_code != "0":
-        _raise_for_query_error(bs_code, rs.error_msg)
+        _raise_for_query_error(bs_code, rs.error_msg, rs.error_code)
 
     data_list = []
     while rs.next():
@@ -458,7 +461,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     lg = bs.login()
     if lg.error_code != "0":
         logger.error(f"[Baostock] 登录失败: {lg.error_msg}")
-        return pd.DataFrame(), pd.DataFrame()
+        raise BaoQueryError(f"[Baostock] 登录失败: {lg.error_msg}")
 
     try:
         logger.info(f"[baostock插件] 开始获取交易明细数据，共计 {total} 只股票...")
@@ -554,7 +557,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
     lg = bs.login()
     if lg.error_code != "0":
         logger.error(f"[Baostock] 登录失败: {lg.error_msg}")
-        return pd.DataFrame()
+        raise BaoQueryError(f"[Baostock] 登录失败: {lg.error_msg}")
 
     try:
         for symbol, market, start_date, end_date, status in stock_list:
@@ -576,7 +579,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
                     )
 
                     if rs_factor.error_code != "0":
-                        _raise_for_query_error(bs_code, rs_factor.error_msg)
+                        _raise_for_query_error(bs_code, rs_factor.error_msg, rs_factor.error_code)
 
                     src_market, src_symbol = bs_code.split('.')
                     std_code = f"{src_symbol}.{src_market.upper()}"
@@ -649,7 +652,7 @@ def fetch_index_data(begin_date: str, end_date: str, bs_code: str) -> pd.DataFra
     )
 
     if rs.error_code != "0":
-        _raise_for_query_error(bs_code, rs.error_msg)
+        _raise_for_query_error(bs_code, rs.error_msg, rs.error_code)
 
     data_list = []
     while rs.next():
@@ -705,7 +708,7 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
     lg = bs.login()
     if lg.error_code != "0":
         logger.error(f"[Baostock] 登录失败: {lg.error_msg}")
-        return pd.DataFrame()
+        raise BaoQueryError(f"[Baostock] 登录失败: {lg.error_msg}")
 
     try:
         logger.info(f"[baostock插件] 开始获取交易明细数据，共计 {total} 只指数...")

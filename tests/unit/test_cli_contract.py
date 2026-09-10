@@ -184,8 +184,8 @@ def test_describe_cli_main_all_returns_0():
 
 @pytest.fixture(scope="module")
 def pipeline() -> dict:
-    path = PROJECT_ROOT / "etl" / "pipeline.yaml"
-    assert path.exists(), "etl/pipeline.yaml 不存在"
+    path = PROJECT_ROOT / "config" / "pipeline.yaml"
+    assert path.exists(), "config/pipeline.yaml 不存在"
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 

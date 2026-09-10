@@ -300,7 +300,7 @@ python -m etl.sync_finance --codes 000001,600519
 | `log/stockdailyYYYYMMDD.log` | 观测 | `util/myutil.py` 单点定义 |
 
 退出码约定：`0` 成功 / `1` 失败 / `2` argparse 用法错误（标准库写死）/ `3` 部分成功（暂未产出）。
-`etl/pipeline.yaml` 声明程序间的依赖顺序，改 ETL 的人顺手维护。
+`config/pipeline.yaml` 声明程序间的依赖顺序，改 ETL 的人顺手维护。
 
 完整设计说明见该仓库的 `docs/mcp_etl_plan.md`。
 

@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-05-29  Claude  新增专业财务报表(cw)同步 ETL 编排
+#   2026-09-11  Claude  run_sync/main() 返回退出码(0成功/1失败)并由 sys.exit 传出：此前
+#                       except Exception 后直接 return，入库失败仍退出 0(契约 C1)
 """
 同步通达信专业财务报表(cw)数据并入库 FINANCE_REPORT。
 
@@ -14,6 +16,7 @@
 """
 import argparse
 import logging
+import sys
 
 from datasource import cw_fields, tdx_offline
 from util import dbutil, myutil
@@ -33,8 +36,8 @@ def _parse_codes(codes: list[str] | None) -> set[str] | None:
 
 
 def run_sync(start: str | None = None, end: str | None = None,
-             codes: list[str] | None = None, download: bool = False) -> None:
-    """编排专业财务报表数据的获取与入库"""
+             codes: list[str] | None = None, download: bool = False) -> int:
+    """编排专业财务报表数据的获取与入库，返回退出码(0成功/1失败)"""
     myutil.configure_etl_logging()
 
     if download:
@@ -64,14 +67,16 @@ def run_sync(start: str | None = None, end: str | None = None,
             logger.warning("未导入任何专业财务数据(无匹配报告期或本地文件缺失)。")
         else:
             logger.info(f"专业财务报表同步完成，共 {periods} 个报告期、{total} 条记录")
+        return 0
     except Exception as e:
         logger.error(f"专业财务报表入库失败: {e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="同步通达信专业财务报表(cw)数据到 FINANCE_REPORT")
     parser.add_argument("--start", help="起始报告期 YYYYMMDD 或 YYYY-MM-DD(默认不限)")
     parser.add_argument("--end", help="结束报告期 YYYYMMDD 或 YYYY-MM-DD(默认不限)")
@@ -82,8 +87,8 @@ def main():
         help="导入前先运行 sync_cw_files 更新本地 cw 文件(默认直接读本地)",
     )
     args = parser.parse_args()
-    run_sync(start=args.start, end=args.end, codes=args.codes, download=args.download)
+    return run_sync(start=args.start, end=args.end, codes=args.codes, download=args.download)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -10,6 +10,16 @@
 #   2026-09-10  Claude  save_index_to_db / save_daily_to_db / save_base_to_db 写库失败后重抛
 #                       （此前吞异常，fetch_index / import_daily 写库失败仍退出 0）；空表显式
 #                       早退——此前空表触发的 Binder Error 也是被吞掉才「不报错」的
+#   2026-09-11  Claude  update_price_limits_by_range 写库失败后重抛（此前吞异常，
+#                       etl/update_limit.py 无条件 return 0，写库失败仍退出 0，违反 C1 契约）
+#   2026-09-11  Claude  涨跌停 days_count 由自然日改为交易日口径：新股「上市前 5 个交易日
+#                       不设涨跌幅」用 date_diff 自然日计数会提前越过 5，上市日落在周中的
+#                       新股（如 300784.SZ 2024-06-07 上市）在第 3 个交易日就被按 20% 限价
+#   2026-09-11  Claude  其余 8 个 save_*_to_db 写库失败后一并重抛，与 09-10 改造的三个对齐
+#                       （契约 C1）；save_shares_to_db / load_stock_info_to_db /
+#                       save_calendar_to_db 补空表早退，避免重抛后空表触发 Binder Error
+#   2026-09-11  Claude  get_trade_dates 改用只读连接：纯 SELECT 却申请写锁，正式库被
+#                       MCP server 占用时 lday / tdx 取数链在第一步就失败
 import logging
 import duckdb
 import pandas as pd
@@ -248,6 +258,9 @@ def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
 def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
     """将股本数据(total_shares, float_shares)写入 DAILY_BASIC 表，仅更新股本字段"""
+    if df is None or df.empty:
+        logger.info("无股本数据，跳过写入。")
+        return
     try:
         conn.register("temp_shares", df)
         conn.execute("""
@@ -260,7 +273,9 @@ def save_shares_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None
         """)
         logger.info(f"[入库] 成功合并 {len(df)} 条股本数据到 DAILY_BASIC")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入股本数据到 DAILY_BASIC 失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_shares")
@@ -310,6 +325,9 @@ def save_daily_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
 def save_calendar_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection):
     """将交易日数据写入 trade_cal 表"""
+    if df is None or df.empty:
+        logger.info("无交易日数据，跳过写入。")
+        return
     logger.info(f"正在将 {len(df)} 条日历记录写入数据库...")
 
     temp_name = "temp_trade_cal"
@@ -392,6 +410,9 @@ def save_index_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
 
 def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:
     """将股票基本信息 DataFrame 批量 UPSERT 到 stock_info 表"""
+    if df is None or df.empty:
+        logger.info("无股票基本信息，跳过写入。")
+        return
     logger.info("\n--- 数据库加载(L)开始 ---")
     logger.info(f"准备将 {len(df)} 条记录 'UPSERT' 到 'stock_info' 表中...")
 
@@ -439,11 +460,14 @@ def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
         logger.info(f"  [*] 验证: 'stock_info' 表现在共有 {count_result[0] if count_result else 0} 条记录。")
 
     except duckdb.CatalogException as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入 stock_info 失败: {e}")
         logger.error("  错误提示：很可能是 'stock_info' 表不存在。")
         logger.error("  请确认 'init_db.py' 已经成功运行。")
+        raise
     except Exception as e:
         logger.error(f"写入 stock_info 失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_stock_info")
@@ -482,7 +506,26 @@ def update_price_limits_by_range(start_date: str, end_date: str,
 
         # 0.000001 是浮点加法补偿，确保恰好在临界值时 ROUND 向上进位
         calc_sql = f"""
-            WITH base_data AS (
+            WITH early_trade_days AS (
+                -- 上市后前 5 个交易日的序号。必须按交易日数，不能用自然日：
+                -- 上市日落在周中时自然日会提前越过 5，把仍在无涨跌幅限制期内的
+                -- 新股按 10%/20% 限价（如 300784.SZ 2024-06-07 上市，第 3 个交易日
+                -- 2024-06-12 的自然日计数已是 6）。
+                -- 60 个自然日足以覆盖 5 个交易日(含春节长假)，用它把日历 join 限定在
+                -- 小范围内，避免 STOCK_INFO × TRADE_CAL 全连接。
+                SELECT code, cal_date, tn FROM (
+                    SELECT i.code, c.cal_date,
+                           ROW_NUMBER() OVER (PARTITION BY i.code ORDER BY c.cal_date) AS tn
+                    FROM STOCK_INFO i
+                    JOIN TRADE_CAL c
+                      ON c.is_open = 1
+                     AND c.cal_date >= i.list_date
+                     AND c.cal_date <= i.list_date + INTERVAL 60 DAY
+                    WHERE i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
+                      AND i.list_date IS NOT NULL
+                ) WHERE tn <= 5
+            ),
+            base_data AS (
                 SELECT
                     d.code,
                     d.date,
@@ -490,10 +533,12 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                     d.pre_close,
                     i.board,
                     COALESCE(b.is_st, 0) as is_st,
-                    date_diff('day', i.list_date, d.date) + 1 as days_count
+                    -- 99 = 已过前 5 个交易日的哨兵值，下游只判 <= 5 与 = 1
+                    COALESCE(e.tn, 99) as days_count
                 FROM STOCK_DAILY d
                 JOIN STOCK_INFO i ON d.code = i.code
                 LEFT JOIN DAILY_BASIC b ON d.code = b.code AND d.date = b.trade_date
+                LEFT JOIN early_trade_days e ON e.code = i.code AND e.cal_date = d.date
                 WHERE d.date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                   AND d.tradestatus = 1
                   AND d.pre_close != -1
@@ -578,7 +623,9 @@ def update_price_limits_by_range(start_date: str, end_date: str,
         logger.info("批量更新完成。")
 
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"涨跌停价批量更新失败: {e}")
+        raise
     finally:
         if con:
             con.close()
@@ -713,7 +760,9 @@ def save_margin_summary_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条融资融券汇总数据")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入 MARGIN_SUMMARY_DAILY 表失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_margin_summary")
@@ -767,7 +816,9 @@ def save_margin_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) 
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条融资融券明细数据")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入 MARGIN_DETAIL_DAILY 表失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_margin_detail")
@@ -808,7 +859,9 @@ def save_capital_detail_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条股本变迁数据")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入 CAPITAL_DETAIL 表失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_capital_detail")
@@ -848,7 +901,9 @@ def save_finance_report_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection)
         """)
         logger.info(f"[入库] 成功写入 {len(df)} 条专业财务报表数据")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入 FINANCE_REPORT 表失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_finance_report")
@@ -885,7 +940,9 @@ def get_trade_dates(start_date: str, end_date: str) -> list[str]:
     """查询 [start_date, end_date] 内的交易日列表，返回 YYYYMMDD 格式"""
     conn: duckdb.DuckDBPyConnection | None = None
     try:
-        conn = get_connection(is_read_only=False)
+        # 只读：本函数是纯 SELECT，用写连接会去抢 DuckDB 写锁，正式库被 MCP server
+        # 等进程占用时，lday / tdx 的批量取数在第一步就会失败
+        conn = get_connection()
         rows = conn.execute(
             "SELECT cal_date FROM TRADE_CAL WHERE is_open = 1 "
             "AND cal_date BETWEEN ? AND ? ORDER BY cal_date",
@@ -913,8 +970,10 @@ def save_stock_industry_clf_hist_sw_raw_to_db(
     required_cols = ['symbol', 'start_date', 'industry_code', 'update_time']
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
+        # 缺列是数据源契约被破坏，必须抛出：只 logger.error 后 return 会让
+        # etl/sync_industry.py 一条没写也退出 0（契约 C1）
         logger.error(f"写入 STOCK_INDUSTRY_CLF_HIST_SW_RAW 失败，缺少字段: {missing}")
-        return
+        raise ValueError(f"写入 STOCK_INDUSTRY_CLF_HIST_SW_RAW 失败，缺少字段: {missing}")
 
     try:
         data = df[required_cols].copy()
@@ -937,7 +996,9 @@ def save_stock_industry_clf_hist_sw_raw_to_db(
         count = result[0] if result else 0
         logger.info(f"股票申万行业历史原始数据写入成功，当前共 {count} 条记录。")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入 STOCK_INDUSTRY_CLF_HIST_SW_RAW 失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_stock_industry_clf_hist_sw_raw")
@@ -958,8 +1019,10 @@ def save_sw_industry_hierarchy_to_db(
     required_cols = ['sw_version', 'industry_code', 'industry_name', 'sw_level', 'parent_code']
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
+        # 缺列是数据源契约被破坏，必须抛出：只 logger.error 后 return 会让
+        # etl/sync_industry.py 一条没写也退出 0（契约 C1）
         logger.error(f"写入 SW_INDUSTRY 失败，缺少字段: {missing}")
-        return
+        raise ValueError(f"写入 SW_INDUSTRY 失败，缺少字段: {missing}")
 
     try:
         data = df[required_cols].copy()
@@ -989,7 +1052,9 @@ def save_sw_industry_hierarchy_to_db(
         count = result[0] if result else 0
         logger.info(f"申万行业层级定义写入成功，当前共 {count} 条记录。")
     except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码 1，吞掉就是「写库失败退出 0」（契约 C1）
         logger.error(f"写入 SW_INDUSTRY 失败: {e}")
+        raise
     finally:
         try:
             conn.unregister("temp_sw_industry_hierarchy")

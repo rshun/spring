@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新增 get_trading_day_status 的正反例（休市 / 日历无记录 / 查询失败）
+#   2026-09-11  Claude  新增 get_trade_dates 必须用只读连接的断言
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -157,3 +158,15 @@ def test_check_is_trading_day_stays_backward_compatible(mem_db):
         assert check_is_trading_day("2023-01-03") is True   # open
         assert check_is_trading_day("2023-01-01") is False  # closed
         assert check_is_trading_day("2099-01-01") is False  # unknown
+
+
+def test_get_trade_dates_uses_readonly_connection(mem_db):
+    """反例(本次修复的回归点): 本函数是纯 SELECT，不得申请写连接。
+
+    用写连接会去抢 DuckDB 写锁，正式库被 MCP server 等进程占用时，
+    lday / tdx 的批量取数在第一步 get_trade_dates 就直接失败。
+    """
+    insert_trade_cal(mem_db, "2023-01-03", 1)
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)) as gc:
+        get_trade_dates("2023-01-03", "2023-01-03")
+    gc.assert_called_once_with()          # 无参 = 默认 is_read_only=True

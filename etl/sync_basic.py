@@ -1,7 +1,11 @@
+# 修改记录:
+#   2026-09-11  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出：此前 except
+#                       Exception 后直接 return，写库/取数失败仍退出 0(契约 C1)
 """A股基本信息入库工具 (支持多源, 指定交易所)"""
 import argparse
 import duckdb
 import logging
+import sys
 from util import myutil, dbutil
 from util import validators as pv
 
@@ -47,13 +51,13 @@ def check_parameters(forcerun: bool) -> bool:
     return pv.run(ctx, validators)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
 
     if not check_parameters(args.forcerun):
-        return
+        return 1
 
     logger.info("=" * 60)
     logger.info("获取股票基本信息任务启动")
@@ -67,7 +71,7 @@ def main() -> None:
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_stock_info'):
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_stock_info' 方法。")
-            return
+            return 1
 
         stock_info, basic_df = module.fetch_stock_info(args.exchanges)
 
@@ -81,14 +85,18 @@ def main() -> None:
         else:
             logger.warning("未获取到股票股本数据，跳过数据库写入。")
 
+        return 0
+
     except ImportError as e:
         logger.error(f"无法导入模块 {args.source}，请检查文件名是否存在。{e}")
+        return 1
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

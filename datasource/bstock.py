@@ -10,6 +10,9 @@
 #   2026-09-10  Claude  三个批量取数函数首次登录失败改为抛 BaoQueryError（此前返回空表，CLI 当作
 #                       「无数据」退出 0）；逐股/逐指数路径的 _raise_for_query_error 补传 error_code，
 #                       网络类错误码 10002xxx 进入既有 broken-pipe 重试分支而非静默跳过该股
+#   2026-09-11  Claude  三个批量取数函数新增「全批失败」判定：逐只失败仍只跳过不中止（保持
+#                       既有语义），但全部被处理的标的都失败时抛 BaoQueryError——此前返回
+#                       空表，import_daily / fetch_index 只打 warning 就退出 0
 import baostock as bs
 import logging
 import pandas as pd
@@ -84,6 +87,21 @@ def _is_network_error(error_code: str | None) -> bool:
     因为一次抖动直接中止整段区间，把已下载的交易日全部丢弃。
     """
     return str(error_code or "").startswith("10002")
+
+
+def _summarize_batch_failures(failed: list[str], processed: int, what: str) -> None:
+    """批量取数收尾：逐只失败只跳过(既有语义)，但全批失败必须抛错。
+
+    全部标的都失败却返回空表时，调用方(import_daily / fetch_index / adjust)只会打一句
+    「未获取到数据，跳过写入」然后退出 0，把整天的采集失败报成成功（契约 C1）。
+    """
+    if not failed:
+        return
+    logger.warning(f"[Baostock] {what}: {len(failed)}/{processed} 只失败，"
+                   f"前 10 只: {failed[:10]}")
+    if len(failed) >= processed:
+        raise BaoQueryError(
+            f"[Baostock] {what}: 全部 {processed} 只标的取数均失败，视为本次采集失败")
 
 
 def _raise_for_query_error(bs_code: str, error_msg: str | None,
@@ -452,6 +470,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     """
     total = len(stock_list)
     processed = 0
+    failed: list[str] = []
     heartbeat = _get_progress_heartbeat_seconds()
     last_progress_at = time.monotonic()
     all_daily_data: list[pd.DataFrame] = []
@@ -497,6 +516,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
                         continue
 
                     logger.warning(f"[Baostock] 会话恢复失败，跳过 {bs_code}")
+                    failed.append(bs_code)
                     break
 
                 except BaoMissingDataError as e:
@@ -518,15 +538,19 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
 
                     if isinstance(e, BaoQueryError):
                         logger.warning(f"[Baostock] 获取日线失败({bs_code}): {e}")
+                        failed.append(bs_code)
                         break
 
                     logger.warning(f"获取失败: {symbol}.{market.upper()} | 原因: {e}")
+                    failed.append(bs_code)
                     break
 
             now = time.monotonic()
             if processed % 100 == 0 or now - last_progress_at >= heartbeat:
                 logger.info(f"   已处理: {processed}/{total}")
                 last_progress_at = now
+
+        _summarize_batch_failures(failed, processed, "逐股日线")
 
         final_daily = pd.concat(all_daily_data, ignore_index=True) if all_daily_data else pd.DataFrame()
         final_basic = pd.concat(all_basic_data, ignore_index=True) if all_basic_data else pd.DataFrame()
@@ -550,6 +574,8 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
     all_dfs: list[pd.DataFrame] = []
     total_stocks = len(stock_list)
     count = 0
+    processed = 0
+    failed: list[str] = []
     heartbeat = _get_progress_heartbeat_seconds()
     last_progress_at = time.monotonic()
 
@@ -568,6 +594,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
                 continue
             if status == "D":
                 continue
+            processed += 1
             bs_code = f"{market.lower()}.{symbol}"
 
             for attempt in range(_get_max_fetch_attempts()):
@@ -608,6 +635,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
                         continue
 
                     logger.warning(f"[Baostock] 会话恢复失败，跳过 {bs_code}")
+                    failed.append(bs_code)
                     break
 
                 except Exception as e:
@@ -617,11 +645,8 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
                         time.sleep(_get_retry_delay_pipe())
                         continue
 
-                    if isinstance(e, BaoQueryError):
-                        logger.warning(f"[Baostock] 获取复权因子失败({bs_code}): {e}")
-                        break
-
                     logger.warning(f"[Baostock] 获取复权因子失败({bs_code}): {e}")
+                    failed.append(bs_code)
                     break
 
             now = time.monotonic()
@@ -629,6 +654,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
                 logger.info(f"   已处理: {count}/{total_stocks}")
                 last_progress_at = now
 
+        _summarize_batch_failures(failed, processed, "逐股复权因子")
         return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
     finally:
         bs.logout()
@@ -700,6 +726,7 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
     """
     total = len(index_list)
     processed = 0
+    failed: list[str] = []
     heartbeat = _get_progress_heartbeat_seconds()
     last_progress_at = time.monotonic()
     all_daily_data: list[pd.DataFrame] = []
@@ -742,6 +769,7 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
                         continue
 
                     logger.warning(f"[Baostock] 会话恢复失败，跳过 {bs_code}")
+                    failed.append(bs_code)
                     break
 
                 except Exception as e:
@@ -753,15 +781,19 @@ def fetch_batch_index(index_list: list[tuple]) -> pd.DataFrame:
 
                     if isinstance(e, BaoQueryError):
                         logger.warning(f"[Baostock] 获取指数失败({bs_code}): {e}")
+                        failed.append(bs_code)
                         break
 
                     logger.warning(f"获取失败: {symbol}.{market.upper()} | 原因: {e}")
+                    failed.append(bs_code)
                     break
 
             now = time.monotonic()
             if processed % 100 == 0 or now - last_progress_at >= heartbeat:
                 logger.info(f"   已处理: {processed}/{total}")
                 last_progress_at = now
+
+        _summarize_batch_failures(failed, processed, "逐指数日线")
 
         final_daily = pd.concat(all_daily_data, ignore_index=True) if all_daily_data else pd.DataFrame()
 

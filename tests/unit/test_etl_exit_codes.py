@@ -2,6 +2,9 @@
 #   2026-08-19  Claude  新增：验证 6 个 ETL 的 main() 退出码契约(0成功/1失败)
 #   2026-09-10  Claude  纳入 fill_turnover（第 7 个，此前 main() 返回 None 且无 sys.exit）；
 #                       新增三个 fill_* 的「库层抛错 → 1」用例
+#   2026-09-11  Claude  纳入 trade_cal / sync_basic / sync_margin / sync_industry /
+#                       sync_finance / init_db（此前 main() 吞异常后 return None，把库层的
+#                       重抛重新吞掉，写库失败仍退出 0）
 """
 ETL 退出码契约测试
 
@@ -20,10 +23,12 @@ import pandas as pd
 import pytest
 
 from etl import (adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
-                 import_daily, update_limit)
+                 import_daily, init_db, sync_basic, sync_finance, sync_industry,
+                 sync_margin, trade_cal, update_limit)
 
 ETL_MODULES = [adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
-               import_daily, update_limit]
+               import_daily, update_limit,
+               trade_cal, sync_basic, sync_margin, sync_industry, sync_finance]
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────
@@ -420,3 +425,248 @@ def test_fill_shares_fill_raises_returns_1():
          patch.object(fill_shares, "check_parameters", return_value=True):
         dbutil.fill_daily_basic_shares.side_effect = RuntimeError("SQL 执行失败")
         assert fill_shares.main() == 1
+
+
+# ── trade_cal ─────────────────────────────────────────────────────────────────
+
+def test_trade_cal_success_returns_0():
+    """正例: 取到日历并写库 → 0"""
+    with patch.object(trade_cal, "myutil") as myutil, \
+         patch.object(trade_cal, "dbutil") as dbutil, \
+         patch.object(trade_cal, "parse_arguments", return_value=_args(source="bstock")), \
+         patch.object(trade_cal, "check_parameters", return_value=True):
+        myutil.import_source_module.return_value = _source("fetch_sync_calendar", _df())
+        assert trade_cal.main() == 0
+        dbutil.save_calendar_to_db.assert_called_once()
+
+
+def test_trade_cal_save_raises_returns_1():
+    """反例(本次修复的回归点): save_calendar_to_db 重抛写库异常时，不得再被 main() 吞成 0"""
+    with patch.object(trade_cal, "myutil") as myutil, \
+         patch.object(trade_cal, "dbutil") as dbutil, \
+         patch.object(trade_cal, "parse_arguments", return_value=_args(source="bstock")), \
+         patch.object(trade_cal, "check_parameters", return_value=True):
+        myutil.import_source_module.return_value = _source("fetch_sync_calendar", _df())
+        dbutil.save_calendar_to_db.side_effect = RuntimeError("写 TRADE_CAL 失败")
+        assert trade_cal.main() == 1
+
+
+def test_trade_cal_invalid_params_returns_1():
+    """反例: 参数校验不过 → 1"""
+    with patch.object(trade_cal, "myutil"), \
+         patch.object(trade_cal, "parse_arguments", return_value=_args(source="bstock")), \
+         patch.object(trade_cal, "check_parameters", return_value=False):
+        assert trade_cal.main() == 1
+
+
+def test_trade_cal_source_missing_method_returns_1():
+    """反例: 数据源模块缺 fetch_sync_calendar → 1"""
+    with patch.object(trade_cal, "myutil") as myutil, \
+         patch.object(trade_cal, "dbutil"), \
+         patch.object(trade_cal, "parse_arguments", return_value=_args(source="bstock")), \
+         patch.object(trade_cal, "check_parameters", return_value=True):
+        myutil.import_source_module.return_value = MagicMock(spec=[])
+        assert trade_cal.main() == 1
+
+
+# ── sync_basic ────────────────────────────────────────────────────────────────
+
+def test_sync_basic_success_returns_0():
+    """正例: 取到基本信息并写库 → 0"""
+    with patch.object(sync_basic, "myutil") as myutil, \
+         patch.object(sync_basic, "dbutil") as dbutil, \
+         patch.object(sync_basic, "parse_arguments",
+                      return_value=_args(source="bstock", forcerun=False)), \
+         patch.object(sync_basic, "check_parameters", return_value=True):
+        myutil.import_source_module.return_value = _source("fetch_stock_info", (_df(), _df()))
+        assert sync_basic.main() == 0
+        dbutil.load_stock_info_to_db.assert_called_once()
+
+
+def test_sync_basic_save_raises_returns_1():
+    """反例(本次修复的回归点): 写 STOCK_INFO 抛异常 → 1"""
+    with patch.object(sync_basic, "myutil") as myutil, \
+         patch.object(sync_basic, "dbutil") as dbutil, \
+         patch.object(sync_basic, "parse_arguments",
+                      return_value=_args(source="bstock", forcerun=False)), \
+         patch.object(sync_basic, "check_parameters", return_value=True):
+        myutil.import_source_module.return_value = _source("fetch_stock_info", (_df(), _df()))
+        dbutil.load_stock_info_to_db.side_effect = RuntimeError("写 STOCK_INFO 失败")
+        assert sync_basic.main() == 1
+
+
+def test_sync_basic_invalid_params_returns_1():
+    """反例: 非交易日且未加 -f → 1"""
+    with patch.object(sync_basic, "myutil"), \
+         patch.object(sync_basic, "parse_arguments",
+                      return_value=_args(source="bstock", forcerun=False)), \
+         patch.object(sync_basic, "check_parameters", return_value=False):
+        assert sync_basic.main() == 1
+
+
+# ── sync_margin ───────────────────────────────────────────────────────────────
+
+def _margin_args(**kwargs) -> argparse.Namespace:
+    base = {"begin": "20260817", "end": "20260817", "exchanges": ["all"],
+            "only": "summary", "source": "akstock", "forcerun": False, "download": False}
+    base.update(kwargs)
+    return argparse.Namespace(**base)
+
+
+def test_sync_margin_success_returns_0():
+    """正例: 取到汇总并写库 → 0"""
+    with patch.object(sync_margin, "myutil") as myutil, \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "parse_arguments", return_value=_margin_args()), \
+         patch.object(sync_margin, "check_parameters", return_value=True):
+        dbutil.get_trade_dates.return_value = ["20260817"]
+        myutil.import_source_module.return_value = _source(
+            "fetch_margin_summary", pd.DataFrame({"exchange_code": ["SH", "SZ"]}))
+        assert sync_margin.main() == 0
+        dbutil.save_margin_summary_to_db.assert_called_once()
+
+
+def test_sync_margin_save_raises_returns_1():
+    """反例(本次修复的回归点): 写 MARGIN_SUMMARY_DAILY 抛异常 → 1"""
+    with patch.object(sync_margin, "myutil") as myutil, \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "parse_arguments", return_value=_margin_args()), \
+         patch.object(sync_margin, "check_parameters", return_value=True):
+        dbutil.get_trade_dates.return_value = ["20260817"]
+        myutil.import_source_module.return_value = _source(
+            "fetch_margin_summary", pd.DataFrame({"exchange_code": ["SH", "SZ"]}))
+        dbutil.save_margin_summary_to_db.side_effect = RuntimeError("写融资融券失败")
+        assert sync_margin.main() == 1
+
+
+def test_sync_margin_no_trade_dates_returns_1():
+    """反例: 区间内无交易日 → 1"""
+    with patch.object(sync_margin, "myutil"), \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "parse_arguments", return_value=_margin_args()), \
+         patch.object(sync_margin, "check_parameters", return_value=True):
+        dbutil.get_trade_dates.return_value = []
+        assert sync_margin.main() == 1
+
+
+def test_sync_margin_no_last_trade_date_returns_1():
+    """反例: 未显式给日期且交易日历为空 → 1"""
+    with patch.object(sync_margin, "myutil"), \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "parse_arguments",
+                      return_value=_margin_args(begin=None, end=None)):
+        dbutil.get_last_trade_date.return_value = None
+        assert sync_margin.main() == 1
+
+
+# ── sync_industry ─────────────────────────────────────────────────────────────
+
+def _industry_args(**kwargs) -> argparse.Namespace:
+    base = {"source": "akstock", "input": None, "version": "2021",
+            "download": False, "forcerun": False}
+    base.update(kwargs)
+    return argparse.Namespace(**base)
+
+
+def test_sync_industry_success_returns_0():
+    """正例: 取到行业历史并写库 → 0"""
+    with patch.object(sync_industry, "myutil") as myutil, \
+         patch.object(sync_industry, "dbutil") as dbutil, \
+         patch.object(sync_industry, "parse_arguments", return_value=_industry_args()), \
+         patch.object(sync_industry, "check_parameters", return_value=True):
+        myutil.import_source_module.return_value = _source(
+            "fetch_stock_industry_clf_hist_sw", _df())
+        assert sync_industry.main() == 0
+        dbutil.save_stock_industry_clf_hist_sw_raw_to_db.assert_called_once()
+
+
+def test_sync_industry_save_raises_returns_1():
+    """反例(本次修复的回归点): 写 STOCK_INDUSTRY_CLF_HIST_SW_RAW 抛异常 → 1"""
+    with patch.object(sync_industry, "myutil") as myutil, \
+         patch.object(sync_industry, "dbutil") as dbutil, \
+         patch.object(sync_industry, "parse_arguments", return_value=_industry_args()), \
+         patch.object(sync_industry, "check_parameters", return_value=True):
+        myutil.import_source_module.return_value = _source(
+            "fetch_stock_industry_clf_hist_sw", _df())
+        dbutil.save_stock_industry_clf_hist_sw_raw_to_db.side_effect = RuntimeError("写库失败")
+        assert sync_industry.main() == 1
+
+
+def test_sync_industry_invalid_params_returns_1():
+    """反例: 非交易日且未加 -f → 1"""
+    with patch.object(sync_industry, "myutil"), \
+         patch.object(sync_industry, "parse_arguments", return_value=_industry_args()), \
+         patch.object(sync_industry, "check_parameters", return_value=False):
+        assert sync_industry.main() == 1
+
+
+# ── sync_finance ──────────────────────────────────────────────────────────────
+
+def test_sync_finance_success_returns_0():
+    """正例: 遍历报告期并写库 → 0"""
+    with patch.object(sync_finance, "myutil"), \
+         patch.object(sync_finance, "dbutil") as dbutil, \
+         patch.object(sync_finance, "tdx_offline") as tdx_offline, \
+         patch.object(sync_finance, "cw_fields") as cw_fields:
+        tdx_offline.iter_cw_reports.return_value = [("20240331", _df())]
+        cw_fields.cw_df_to_finance_report.return_value = _df()
+        assert sync_finance.run_sync() == 0
+        dbutil.save_finance_report_to_db.assert_called_once()
+
+
+def test_sync_finance_save_raises_returns_1():
+    """反例(本次修复的回归点): 写 FINANCE_REPORT 抛异常 → 1"""
+    with patch.object(sync_finance, "myutil"), \
+         patch.object(sync_finance, "dbutil") as dbutil, \
+         patch.object(sync_finance, "tdx_offline") as tdx_offline, \
+         patch.object(sync_finance, "cw_fields") as cw_fields:
+        tdx_offline.iter_cw_reports.return_value = [("20240331", _df())]
+        cw_fields.cw_df_to_finance_report.return_value = _df()
+        dbutil.save_finance_report_to_db.side_effect = RuntimeError("写 FINANCE_REPORT 失败")
+        assert sync_finance.run_sync() == 1
+
+
+def test_sync_finance_no_reports_returns_0():
+    """正例: 本地无任何报告期是合法结果(安全降级), 不算失败 → 0"""
+    with patch.object(sync_finance, "myutil"), \
+         patch.object(sync_finance, "dbutil") as dbutil, \
+         patch.object(sync_finance, "tdx_offline") as tdx_offline:
+        tdx_offline.iter_cw_reports.return_value = []
+        assert sync_finance.run_sync() == 0
+        dbutil.save_finance_report_to_db.assert_not_called()
+
+
+# ── init_db ───────────────────────────────────────────────────────────────────
+
+def test_init_db_success_returns_0():
+    """正例: 建表成功 → 0"""
+    with patch.object(init_db, "myutil") as myutil, \
+         patch.object(init_db, "dbutil"):
+        myutil.get_sql_file.return_value = MagicMock(
+            read_text=MagicMock(return_value="CREATE TABLE t(i INT);"))
+        assert init_db.create_database_schema() == 0
+
+
+def test_init_db_execute_raises_returns_1():
+    """反例(本次修复的回归点): 建表 SQL 执行失败 → 1"""
+    with patch.object(init_db, "myutil") as myutil, \
+         patch.object(init_db, "dbutil") as dbutil:
+        myutil.get_sql_file.return_value = MagicMock(
+            read_text=MagicMock(return_value="CREATE TABLE t(i INT);"))
+        dbutil.get_connection.return_value.execute.side_effect = RuntimeError("建表失败")
+        assert init_db.create_database_schema() == 1
+
+
+def test_init_db_schema_file_missing_returns_1():
+    """反例: 找不到 sql/schema.sql → 1"""
+    with patch.object(init_db, "myutil") as myutil, \
+         patch.object(init_db, "dbutil"):
+        myutil.get_sql_file.side_effect = FileNotFoundError("找不到 schema.sql")
+        assert init_db.create_database_schema() == 1
+
+
+def test_init_db_exit_code_propagated():
+    """正例: __main__ 块必须用 sys.exit(...) 传出退出码(init_db 入口名不是 main)"""
+    source = Path(init_db.__file__).read_text(encoding="utf-8")
+    assert "sys.exit(create_database_schema())" in source
+    assert "\n    create_database_schema()\n" not in source

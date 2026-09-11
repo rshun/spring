@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-06-12  Claude  新增 cw 文件按报告期截断 md5 校验的正反测试
+#   2026-09-11  Claude  新增 md5 更新原子替换的正反例（下载失败不得丢本地 zip）
 """tdx_offline cw 文件同步窗口逻辑测试(无网络)
 
 背景: 通达信服务器每天批量重打包大部分历史 gpcw zip, md5 滚动变化,
@@ -196,3 +197,36 @@ def test_fetch_gbbq_preserves_raw_csv_but_returns_normalized_frame(
     assert saved.loc[0, "allotment_share"] == 1.0
     assert got.loc[0, "bonus_share"] == 1.0
     assert got.loc[0, "allotment_share"] == 0.0
+
+
+# ── 2026-09-11: md5 更新必须原子替换，下载失败不得丢本地文件 ────────────────────
+
+class _FailingDownloader:
+    """模拟下载失败的分片下载器"""
+    def run(self, url, name):
+        raise RuntimeError("分片下载失败")
+
+
+def test_md5_refresh_keeps_local_file_when_download_fails(cw_env, tmp_path, monkeypatch):
+    """反例(本次修复的回归点): md5 不一致触发重下，但下载失败时本地旧 zip 必须还在。
+
+    此前是先 zip_path.unlink() 再下载，失败后只 logger.error + continue，
+    本地文件已经没了；若服务器同时下线该报告期就永久丢失。
+    """
+    monkeypatch.setattr(tdx_offline, "ManyThreadDownload", _FailingDownloader)
+    target = tmp_path / "cw" / "gpcw20260331.zip"
+    before = target.read_bytes()
+
+    tdx_offline.sync_cw_files()          # 不得抛错：下载失败只跳过本次更新
+
+    assert target.exists()
+    assert target.read_bytes() == before          # 旧文件原样保留
+    assert not list((tmp_path / "cw").glob("*.part"))   # 残留的临时文件已清理
+
+
+def test_md5_refresh_replaces_file_on_success(cw_env, tmp_path):
+    """正例: 下载成功时新内容必须落到正式文件名上(而不是留在 .part)"""
+    tdx_offline.sync_cw_files()
+    target = tmp_path / "cw" / "gpcw20260331.zip"
+    assert target.read_bytes() == b"downloaded"
+    assert not list((tmp_path / "cw").glob("*.part"))

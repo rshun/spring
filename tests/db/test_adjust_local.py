@@ -6,6 +6,8 @@
 #                       BUG-012① 未来事件清除、BUG-015 无事件股防重置
 #   2026-09-09  Claude  code review 修复回归：LOCAL 空帧不退 legacy、快照 requested
 #                       忽略 9 开头/退市股的正反例
+#   2026-09-11  Claude  BUG-015 防重置失效端到端回归：稠密表首行为 1.0 时存量因子
+#                       不得被抹平（无 STATE 的股票）
 """etl/adjust.py 本地自算（local）源链路测试：事件表路由、稠密化开关、不变量。"""
 from unittest.mock import patch
 
@@ -534,3 +536,27 @@ def test_snapshot_requested_still_warns_for_real_unverified_stock(mem_db, caplog
     assert "600000.SH" in caplog.text
     assert _table_count(mem_db, "ADJ_FACTOR", "600000.SH") == 0
     assert _table_count(mem_db, "ADJ_FACTOR", "000681.SZ") == 4
+
+
+# ── 2026-09-11 BUG-015 防重置失效：端到端回归 ─────────────────────────────────
+
+def test_bug015_guard_when_dense_history_starts_at_one(mem_db, caplog):
+    """反例(本次修复的回归点，端到端): 稠密表首行是除权前的 1.0、后续才非 1.0。
+
+    这是真实稠密表的普遍形态（从上市日补齐，首个事件之前恒为 1.0）。此前守卫只看
+    首行，对这种形态一律放行，整段历史会被按 base=1.0 重写。
+    """
+    _insert_dense_row(mem_db, "000022.SZ", "2018-12-20", 1.0)
+    _insert_dense_row(mem_db, "000022.SZ", "2018-12-25", 3.529141)
+    _insert_trade_cals(mem_db, ["2018-12-20", "2018-12-25", "2026-08-03", "2026-08-04"])
+    stock_list = [("000022", "SZ", "2026-08-03", "2026-08-04", "L")]
+
+    with caplog.at_level("WARNING"):
+        process_and_save_adjust_factors(
+            _local_fetch(mem_db, stock_list), stock_list, mem_db,
+            event_table="ADJ_FACTOR_LOCAL", densify=True,
+        )
+
+    rows = {str(r[0]): r[1] for r in _dense_rows(mem_db, "000022.SZ")}
+    assert rows == {"2018-12-20": pytest.approx(1.0),
+                    "2018-12-25": pytest.approx(3.529141)}

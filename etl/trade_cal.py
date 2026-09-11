@@ -1,7 +1,12 @@
+# 修改记录:
+#   2026-09-11  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出：此前 except
+#                       Exception 后直接 return，把 save_calendar_to_db 的重抛重新吞掉，
+#                       TRADE_CAL 写库失败仍退出 0(契约 C1)
 """功能: 获取交易日数据,写入TRADE_CAL 表 (支持多源)"""
 import argparse
 import duckdb
 import logging
+import sys
 from datetime import datetime
 from util import dbutil, myutil
 from util import validators as pv
@@ -50,12 +55,12 @@ def check_parameters(begin: str, end: str) -> bool:
     return pv.run(ctx, validators)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
 
     args = parse_arguments()
     if not check_parameters(args.begin, args.end):
-        return
+        return 1
 
     start_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
@@ -74,7 +79,7 @@ def main() -> None:
         module = myutil.import_source_module(args.source)
         if not hasattr(module, 'fetch_sync_calendar'):
             logger.error(f"模块 '{args.source}' 中没有定义 'fetch_sync_calendar' 方法。")
-            return
+            return 1
 
         cal = module.fetch_sync_calendar(start_date, end_date)
 
@@ -83,14 +88,18 @@ def main() -> None:
         else:
             logger.warning("未获取到任何交易日数据，跳过数据库写入。")
 
+        return 0
+
     except ImportError as e:
         logger.error(f"无法导入模块 {args.source}，请检查文件名是否存在。{e}")
+        return 1
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

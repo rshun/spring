@@ -7,6 +7,8 @@
 #                       BUG-011 跳过统计、BUG-012① 未来事件、BUG-017 配股价缺失用例
 #   2026-09-09  Claude  事件日恰为日线首日 → 历史覆盖外(非缺口)的正反例（600018.SH 换股上市复现）
 #   2026-09-10  Claude  移除 adjust --by-date 相关用例（bstock 复权因子源废弃，开关已删）
+#   2026-09-11  Claude  BUG-015 防重置失效回归：守卫只看首行、基准取最早行而非最近行的
+#                       正反例；补 STATE 已存在时走撤销语义(不受守卫影响)的正例
 """datasource/local_xdr.py 纯函数与路由开关测试；不连接网络与生产库。"""
 import logging
 from unittest.mock import patch
@@ -557,3 +559,90 @@ def test_stage_timeout_stops_heartbeat_and_rejects_result(monkeypatch):
             assert not threading.Event().wait(0.03)
             assert len(pulses) == count
     assert not any(t.name == "local-xdr-heartbeat" for t in threading.enumerate())
+
+
+# ── BUG-015 防重置：守卫必须先于 STATE 判断，且看整表而非首行 ────────────────────
+
+def _insert_dense(conn, code, trade_date, factor):
+    conn.execute(
+        "INSERT INTO ADJ_FACTOR (code, trade_date, fore_factor, back_factor, adjust_factor)"
+        " VALUES (?, ?, ?, ?, ?)",
+        [code, trade_date, 1.0 / factor, factor, factor],
+    )
+
+
+def test_reset_guard_looks_at_whole_table_not_first_row(caplog):
+    """反例(本次修复的回归点): 稠密表首行是除权前的 1.0、后续才非 1.0 时也要拦住。
+
+    此前守卫用 `ORDER BY trade_date LIMIT 1` 取首行判 != 1.0，而正常稠密表的首行
+    本来就是 1.0，守卫因此对绝大多数真实股票失效。
+    """
+    conn = _seed_mem_conn()
+    _insert_dense(conn, "000022.SZ", "2018-12-20", 1.0)        # 除权前
+    _insert_dense(conn, "000022.SZ", "2018-12-25", 3.529141)   # 除权后
+    # 无 STATE、无事件
+
+    with caplog.at_level(logging.WARNING, logger="etl.datasource.local_xdr"):
+        out = _fetch(conn, [("000022", "SZ", "2026-08-03", "2026-08-04", "L")])
+
+    assert "000022.SZ" not in out.attrs["local_snapshot_bases"]
+
+
+def test_reset_guard_does_not_block_genuinely_unadjusted_stock():
+    """正例: 无事件且稠密表确实全 1.0(真的没除过权) → 不在防重置范围，照常给 base=1.0。
+    守卫不能矫枉过正地把所有无事件股都拦掉。"""
+    conn = _seed_mem_conn()
+    _insert_dense(conn, "000003.SZ", "2026-07-31", 1.0)
+
+    out = _fetch(conn, [("000003", "SZ", "2026-08-03", "2026-08-04", "L")])
+
+    assert out.attrs["local_snapshot_bases"] == {"000003.SZ": 1.0}
+
+
+def test_calibrate_anchor_takes_latest_row_before_first_event():
+    """正例(本次修复的回归点): 基准取首事件之前**最近**一行，而非最早一行。
+
+    稠密表在首事件前有 1.0(早) 与 4.2(晚) 两行：升序会取到 1.0 从而抹掉真实水位，
+    正确结果是 4.2 → back = 2.0 * 4.2。
+    """
+    conn = _seed_mem_conn()
+    _insert_event(conn, "000001", "2025-05-09", bonus_share=10.0)   # 送10股 → 链内 back=2.0
+    _insert_close(conn, "000001.SZ", "2025-05-08", 10.0)
+    _insert_dense(conn, "000001.SZ", "2020-01-03", 1.0)             # 早于首事件, 旧实现会取它
+    _insert_dense(conn, "000001.SZ", "2024-12-31", 4.2)             # 首事件前最近一行
+
+    out = _fetch(conn, [("000001", "SZ", "2026-08-03", "2026-08-04", "L")])
+
+    assert out.attrs["local_snapshot_bases"]["000001.SZ"] == pytest.approx(4.2)
+    assert out.iloc[0]["back_factor"] == pytest.approx(2.0 * 4.2)
+
+
+def test_state_base_still_honoured_for_stock_with_events():
+    """正例: 有事件的股票仍然只认 STATE 里的固定基准，守卫不改变这条既有语义。"""
+    conn = _seed_mem_conn()
+    _insert_event(conn, "000001", "2025-05-09", bonus_share=10.0)
+    _insert_close(conn, "000001.SZ", "2025-05-08", 10.0)
+    _insert_dense(conn, "000001.SZ", "2026-07-31", 3.9)
+    conn.execute("INSERT INTO ADJ_FACTOR_LOCAL_STATE VALUES ('000001.SZ', 1.95)")
+
+    out = _fetch(conn, [("000001", "SZ", "2026-08-03", "2026-08-04", "L")])
+
+    assert out.attrs["local_snapshot_bases"]["000001.SZ"] == pytest.approx(1.95)
+    assert out.iloc[0]["back_factor"] == pytest.approx(2.0 * 1.95)
+
+
+def test_state_owned_stock_still_withdraws_when_events_gone():
+    """正例(边界): local 已管过的股票(有 STATE)事件被真删除时，走的是既有的「撤销」语义，
+    不受 BUG-015 防重置守卫影响——守卫只针对 local 没管过、稠密表因子来源不明的股票。
+
+    与 tests/db/test_adjust_snapshot.py::test_withdraw_last_and_all_events 同一约定，
+    在此固化，防止后续加固守卫时误伤撤销路径。
+    """
+    conn = _seed_mem_conn()
+    _insert_dense(conn, "000001.SZ", "2025-05-09", 2.0)
+    conn.execute("INSERT INTO ADJ_FACTOR_LOCAL_STATE VALUES ('000001.SZ', 1.0)")
+    # CAPITAL_DETAIL 为空：事件已被撤销
+
+    out = _fetch(conn, [("000001", "SZ", "2026-08-03", "2026-08-04", "L")])
+
+    assert out.attrs["local_snapshot_bases"] == {"000001.SZ": 1.0}

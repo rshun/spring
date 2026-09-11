@@ -6,6 +6,11 @@
 #   2026-06-12  Claude  cw md5 校验按报告期截断(默认最近12个季度)，规避服务器每日
 #                       重打包历史 zip 导致的 md5 滚动变化; full=True 恢复全量校验
 #   2026-09-11  Codex   定点修正 000863/600602/600657 已核实的 gbbq 送转/配股错位
+#   2026-09-11  Claude  ManyThreadDownload.run 的 HEAD 补 timeout/重试，缺 Content-Length
+#                       或 HEAD 失败统一抛 RuntimeError（此前无超时可永久挂起，且 KeyError
+#                       不被 sync_cw_files 的 except RuntimeError 捕获，整批同步带栈中止）
+#   2026-09-11  Claude  md5 更新改为「下载到 .part 成功后再替换」：此前先 unlink 再下载，
+#                       下载失败即丢失本地 zip
 """
 通达信离线文件数据源
 
@@ -144,12 +149,33 @@ class ManyThreadDownload:
         finally:
             session.close()
 
-    def run(self, url, name):
+    def _probe_total(self, url) -> int:
+        """HEAD 探测文件大小。必须带超时并把任何失败归一成 RuntimeError——
+        调用方 sync_cw_files 只 except RuntimeError，KeyError 会直接掀翻整批同步。"""
         import requests
 
+        cfg = _get_tdx_config()["download"]
+        tries = cfg["tries"]
+        last_err: Exception | None = None
+        for attempt in range(1, tries + 1):
+            try:
+                resp = requests.head(url, timeout=cfg["request_timeout"],
+                                     headers={'User-Agent': 'Mozilla/5.0'})
+                resp.raise_for_status()
+                size = resp.headers.get('Content-Length')
+                if size is None:
+                    raise RuntimeError(f"HEAD {url} 未返回 Content-Length，无法分片下载")
+                return int(size)
+            except Exception as e:
+                last_err = e
+                if attempt < tries:
+                    time.sleep(cfg["retry_delay"])
+        raise RuntimeError(f"HEAD {url} 失败(重试 {tries} 次): {last_err}") from last_err
+
+    def run(self, url, name):
         self.url = url
         self.name = name
-        self.total = int(requests.head(url).headers['Content-Length'])
+        self.total = self._probe_total(url)
         name_path = Path(name)
         if name_path.exists() and name_path.stat().st_size >= self.total:
             return self.total
@@ -315,12 +341,18 @@ def sync_cw_files(full: bool = False):
         if file_md5 != server_md5_map.get(filename, ''):
             tick = time.time()
             logger.info(f"  {filename} 需要更新，开始下载")
-            zip_path.unlink()
+            # 先下到 .part，成功后才替换：此前先 unlink 再下载，下载一失败本地就没了，
+            # 若服务器同时下线该文件就永久丢失（.part 后缀不满足 list_cw_files 的筛选，
+            # 不会被后续步骤当成正式文件）
+            part_path = zip_path.with_name(zip_path.name + ".part")
+            part_path.unlink(missing_ok=True)
             try:
-                downloader.run(_get_tdx_config()["cw_file_url"] + filename, str(zip_path))
+                downloader.run(_get_tdx_config()["cw_file_url"] + filename, str(part_path))
             except RuntimeError as e:
-                logger.error(f"  {filename} 下载失败，跳过本次更新: {e}")
+                logger.error(f"  {filename} 下载失败，保留本地旧文件: {e}")
+                part_path.unlink(missing_ok=True)
                 continue
+            part_path.replace(zip_path)
             if not _extract_and_convert(zip_path, cw_dir, pkl_dir):
                 continue
             logger.info(f"  {filename} 完成更新 用时 {time.time() - tick:.2f}s")

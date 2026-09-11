@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-06-19  Claude  akstock 取数失败时按交易所回退到交易所官网文件下载(datasource.web)；新增 --download 强制官网
 #   2026-06-20  Claude  默认日期由"自然日昨天"改为"上一个交易日"(深市数据次交易日才可得, 自然日昨天会漏抓且周一被跳过)
+#   2026-09-11  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出：此前 except
+#                       Exception 后直接 return，写库/取数失败仍退出 0(契约 C1)
 """
 功能: 获取沪深两市融资融券汇总和明细数据
 输入参数:
@@ -14,6 +16,7 @@
 import argparse
 import duckdb
 import logging
+import sys
 import pandas as pd
 from util import dbutil, myutil
 from util import validators as pv
@@ -119,7 +122,7 @@ def _fill_missing_exchanges(df, requested: set[str], fallback_fn):
     return pd.concat(frames, ignore_index=True)
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
     args = parse_arguments()
 
@@ -130,14 +133,14 @@ def main() -> None:
         last_td = dbutil.get_last_trade_date()
         if last_td is None:
             logger.error("无法确定上一个交易日(交易日历为空?)，请用 -b/-e 显式指定日期。")
-            return
+            return 1
         if args.begin is None:
             args.begin = last_td
         if args.end is None:
             args.end = last_td
 
     if not check_parameters(args.begin, args.end, args.forcerun):
-        return
+        return 1
 
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
@@ -155,7 +158,7 @@ def main() -> None:
     trade_dates = dbutil.get_trade_dates(begin_date, end_date)
     if not trade_dates:
         logger.warning("区间内无交易日，任务结束。")
-        return
+        return 1
     logger.info(f"区间内交易日 {len(trade_dates)} 个: {trade_dates[0]} ~ {trade_dates[-1]}")
 
     conn: duckdb.DuckDBPyConnection | None = None
@@ -207,14 +210,18 @@ def main() -> None:
                     else:
                         logger.warning(f"  {d} 未获取到融资融券明细数据，跳过。")
 
+        return 0
+
     except ImportError as e:
         logger.error(f"无法导入模块 {args.source}，请检查文件名是否存在。{e}")
+        return 1
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

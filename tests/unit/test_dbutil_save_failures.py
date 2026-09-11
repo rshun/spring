@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-09-10  Claude  新增：三个 save_*_to_db 写库失败必须重抛，且经真实函数传到 CLI 退出码 1
+#   2026-09-11  Claude  覆盖其余 8 个 save_*_to_db 的重抛、三个新增空表早退、
+#                       申万两函数缺列改抛 ValueError
 """util/dbutil 的 save_index_to_db / save_daily_to_db / save_base_to_db 失败路径，
 以及 fetch_index / import_daily 走真实 save 函数时的退出码。不碰真实库。"""
 import argparse
@@ -93,3 +95,80 @@ def test_import_daily_real_save_failure_returns_1():
          patch.object(dbutil, "get_connection", return_value=_bad_conn()):
         myutil.import_source_module.return_value = src
         assert import_daily.main() == 1
+
+
+# ── 2026-09-11: 其余 8 个 save_*_to_db 也必须重抛 ──────────────────────────────
+
+SHARES = pd.DataFrame({"code": ["600000.SH"], "date": ["2026-09-08"],
+                       "total_shares": [1000], "float_shares": [800]})
+STOCK_INFO = pd.DataFrame({"code": ["600000.SH"], "symbol": ["600000"], "name": ["浦发银行"],
+                           "exchange": ["SH"], "board": ["MAIN"], "list_date": ["1999-11-10"],
+                           "delist_date": [None], "list_status": ["L"]})
+CALENDAR = pd.DataFrame({"cal_date": ["2026-09-08"], "is_open": [1]})
+MARGIN_SUM = pd.DataFrame({"trade_date": ["2026-09-08"], "exchange_code": ["SH"],
+                           "margin_buy_amount": [1.0], "margin_repay_amount": [1.0],
+                           "margin_balance": [1.0], "short_sell_volume": [1.0],
+                           "short_repay_volume": [1.0], "short_balance_volume": [1.0],
+                           "short_balance_amount": [1.0], "margin_short_balance": [1.0]})
+MARGIN_DET = MARGIN_SUM.assign(symbol=["600000"], code=["600000.SH"])
+CAPITAL = pd.DataFrame({"code": ["600000"], "date": ["20260908"], "category": ["除权除息"],
+                        "dividend": [1.0], "allotment_price": [0.0],
+                        "bonus_share": [0.0], "allotment_share": [0.0]})
+FINANCE = pd.DataFrame({"code": ["600000"], "report_date": ["2026-06-30"], "eps": [1.0]})
+SW_RAW = pd.DataFrame({"symbol": ["600000"], "start_date": ["2026-09-08"],
+                       "industry_code": ["801780"], "update_time": ["2026-09-08 00:00:00"]})
+SW_HIER = pd.DataFrame({"sw_version": ["2021"], "industry_code": ["801780"],
+                        "industry_name": ["银行"], "sw_level": [1], "parent_code": [None]})
+
+
+@pytest.mark.parametrize("func, df", [
+    (dbutil.save_shares_to_db, SHARES),
+    (dbutil.load_stock_info_to_db, STOCK_INFO),
+    (dbutil.save_calendar_to_db, CALENDAR),
+    (dbutil.save_margin_summary_to_db, MARGIN_SUM),
+    (dbutil.save_margin_detail_to_db, MARGIN_DET),
+    (dbutil.save_capital_detail_to_db, CAPITAL),
+    (dbutil.save_finance_report_to_db, FINANCE),
+    (dbutil.save_stock_industry_clf_hist_sw_raw_to_db, SW_RAW),
+    (dbutil.save_sw_industry_hierarchy_to_db, SW_HIER),
+], ids=["shares", "stock_info", "calendar", "margin_summary", "margin_detail",
+        "capital_detail", "finance_report", "sw_raw", "sw_hierarchy"])
+def test_remaining_save_failures_raise(func, df):
+    """反例: 写库失败必须抛给调用方，不能 logger.error 后静默返回。
+
+    这些函数原本吞异常，结果是 sync_basic / trade_cal / sync_margin / sync_capital /
+    sync_finance / sync_industry 写库失败仍退出 0（契约 C1）。
+    """
+    with pytest.raises(RuntimeError, match="模拟写库失败"):
+        func(df.copy(), _bad_conn())
+
+
+@pytest.mark.parametrize("func", [
+    dbutil.save_shares_to_db,
+    dbutil.load_stock_info_to_db,
+    dbutil.save_calendar_to_db,
+], ids=["shares", "stock_info", "calendar"])
+def test_newly_guarded_empty_frame_returns_early(func):
+    """正例: 空表是合法输入——早退、不碰连接、不抛错。
+
+    这三个此前没有空表早退：加上 raise 之后若不补早退，空表会由 Binder Error 变成
+    真正的失败退出（此前只是被 except 吞掉才「看起来没事」）。
+    """
+    conn = _bad_conn()
+    func(pd.DataFrame(), conn)
+    conn.execute.assert_not_called()
+    conn.register.assert_not_called()
+
+
+@pytest.mark.parametrize("func, df, table", [
+    (dbutil.save_stock_industry_clf_hist_sw_raw_to_db, SW_RAW, "STOCK_INDUSTRY_CLF_HIST_SW_RAW"),
+    (dbutil.save_sw_industry_hierarchy_to_db, SW_HIER, "SW_INDUSTRY"),
+], ids=["sw_raw", "sw_hierarchy"])
+def test_missing_required_column_raises(func, df, table):
+    """反例: 数据源少列是契约被破坏，必须抛出。
+
+    此前只 logger.error 后 return，etl/sync_industry.py 一条都没写也退出 0。
+    """
+    broken = df.drop(columns=[df.columns[-1]])
+    with pytest.raises(ValueError, match="缺少字段"):
+        func(broken, MagicMock())

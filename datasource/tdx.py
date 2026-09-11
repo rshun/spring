@@ -1,3 +1,8 @@
+# 修改记录:
+#   2026-09-11  Claude  fetch_batch_data 跳过北交所(market=2)：模块约定与 fetch_xdxr_data
+#                       都跳过，只有它没跳，会对 344 只 920xxx 发注定无效的请求并污染失败计数
+#   2026-09-11  Claude  fetch_batch_data 新增「全批失败」判定：逐只失败仍只跳过，全部候选
+#                       都失败时抛 RuntimeError（此前返回空表，import_daily 退出 0）
 """
 通达信 pytdx 行情数据源
 
@@ -182,6 +187,9 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     all_daily_data: list[pd.DataFrame] = []
     fail_count = 0
     max_fail = _get_max_fail()
+    attempted = 0
+    failed: list[str] = []
+    skipped_bj = 0
 
     active = [(b, e) for _, _, b, e, st in stock_list if st != 'D']
     if not active:
@@ -198,7 +206,13 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
         for i, (symbol, market, begindate, enddate, status) in enumerate(stock_list):
             if status == "D":
                 continue
+            # pytdx 不支持北交所(market=2)，与 fetch_xdxr_data 保持一致直接跳过，
+            # 否则会对 344 只 920xxx 发注定无效的请求，还会把失败计数推到 max_fail 触发重连
+            if _to_market(str(market)) == 2:
+                skipped_bj += 1
+                continue
 
+            attempted += 1
             try:
                 df_daily = fetch_stock_data(api, str(symbol), str(market), begindate, enddate, trade_dates)
                 if not df_daily.empty:
@@ -207,6 +221,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
 
             except Exception as e:
                 fail_count += 1
+                failed.append(f"{symbol}.{market}")
                 logger.warning(f"  获取失败: {symbol}.{market} | 原因: {e}")
                 if fail_count >= max_fail:
                     logger.warning(f"  连续失败 {max_fail} 次，尝试重连...")
@@ -223,6 +238,14 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
 
     finally:
         api.disconnect()
+
+    if skipped_bj:
+        logger.info(f"[pytdx] 跳过 {skipped_bj} 只北交所股票(pytdx 不支持)")
+    if failed and len(failed) >= attempted:
+        logger.error(f"[pytdx] 全部 {attempted} 只股票获取失败，前 10 只: {failed[:10]}")
+        raise RuntimeError(f"[pytdx] 全部 {attempted} 只股票均获取失败，视为本次采集失败")
+    if failed:
+        logger.warning(f"[pytdx] {len(failed)}/{attempted} 只获取失败，前 10 只: {failed[:10]}")
 
     if all_daily_data:
         final_daily = pd.concat(all_daily_data, ignore_index=True)

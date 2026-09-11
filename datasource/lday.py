@@ -1,3 +1,7 @@
+# 修改记录:
+#   2026-09-11  Claude  fetch_batch_data 新增「全批失败」判定：逐只失败仍只跳过，但所有
+#                       候选都失败时抛 RuntimeError——此前返回空表，import_daily 只打一句
+#                       warning 就退出 0（Vipdoc 路径失效/权限变更会被当成「今天没数据」）
 import struct
 import logging
 import os
@@ -118,6 +122,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     all_dfs = []
     total = len(stock_list)
     count = 0
+    failed: list[str] = []
 
     active = [(b, e) for _, _, b, e, st in stock_list if st != 'D']
     if not active:
@@ -138,10 +143,12 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
             code_file = myutil.get_lday_path(market.lower()) / f"{market.lower()}{symbol}.day"
         except Exception as e:
             logger.warning(f"获取失败: {symbol}.{market} | 原因: 无法定位day文件目录: {e}")
+            failed.append(f"{symbol}.{market}")
             continue
 
         if not code_file or not code_file.is_file():
             logger.warning(f"获取失败: {symbol}.{market} | 原因: 文件不存在: {code_file}")
+            failed.append(f"{symbol}.{market}")
             continue
         logger.debug(code_file)
         try:
@@ -158,7 +165,16 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
                 logger.info(f"   已处理: {count}/{total}")
         except Exception as e:
             logger.warning(f"获取失败: {symbol}.{market} | 原因: {e}")
+            failed.append(f"{symbol}.{market}")
             continue
+
+    # 全批失败必须抛错：逐只失败只跳过(如个别退市股缺 .day 文件)是正常的，但所有候选
+    # 都失败通常意味着 Vipdoc 路径失效或权限变更，返回空表会被上游当成「今天没数据」
+    if failed and len(failed) >= count:
+        logger.error(f"[本地] 全部 {count} 只股票读取失败，前 10 只: {failed[:10]}")
+        raise RuntimeError(f"[本地] 全部 {count} 只股票的 .day 文件均读取失败，视为本次采集失败")
+    if failed:
+        logger.warning(f"[本地] {len(failed)}/{count} 只读取失败，前 10 只: {failed[:10]}")
 
     if all_dfs:
         final_df = pd.concat(all_dfs, ignore_index=True)

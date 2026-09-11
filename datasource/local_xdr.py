@@ -16,6 +16,11 @@
 #                       首日之前无 K 线可取前收，不是数据缺口；此前 600018.SH
 #                       2006-10-26 换股上市当天的除权事件被判为缺口，整批 668 只中止
 #   2026-09-11  Codex   关闭「历史覆盖外」逐股明细日志，保留跳过统计与批次汇总
+#   2026-09-11  Claude  修复 BUG-015 防重置在真实稠密表形态下失效：判据由「首行 != 1.0」
+#                       改为「整表任意一行 != 1.0」——稠密表首行通常就是除权前的 1.0，
+#                       只看首行等于没防护，无 STATE 的股票会被整段重写为 1.0；
+#                       两处取基准的 ORDER BY 改 DESC（要的是首事件前最近一行的水位，
+#                       升序取到的是最早一行）。STATE 已存在时仍走撤销语义，不受此守卫影响
 """
 本地自算复权因子数据源
 
@@ -261,6 +266,14 @@ def compute_event_factors(events_df: pd.DataFrame,
     })
 
 
+def _has_non_unit_dense(conn, code: str) -> bool:
+    """ADJ_FACTOR 中该股是否已有非 1.0 因子（任意一行，不只是首行）。"""
+    return conn.execute(
+        "SELECT 1 FROM ADJ_FACTOR WHERE code=? AND ABS(adjust_factor - 1.0) > 1e-9 LIMIT 1",
+        [code],
+    ).fetchone() is not None
+
+
 def _calibrate_to_dense(conn, factors: pd.DataFrame) -> pd.DataFrame:
     """固定基准只初始化一次；缺少可验证基准时拒绝推测迁移水位。"""
     # 已初始化的股票只使用固定基准。首次初始化优先选首事件之前的真实历史值，
@@ -270,15 +283,23 @@ def _calibrate_to_dense(conn, factors: pd.DataFrame) -> pd.DataFrame:
     ).fetchall())
     candidates = [r[0] for r in conn.execute("SELECT code FROM temp_candidates").fetchall()]
     bases = {}
+    reset_guarded: list[str] = []
     for code in candidates:
+        chain = factors[factors["code"] == code].sort_values("date")
+        # 已有 STATE = local 自己管过这只股，事件表是权威来源，事件真的没了就按
+        # 「撤销」处理（见 tests/db/test_adjust_snapshot.py::test_withdraw_last_and_all_events）。
+        # 下面的 BUG-015 防重置只适用于 local 没管过的股票：那时稠密表里的非 1.0 因子
+        # 来源不明（bstock 遗留），不能拿本次的空事件链去覆盖。
         if code in saved:
             base = float(saved[code])
         else:
-            chain = factors[factors["code"] == code].sort_values("date")
             first = chain.iloc[0]["date"] if not chain.empty else None
             if first is not None:
+                # DESC：要的是首事件之前**最近**一行的水位。用升序会取到该股稠密表
+                # 最早一行，而那一行通常是除权前的 1.0，据此定基准会抹掉真实水位。
                 anchor = conn.execute(
-                    "SELECT adjust_factor FROM ADJ_FACTOR WHERE code=? AND trade_date < ? ORDER BY trade_date LIMIT 1",
+                    "SELECT adjust_factor FROM ADJ_FACTOR WHERE code=? AND trade_date < ? "
+                    "ORDER BY trade_date DESC LIMIT 1",
                     [code, first],
                 ).fetchone()
                 if anchor is None:
@@ -286,14 +307,25 @@ def _calibrate_to_dense(conn, factors: pd.DataFrame) -> pd.DataFrame:
                     if has_history:
                         raise RuntimeError(f"{code} 缺少首事件之前的可信基准，拒绝自动初始化；需审核迁移水位")
             else:
-                anchor = conn.execute("SELECT adjust_factor FROM ADJ_FACTOR WHERE code=? ORDER BY trade_date LIMIT 1", [code]).fetchone()
-                # 没有事件但已有非单位水位，不能声明源完整，保留 BUG-015 防护。
-                if anchor and float(anchor[0]) != 1.0:
+                # BUG-015 防重置：没有事件但已有非单位水位，不能声明源完整。
+                # 判据必须看整张表——稠密表首行通常就是除权前的 1.0，只看首行等于没防护。
+                if _has_non_unit_dense(conn, code):
+                    reset_guarded.append(code)
                     continue
+                anchor = conn.execute(
+                    "SELECT adjust_factor FROM ADJ_FACTOR WHERE code=? ORDER BY trade_date DESC LIMIT 1",
+                    [code],
+                ).fetchone()
             base = float(anchor[0]) if anchor else 1.0
         if not math.isfinite(base) or base <= 0:
             raise ValueError("ADJ_FACTOR 锚点水位无效，停止本次 local 计算")
         bases[code] = base
+    if reset_guarded:
+        logger.warning(
+            "%d 只股票本次无除权事件但 ADJ_FACTOR 已有非 1.0 因子，疑似 CAPITAL_DETAIL "
+            "未覆盖，跳过以防重置为 1.0（前 20 只）: %s",
+            len(reset_guarded), sorted(reset_guarded)[:20],
+        )
     out = factors[factors["code"].isin(bases)].copy()
     out["back_factor"] *= out["code"].map(bases)
     out["adjust_factor"] = out["back_factor"]

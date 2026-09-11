@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-05-22  Claude  数据源模块 dlhttp 重命名为 web，更新 import 引用
+#   2026-09-11  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出：此前 except
+#                       Exception 后直接 return，写库/取数失败仍退出 0(契约 C1)
 """
 同步申万行业数据
   1、默认通过 ak.stock_industry_clf_hist_sw() 获取股票申万三级行业历史原始数据
@@ -8,6 +10,7 @@
 import argparse
 import duckdb
 import logging
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -157,12 +160,12 @@ def read_swclasscode_csv(input_file: Path, sw_version: str) -> pd.DataFrame:
     return result[['sw_version', 'industry_code', 'industry_name', 'sw_level', 'parent_code']]
 
 
-def main() -> None:
+def main() -> int:
     myutil.configure_etl_logging()
     args = parse_arguments()
 
     if not check_parameters(args.forcerun):
-        return
+        return 1
 
     today = date.today().strftime('%Y-%m-%d')
 
@@ -197,7 +200,7 @@ def main() -> None:
                 module = myutil.import_source_module(args.source)
                 if not hasattr(module, 'fetch_stock_industry_clf_hist_sw'):
                     logger.error(f"模块 '{args.source}' 中没有定义 'fetch_stock_industry_clf_hist_sw' 方法。")
-                    return
+                    return 1
 
                 logger.info("\n[Step 1] 获取股票申万行业历史原始数据...")
                 raw_df = module.fetch_stock_industry_clf_hist_sw()
@@ -215,14 +218,18 @@ def main() -> None:
         logger.info("申万行业数据同步完成")
         logger.info("=" * 60)
 
+        return 0
+
     except ImportError as e:
         logger.error(f"依赖或模块导入失败。{e}")
+        return 1
     except Exception as e:
         logger.error(f"执行过程中发生未预期的错误: {e}")
+        return 1
     finally:
         if conn is not None:
             conn.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

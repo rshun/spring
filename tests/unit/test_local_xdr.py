@@ -99,8 +99,8 @@ def test_zero_value_events_filtered():
     assert local_xdr.compute_event_factors(events).empty
 
 
-def test_missing_prev_close_out_of_coverage_is_info(caplog):
-    """反例(BUG-011): 事件日早于日线覆盖起点 → info 级「历史覆盖外」，计入跳过统计"""
+def test_missing_prev_close_out_of_coverage_is_silent(caplog):
+    """反例(BUG-011): 事件日早于日线覆盖起点 → 不打印逐股明细，但计入跳过统计"""
     events = _events([
         ("000001.SZ", "1997-07-15", 1.0, 0.0, 0.0, 0.0, None, "2005-01-04"),
         ("000001.SZ", "2024-05-10", 2.0, 0.0, 0.0, 0.0, 10.0, "2005-01-04"),
@@ -112,7 +112,7 @@ def test_missing_prev_close_out_of_coverage_is_info(caplog):
     assert out["date"].tolist() == [pd.Timestamp("2024-05-10")]
     assert stats["skipped"] == 1 and stats["gap"] == 0
     assert stats["out_of_coverage"] == 1
-    assert "历史覆盖外" in caplog.text
+    assert "历史覆盖外" not in caplog.text
 
 
 def test_missing_prev_close_mid_gap_counted_as_gap(caplog):
@@ -147,7 +147,7 @@ def test_missing_prev_close_no_price_at_all_warns(caplog):
 
 def test_event_on_first_price_date_is_out_of_coverage_not_gap(caplog):
     """正例(600018.SH 复现): 事件日 == 日线首日，ASOF 取不到首日之前的收盘 →
-    归「历史覆盖外」(info)，不计入缺口 X，链从下一条事件起算，整批不中止"""
+    归「历史覆盖外」且不打印逐股明细，不计入缺口 X，链从下一条事件起算，整批不中止"""
     events = _events([
         ("600018.SH", "2006-10-26", 0.0, 35.0, 0.0, 0.0, None, "2006-10-26"),  # 换股上市当天
         ("600018.SH", "2007-06-22", 0.76, 0.0, 0.0, 0.0, 6.0, "2006-10-26"),
@@ -159,7 +159,7 @@ def test_event_on_first_price_date_is_out_of_coverage_not_gap(caplog):
     assert out["date"].tolist() == [pd.Timestamp("2007-06-22")]
     assert stats["skipped"] == 1 and stats["out_of_coverage"] == 1
     assert stats["gap"] == 0                       # 不会触发「事件链不完整」致命判定
-    assert "历史覆盖外" in caplog.text
+    assert "历史覆盖外" not in caplog.text
     assert "数据缺口" not in caplog.text
 
 
@@ -428,6 +428,7 @@ def test_fetch_summary_log_counts_skips(caplog):
     conn.close()
 
     assert "本次跳过 2 条事件，涉及 2 只股票（其中区间内部缺口 1 条" in caplog.text
+    assert "000002.SZ 事件日不晚于该股日线覆盖起点" not in caplog.text
     assert any(r.levelno >= logging.ERROR for r in caplog.records)
 
 

@@ -15,6 +15,7 @@
 #   2026-09-09  Claude  事件日恰为该股日线首日时归「历史覆盖外」而非「区间内部缺口」：
 #                       首日之前无 K 线可取前收，不是数据缺口；此前 600018.SH
 #                       2006-10-26 换股上市当天的除权事件被判为缺口，整批 668 只中止
+#   2026-09-11  Codex   关闭「历史覆盖外」逐股明细日志，保留跳过统计与批次汇总
 """
 本地自算复权因子数据源
 
@@ -194,19 +195,20 @@ def compute_event_factors(events_df: pd.DataFrame,
             no_price_at_all = missing
             out_cov = mid_gap = missing & False
 
-        for mask, level, msg, kwargs in [
+        for mask, level, msg, kwargs, log_details in [
             (out_cov, "info", "事件日不晚于该股日线覆盖起点（历史覆盖外），跳过",
-             dict(out_of_coverage=True)),
-            (no_price_at_all, "warning", "该股无任何价格记录，跳过其除权事件", {}),
+             dict(out_of_coverage=True), False),
+            (no_price_at_all, "warning", "该股无任何价格记录，跳过其除权事件", {}, True),
             (mid_gap, "warning", "事件落在日线覆盖区间内部但前收盘缺失（数据缺口），跳过",
-             dict(gap=True)),
+             dict(gap=True), True),
         ]:
             sub = events.loc[mask]
             if sub.empty:
                 continue
-            for code, grp in sub.groupby("code"):
-                dates = grp["date"].dt.strftime("%Y-%m-%d").tolist()
-                getattr(logger, level)(f"{code} {msg} {len(grp)} 条: {dates}")
+            if log_details:
+                for code, grp in sub.groupby("code"):
+                    dates = grp["date"].dt.strftime("%Y-%m-%d").tolist()
+                    getattr(logger, level)(f"{code} {msg} {len(grp)} 条: {dates}")
             _count_skip(stats, sub, **kwargs)
         events = events.loc[~missing]
     if events.empty:

@@ -77,9 +77,6 @@ python -m etl.adjust -b 20260901 -e 20260904
 更划算，所以不提供强制走按日接口的开关。按日接口也只有 bstock 源提供，
 `-s lday`、`-s tdx` 一律走逐股。
 
-`adjust` 已无 `--by-date`：其 bstock 复权因子源自 2026-09-10 起废弃（仅留痕），
-默认 `-s local` 纯库内计算，不涉及按日/逐股接口的选择。
-
 baostock 的网络类错误码（`10002xxx`，连接/收发失败或超时）按瞬时故障处理，
 重登重试；重试耗尽或遇到非瞬时错误仍然中止且不写入部分数据。
 
@@ -124,7 +121,7 @@ python -m tools.check_daily
 
 某台机器的 ETL 执行失败、而另一台执行成功时，可按程序把成功机器的数据导出再导入。
 涉及的表: `import_daily` -> STOCK_DAILY(个股) + DAILY_BASIC(四列)；`fetch_index` -> STOCK_DAILY(指数)；
-`adjust` -> ADJ_FACTOR + ADJ_FACTOR_LOCAL + ADJ_FACTOR_LOCAL_STATE（ADJ_FACTOR_RAW 为已废弃的 bstock 留痕，仍随同导出）。导入为幂等 upsert，只覆盖各程序负责的列。
+`adjust` -> ADJ_FACTOR + ADJ_FACTOR_RAW + ADJ_FACTOR_LOCAL + ADJ_FACTOR_LOCAL_STATE。导入为幂等 upsert，只覆盖各程序负责的列。
 ```bash
 # 成功的机器上导出 (可指定一个或多个程序)
 python -m tools.export_etl_tables -p import_daily adjust -b 20260817 -e 20260818 -o D:/sync/out
@@ -167,6 +164,10 @@ python -m etl.sync_capital
 
 # 优先从通达信服务器下载gbbq
 python -m etl.sync_capital --download
+
+# gbbq 是全历史快照，不受 cw 最近 12 季度刷新窗口限制。
+# 入库前会定点修正已核实的 000863/20000919、600602/20000623、
+# 600657/20011022 通达信送转股误记为零价配股的源数据异常。
 ```
 
 #### 同步股票日线数据  
@@ -196,9 +197,6 @@ python -m etl.adjust
 
 # 漏跑后按日志提示回填(示例: 从首个缺失交易日起; 可加 -c 只补个别股票)
 python -m etl.adjust -b 20260908
-
-# 【已废弃 2026-09-10】bstock 复权因子源: 仅留痕写 ADJ_FACTOR_RAW, 不维护稠密表, 运行会打废弃警告
-python -m etl.adjust -s bstock
 ```
 
 #### 补齐指标量比,涨停,流通市值(流通市值等数据前置条件是需要股本资料)  

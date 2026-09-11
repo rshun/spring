@@ -10,6 +10,7 @@
 import hashlib
 import types
 
+import pandas as pd
 import pytest
 
 from datasource import tdx_offline
@@ -118,3 +119,80 @@ def test_sync_cw_files_window_default_from_config(cw_env):
     tdx_offline.sync_cw_files()
     assert sorted(_RecordingDownloader.calls) == [
         "gpcw20201231.zip", "gpcw20260331.zip"]
+
+
+# ── gbbq 已知源数据异常定点修正 ───────────────────────────
+
+def _gbbq_row(code, date, dividend, allotment_price,
+              bonus_share, allotment_share, category="除权除息"):
+    return {
+        "code": code,
+        "date": date,
+        "category": category,
+        "dividend": dividend,
+        "allotment_price": allotment_price,
+        "bonus_share": bonus_share,
+        "allotment_share": allotment_share,
+    }
+
+
+def test_normalize_known_gbbq_anomalies_corrects_only_verified_rows():
+    """正例：三条已核实异常从配股转到送转股，现金分红和配股价保持不变。"""
+    source = pd.DataFrame([
+        _gbbq_row("000863", 20000919, 0.0, 0.0, 0.0, 10.0),
+        _gbbq_row("600602", 20000623, 1.0, 0.0, 0.0, 1.0),
+        _gbbq_row("600657", 20011022, 0.0, 0.0, 0.0, 3.0),
+    ])
+
+    got = tdx_offline._normalize_known_gbbq_anomalies(source)
+
+    assert got["bonus_share"].tolist() == [10.0, 1.0, 3.0]
+    assert got["allotment_share"].tolist() == [0.0, 0.0, 0.0]
+    assert got["dividend"].tolist() == [0.0, 1.0, 0.0]
+    assert got["allotment_price"].tolist() == [0.0, 0.0, 0.0]
+    # 不原地修改数据源帧，便于调用方审计原始输入。
+    assert source["bonus_share"].tolist() == [0.0, 0.0, 0.0]
+
+
+def test_normalize_known_gbbq_anomalies_preserves_real_allotment():
+    """反例：同一股票的真实配股（配股价为正）不受影响。"""
+    source = pd.DataFrame([
+        _gbbq_row("600657", 20000822, 0.0, 22.0, 0.0, 3.0),
+        _gbbq_row("000863", 19990927, 0.0, 10.0, 0.0, 2.5),
+    ])
+
+    got = tdx_offline._normalize_known_gbbq_anomalies(source)
+
+    pd.testing.assert_frame_equal(got, source)
+
+
+def test_normalize_known_gbbq_anomalies_requires_full_old_signature():
+    """边界：键相同但数值已变更时不猜测、不强制覆盖。"""
+    source = pd.DataFrame([
+        _gbbq_row("600602", "2000-06-23", 1.0, 5.0, 0.0, 1.0),
+        _gbbq_row("600657", "2001-10-22", 0.0, 0.0, 3.0, 0.0),
+    ])
+
+    got = tdx_offline._normalize_known_gbbq_anomalies(source)
+
+    pd.testing.assert_frame_equal(got, source)
+
+
+def test_fetch_gbbq_preserves_raw_csv_but_returns_normalized_frame(
+        tmp_path, monkeypatch):
+    """追溯边界：CSV 保留源值，仅传给入库层的数据被修正。"""
+    source = pd.DataFrame([
+        _gbbq_row("600602", 20000623, 1.0, 0.0, 0.0, 1.0),
+    ])
+    monkeypatch.setattr(tdx_offline, "CSV_DIR", tmp_path)
+    monkeypatch.setattr(tdx_offline, "GBBQ_FILE", tmp_path / "gbbq")
+    monkeypatch.setattr(tdx_offline, "_load_gbbq_from_local",
+                        lambda: source.copy())
+
+    got = tdx_offline.fetch_gbbq()
+    saved = pd.read_csv(tmp_path / "gbbq.csv", dtype={"code": str})
+
+    assert saved.loc[0, "bonus_share"] == 0.0
+    assert saved.loc[0, "allotment_share"] == 1.0
+    assert got.loc[0, "bonus_share"] == 1.0
+    assert got.loc[0, "allotment_share"] == 0.0

@@ -5,6 +5,7 @@
 #   2026-05-29  Claude  新增 iter_cw_reports: 遍历本地 cw 文件按报告期产出 DataFrame
 #   2026-06-12  Claude  cw md5 校验按报告期截断(默认最近12个季度)，规避服务器每日
 #                       重打包历史 zip 导致的 md5 滚动变化; full=True 恢复全量校验
+#   2026-09-11  Codex   定点修正 000863/600602/600657 已核实的 gbbq 送转/配股错位
 """
 通达信离线文件数据源
 
@@ -46,6 +47,16 @@ GBBQ_FILE    = CSV_DIR / "gbbq"
 
 # 通达信财务文件名格式: "gpcw" + "YYYYMMDD" + ".ext" = 4+8+4 = 16 字符
 _CW_FILENAME_LEN = 16
+
+# 通达信 gbbq 中已由公司历史公告核实的个别字段异常。
+# 仅当整条原始记录与已知错误签名完全一致时才修正，避免影响真实配股；
+# 如上游后续修复或改变数据，本规则不会强制覆盖。
+_KNOWN_GBBQ_ALLOTMENT_ANOMALIES = (
+    # code, date, dividend, allotment_price, bonus_share, allotment_share
+    ("000863", "20000919", 0.0, 0.0, 0.0, 10.0),
+    ("600602", "20000623", 1.0, 0.0, 0.0, 1.0),
+    ("600657", "20011022", 0.0, 0.0, 0.0, 3.0),
+)
 
 
 def _get_tdx_config():
@@ -483,6 +494,55 @@ def _load_gbbq_from_server() -> pd.DataFrame | None:
     return fetch_xdxr_data(stocks)
 
 
+def _normalize_known_gbbq_anomalies(df: pd.DataFrame) -> pd.DataFrame:
+    """定点修正已核实的通达信 gbbq 历史字段异常。
+
+    三条记录实际为送转股，但源文件将比例放在配股字段且配股价为 0。
+    本函数要求 code/date/category 和四个数值字段全部命中旧签名，
+    然后才将 allotment_share 移到 bonus_share。
+    """
+    if df is None or df.empty:
+        return df
+
+    required = {
+        "code", "date", "category", "dividend", "allotment_price",
+        "bonus_share", "allotment_share",
+    }
+    if not required.issubset(df.columns):
+        logger.warning("gbbq 缺少定点修正所需字段，跳过已知异常处理")
+        return df
+
+    result = df.copy()
+    codes = result["code"].astype(str).str.zfill(6)
+    dates = (result["date"].astype(str)
+             .str.replace("-", "", regex=False)
+             .str.slice(0, 8))
+    categories = result["category"].astype(str)
+
+    for code, date, dividend, allotment_price, bonus_share, allotment_share in \
+            _KNOWN_GBBQ_ALLOTMENT_ANOMALIES:
+        key_mask = ((codes == code) & (dates == date) &
+                    (categories == "除权除息"))
+        old_signature = (
+            key_mask
+            & pd.to_numeric(result["dividend"], errors="coerce").eq(dividend)
+            & pd.to_numeric(result["allotment_price"], errors="coerce").eq(allotment_price)
+            & pd.to_numeric(result["bonus_share"], errors="coerce").eq(bonus_share)
+            & pd.to_numeric(result["allotment_share"], errors="coerce").eq(allotment_share)
+        )
+        count = int(old_signature.sum())
+        if count:
+            result.loc[old_signature, "bonus_share"] = allotment_share
+            result.loc[old_signature, "allotment_share"] = 0.0
+            logger.warning(
+                "已修正通达信 gbbq 已知字段异常: %s/%s "
+                "allotment_share=%s -> bonus_share=%s（%d 条）",
+                code, date, allotment_share, allotment_share, count,
+            )
+
+    return result
+
+
 def fetch_gbbq(download: bool = False) -> pd.DataFrame | None:
     """按优先级获取 gbbq 股本变迁数据并返回 DataFrame
 
@@ -520,13 +580,13 @@ def fetch_gbbq(download: bool = False) -> pd.DataFrame | None:
 
     logger.info(f"gbbq 数据来源: {source}，共 {len(df)} 条")
 
-    # 落 csv 留存
+    # CSV 保留未修正的源数据供追溯；仅对交给入库层的 DataFrame 定点修正。
     CSV_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = GBBQ_FILE.with_suffix('.csv')
     df.to_csv(str(csv_path), encoding='utf-8', index=False)
     logger.info(f"gbbq 数据已保存到 {csv_path}")
 
-    return df
+    return _normalize_known_gbbq_anomalies(df)
 
 
 def cleanup_gbbq_file():

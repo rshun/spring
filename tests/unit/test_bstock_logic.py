@@ -141,14 +141,16 @@ def test_fetch_stock_info_code_format():
     assert df.iloc[0]["code"] == "600519.SH"
 
 
-def test_fetch_stock_info_login_fail_returns_empty():
+def test_fetch_stock_info_login_fail_raises():
+    """反例(B042): 登录失败必须抛 BaoQueryError，不能返回空表让 sync_basic 退出 0"""
+    from datasource.bstock import BaoQueryError
     lg = MagicMock()
     lg.error_code = "9999"
     lg.error_msg = "登录失败"
     with patch("datasource.bstock.bs.login", return_value=lg):
         with patch("datasource.bstock.bs.logout"):
-            df, _ = fetch_stock_info(["all"])
-    assert df.empty
+            with pytest.raises(BaoQueryError, match="登录失败"):
+                fetch_stock_info(["all"])
 
 
 # ── fetch_stock_data 数据转换 ─────────────────────────────────────────────────

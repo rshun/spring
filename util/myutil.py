@@ -2,6 +2,8 @@
 #   2026-05-30  Claude  get_default_dbfile 支持 prod/test 库切换(local_paths.db_active)
 #   2026-08-19  Claude  修正 configure_etl_logging docstring 的日志路径笔误(实为项目根 log/)
 #   2026-08-19  Claude  configure_etl_logging 支持指定控制台输出流，供 --json 类工具把日志改走 stderr
+#   2026-09-11  Claude  B045: get_default_dbfile 对非法 db_active 抛 ValueError——此前任何非 test 的
+#                       取值都静默回落正式库，实测 "db_test" 把「测试」跑批写进了 quant.db
 import time
 import os
 import pkgutil
@@ -70,7 +72,13 @@ def get_default_dbfile() -> Path:
     from util.config import get_config
     local_paths = get_config().get("local_paths") or {}
 
-    active = (local_paths.get("db_active") or "prod").strip().lower()
+    raw_active = local_paths.get("db_active")
+    active = (raw_active or "prod").strip().lower()
+    if active not in ("prod", "test"):
+        # 非法值不得静默回落正式库：填错的人以为在测试库，实际写的是生产
+        # （2026-09-11 实测 db_active="db_test" 曾把「测试」跑批写进 quant.db）
+        raise ValueError(
+            f"config.yaml local_paths.db_active 非法: {raw_active!r}，只接受 prod | test")
     key = "db_test" if active == "test" else "db"
 
     db_path = (local_paths.get(key) or "").strip()

@@ -156,3 +156,64 @@ def test_empty_results_without_failure_do_not_raise(session):
                       return_value=_rs(K_FIELDS, [])):
         daily, basic = bstock.fetch_batch_data(STOCKS)
     assert daily.empty and basic.empty
+
+
+# ── 2026-09-11 B041/B042：日历与基本信息的登录失败/查询错误必须抛错 ─────────────
+
+CAL_FIELDS = ["calendar_date", "is_trading_day"]
+BASIC_FIELDS = ["code", "code_name", "ipoDate", "outDate", "type", "status"]
+
+
+def test_sync_calendar_login_failure_raises():
+    """反例(B041): 登录失败 → BaoQueryError，而不是 None（trade_cal 会当「无数据」退出 0）"""
+    with patch.object(bstock.bs, "login", return_value=MagicMock(error_code="10001002", error_msg="用户名或密码错误")), \
+         patch.object(bstock.bs, "logout"):
+        with pytest.raises(bstock.BaoQueryError, match="登录失败"):
+            bstock.fetch_sync_calendar("2026-09-01", "2026-09-08")
+
+
+def test_sync_calendar_query_error_raises():
+    """反例(B041): 查询返回非 0 错误码 → 抛错（此前 logger.warning 后 return None）"""
+    with patch.object(bstock.bs, "login", return_value=MagicMock(error_code="0")), \
+         patch.object(bstock.bs, "logout") as logout, \
+         patch.object(bstock.bs, "query_trade_dates", return_value=_rs([], [], "10004006", "参数错误")):
+        with pytest.raises(bstock.BaoQueryError):
+            bstock.fetch_sync_calendar("2026-09-01", "2026-09-08")
+    logout.assert_called_once()                      # finally 仍然登出
+
+
+def test_sync_calendar_success_returns_renamed_frame():
+    """正例(B041 对照): 正常查询返回 cal_date / is_open 两列"""
+    with patch.object(bstock.bs, "login", return_value=MagicMock(error_code="0")), \
+         patch.object(bstock.bs, "logout"), \
+         patch.object(bstock.bs, "query_trade_dates",
+                      return_value=_rs(CAL_FIELDS, [["2026-09-08", "1"], ["2026-09-09", "1"]])):
+        df = bstock.fetch_sync_calendar("2026-09-08", "2026-09-09")
+    assert list(df.columns) == ["cal_date", "is_open"] and len(df) == 2
+
+
+def test_stock_info_login_failure_raises():
+    """反例(B042): 登录失败 → BaoQueryError（sync_basic 此前把空表当「无数据」退出 0）"""
+    with patch.object(bstock.bs, "login", return_value=MagicMock(error_code="10001002", error_msg="用户名或密码错误")), \
+         patch.object(bstock.bs, "logout"):
+        with pytest.raises(bstock.BaoQueryError, match="登录失败"):
+            bstock.fetch_stock_info(["all"])
+
+
+def test_stock_info_query_error_raises():
+    """反例(B042): query_stock_basic 返回非 0 错误码 → 抛错（此前 while 条件不成立直接空表）"""
+    with patch.object(bstock.bs, "login", return_value=MagicMock(error_code="0")), \
+         patch.object(bstock.bs, "logout") as logout, \
+         patch.object(bstock.bs, "query_stock_basic", return_value=_rs([], [], "10004006", "参数错误")):
+        with pytest.raises(bstock.BaoQueryError):
+            bstock.fetch_stock_info(["all"])
+    logout.assert_called_once()
+
+
+def test_stock_info_bj_only_is_a_documented_no_op_not_an_error():
+    """正例(B042 边界): 只请求北交所是 baostock 明确不支持的组合，按既有约定返回空表提示改用 akstock，
+    不登录、不抛错"""
+    with patch.object(bstock.bs, "login") as login:
+        df, extra = bstock.fetch_stock_info(["bj"])
+    assert df.empty and extra is None
+    login.assert_not_called()

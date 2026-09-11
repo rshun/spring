@@ -1,6 +1,9 @@
 # 修改记录:
 #   2026-05-26  Claude  下载/解析/入库三层分离：迁出到 datasource/tdx_offline 与 util/dbutil
 #   2026-06-12  Claude  新增 --full: cw 文件全量 md5 校验(默认只校验最近 N 个季度)
+#   2026-09-11  Claude  B040: main() 返回退出码(0成功/1失败)并由 sys.exit 传出；gbbq 四级回退
+#                       全部失败(fetch_gbbq 返回 None)与写库异常均退出 1——此前只打一句
+#                       info 就正常结束，CAPITAL_DETAIL 停更而调度方看到的是成功(契约 C1)
 """
 同步股本变迁数据 (CAPITAL_DETAIL)
 
@@ -14,6 +17,7 @@
 import argparse
 import duckdb
 import logging
+import sys
 import time
 
 from datasource import tdx_offline
@@ -39,7 +43,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     configure_etl_logging()
     args = parse_arguments()
 
@@ -48,33 +52,39 @@ def main() -> None:
     logger.info('股本变迁数据同步任务启动')
     logger.info('=' * 60)
 
-    # 1) 同步通达信专业财务文件
-    tdx_offline.sync_cw_files(full=args.full)
+    conn: duckdb.DuckDBPyConnection | None = None
+    try:
+        # 1) 同步通达信专业财务文件（逐文件失败只跳过；md5 清单本身拿不到会抛错）
+        tdx_offline.sync_cw_files(full=args.full)
 
-    # 2) 获取 gbbq 股本变迁数据
-    tick = time.time()
-    df_gbbq = tdx_offline.fetch_gbbq(download=args.download)
-    if df_gbbq is None:
-        logger.info("所有数据源均不可用，跳过 gbbq 同步")
-    else:
+        # 2) 获取 gbbq 股本变迁数据
+        tick = time.time()
+        df_gbbq = tdx_offline.fetch_gbbq(download=args.download)
+        if df_gbbq is None:
+            # 四级回退(下载/本地/缓存/服务器)全部失败。这是失败不是「今天没数据」：
+            # CAPITAL_DETAIL 停更会让 adjust -s local 用陈旧的除权事件算因子
+            logger.error("gbbq 所有数据源均不可用，CAPITAL_DETAIL 未更新，本次同步失败")
+            return 1
         logger.info(f"获取 gbbq 数据完成 用时 {time.time() - tick:.2f}s")
 
         # 3) 写入数据库
-        conn: duckdb.DuckDBPyConnection | None = None
-        try:
-            conn = dbutil.get_connection(is_read_only=False)
-            dbutil.save_capital_detail_to_db(df_gbbq, conn)
-        finally:
-            if conn is not None:
-                conn.close()
+        conn = dbutil.get_connection(is_read_only=False)
+        dbutil.save_capital_detail_to_db(df_gbbq, conn)
 
-    # 4) 清理项目内 gbbq 二进制缓存
-    tdx_offline.cleanup_gbbq_file()
+        logger.info('=' * 60)
+        logger.info(f'全部完成 用时 {time.time() - start:.2f}s')
+        logger.info('=' * 60)
+        return 0
 
-    logger.info('=' * 60)
-    logger.info(f'全部完成 用时 {time.time() - start:.2f}s')
-    logger.info('=' * 60)
+    except Exception as e:
+        logger.error(f"股本变迁数据同步失败：{e}")
+        return 1
+    finally:
+        if conn is not None:
+            conn.close()
+        # 4) 清理项目内 gbbq 二进制缓存（成败都清，避免残留旧缓存被下次误用）
+        tdx_offline.cleanup_gbbq_file()
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

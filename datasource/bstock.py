@@ -13,6 +13,10 @@
 #   2026-09-11  Claude  三个批量取数函数新增「全批失败」判定：逐只失败仍只跳过不中止（保持
 #                       既有语义），但全部被处理的标的都失败时抛 BaoQueryError——此前返回
 #                       空表，import_daily / fetch_index 只打 warning 就退出 0
+#   2026-09-11  Claude  B041/B042: fetch_sync_calendar / fetch_stock_info 登录失败与查询错误改为抛
+#                       BaoQueryError（此前返回 None / 空表，trade_cal / sync_basic 当作「无数据」
+#                       退出 0：TRADE_CAL 与 STOCK_INFO 停更都是静默的）；去掉 fetch_sync_calendar
+#                       的兜底 except，异常交给入口的 except → return 1
 import baostock as bs
 import logging
 import pandas as pd
@@ -125,15 +129,16 @@ def fetch_sync_calendar(start_date: str, end_date: str):
     lg = bs.login()
     if getattr(lg, "error_code", None) != "0":
         logger.error(f"baostock login failed: {getattr(lg, 'error_msg', '')}")
-        return None
+        raise BaoQueryError(f"[Baostock] 登录失败: {getattr(lg, 'error_msg', '')}")
     try:
         rs = bs.query_trade_dates(
             start_date=start_date,
             end_date=end_date
         )
         if rs.error_code != '0':
-            logger.warning(f"查询失败: {rs.error_msg}")
-            return None
+            # 查询失败必须抛出：返回 None 会让 trade_cal 打一句「未获取到交易日数据」后退出 0，
+            # TRADE_CAL 停更进而让所有单日校验程序连锁失败(契约 C1)
+            _raise_for_query_error("交易日历", rs.error_msg, rs.error_code)
         data_list = []
         while rs.next():
             data_list.append(rs.get_row_data())
@@ -143,9 +148,6 @@ def fetch_sync_calendar(start_date: str, end_date: str):
             'is_trading_day': 'is_open'
         })
         return df
-    except Exception as e:
-        logger.error(f"运行中发生错误: {e}")
-        return None
     finally:
         bs.logout()
 
@@ -168,10 +170,14 @@ def fetch_stock_info(exchanges: list) -> tuple[pd.DataFrame, pd.DataFrame | None
     lg = bs.login()
     if getattr(lg, "error_code", None) != "0":
         logger.error(f"baostock login failed: {getattr(lg, 'error_msg', '')}")
-        return pd.DataFrame(), None
+        raise BaoQueryError(f"[Baostock] 登录失败: {getattr(lg, 'error_msg', '')}")
 
     try:
         rs = bs.query_stock_basic()
+        if rs.error_code != "0":
+            # 查询失败必须抛出：原先 while 条件直接不成立→空表→sync_basic 退出 0，
+            # STOCK_INFO 停更 = 新股静默漏采(契约 C1)
+            _raise_for_query_error("股票基本信息", rs.error_msg, rs.error_code)
 
         data_list = []
         while rs.error_code == "0" and rs.next():

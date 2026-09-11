@@ -2,6 +2,8 @@
 #   2026-05-22  Claude  数据源模块 dlhttp 重命名为 web，更新 import 引用
 #   2026-09-11  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出：此前 except
 #                       Exception 后直接 return，写库/取数失败仍退出 0(契约 C1)
+#   2026-09-11  Claude  B043: 两个数据源(akstock→申万官网回退)都拿不到数据、或 --input 文件
+#                       一条都读不出时退出 1——此前打一句 warning 后退出 0
 """
 同步申万行业数据
   1、默认通过 ak.stock_industry_clf_hist_sw() 获取股票申万三级行业历史原始数据
@@ -186,7 +188,9 @@ def main() -> int:
             logger.info(f"\n[Step 1] 读取申万行业层级文件: {input_file}")
             industry_df = read_swclasscode_csv(input_file, args.version)
             if industry_df.empty:
-                logger.warning("未读取到申万行业层级定义，跳过写入。")
+                # 用户显式给了文件却一条都读不出，是失败不是「无数据」
+                logger.error(f"申万行业层级文件未读取到任何定义: {input_file}")
+                return 1
             else:
                 logger.info(f"  共读取 {len(industry_df)} 条申万行业层级定义。")
                 dbutil.save_sw_industry_hierarchy_to_db(industry_df, conn)
@@ -209,7 +213,10 @@ def main() -> int:
                     raw_df = web.fetch_stock_industry_clf_hist_sw()
 
             if raw_df is None or raw_df.empty:
-                logger.warning("未获取到股票申万行业历史原始数据，跳过写入。")
+                # akstock 与申万官网两个源都拿不到全市场分类表——不存在「今天恰好没数据」，
+                # 两个源在各自内部已把异常记成 logger.error，这里只需把结果判成失败
+                logger.error("两个数据源均未获取到股票申万行业历史原始数据，本次同步失败")
+                return 1
             else:
                 logger.info(f"  共获取 {len(raw_df)} 条股票申万行业历史原始数据。")
                 dbutil.save_stock_industry_clf_hist_sw_raw_to_db(raw_df, conn)

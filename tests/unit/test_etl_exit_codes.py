@@ -23,12 +23,13 @@ import pandas as pd
 import pytest
 
 from etl import (adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
-                 import_daily, init_db, sync_basic, sync_finance, sync_industry,
-                 sync_margin, trade_cal, update_limit)
+                 import_daily, init_db, sync_basic, sync_capital, sync_finance,
+                 sync_industry, sync_margin, trade_cal, update_limit)
 
 ETL_MODULES = [adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
                import_daily, update_limit,
-               trade_cal, sync_basic, sync_margin, sync_industry, sync_finance]
+               trade_cal, sync_basic, sync_margin, sync_industry, sync_finance,
+               sync_capital]
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────
@@ -670,3 +671,146 @@ def test_init_db_exit_code_propagated():
     source = Path(init_db.__file__).read_text(encoding="utf-8")
     assert "sys.exit(create_database_schema())" in source
     assert "\n    create_database_schema()\n" not in source
+
+
+# ── sync_capital（B040：08-19 与 09-11 两轮契约改造都漏掉的第 7 个入口）────────────
+
+def _capital_args(**kw) -> argparse.Namespace:
+    base = {"download": False, "full": False}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_sync_capital_success_returns_0():
+    """正例: 取到 gbbq 并写库 → 0"""
+    with patch.object(sync_capital, "configure_etl_logging"), \
+         patch.object(sync_capital, "parse_arguments", return_value=_capital_args()), \
+         patch.object(sync_capital, "tdx_offline") as tdx, \
+         patch.object(sync_capital, "dbutil") as dbutil:
+        tdx.fetch_gbbq.return_value = _df()
+        assert sync_capital.main() == 0
+        dbutil.save_capital_detail_to_db.assert_called_once()
+        tdx.cleanup_gbbq_file.assert_called_once()
+
+
+def test_sync_capital_all_sources_unavailable_returns_1():
+    """反例(本次修复的回归点): fetch_gbbq 四级回退全部失败返回 None → 1（此前打一句 info 退出 0）"""
+    with patch.object(sync_capital, "configure_etl_logging"), \
+         patch.object(sync_capital, "parse_arguments", return_value=_capital_args()), \
+         patch.object(sync_capital, "tdx_offline") as tdx, \
+         patch.object(sync_capital, "dbutil") as dbutil:
+        tdx.fetch_gbbq.return_value = None
+        assert sync_capital.main() == 1
+        dbutil.save_capital_detail_to_db.assert_not_called()
+        tdx.cleanup_gbbq_file.assert_called_once()      # 失败也要清缓存
+
+
+def test_sync_capital_save_raises_returns_1():
+    """反例: 写 CAPITAL_DETAIL 抛异常 → 1"""
+    with patch.object(sync_capital, "configure_etl_logging"), \
+         patch.object(sync_capital, "parse_arguments", return_value=_capital_args()), \
+         patch.object(sync_capital, "tdx_offline") as tdx, \
+         patch.object(sync_capital, "dbutil") as dbutil:
+        tdx.fetch_gbbq.return_value = _df()
+        dbutil.save_capital_detail_to_db.side_effect = RuntimeError("写库失败")
+        assert sync_capital.main() == 1
+
+
+def test_sync_capital_cw_sync_raises_returns_1():
+    """反例: cw 文件同步阶段抛错（如 md5 清单拿不到）→ 1，不进入 gbbq 阶段"""
+    with patch.object(sync_capital, "configure_etl_logging"), \
+         patch.object(sync_capital, "parse_arguments", return_value=_capital_args()), \
+         patch.object(sync_capital, "tdx_offline") as tdx, \
+         patch.object(sync_capital, "dbutil"):
+        tdx.sync_cw_files.side_effect = RuntimeError("cw 清单下载失败")
+        assert sync_capital.main() == 1
+        tdx.fetch_gbbq.assert_not_called()
+
+
+# ── sync_industry（B043：两个源都拿不到 → 1）──────────────────────────────────
+
+def test_sync_industry_both_sources_empty_returns_1():
+    """反例(本次修复的回归点): akstock 空 → 回退申万官网也空 → 1（此前 warning 后退出 0）"""
+    with patch.object(sync_industry, "myutil") as myutil, \
+         patch.object(sync_industry, "dbutil") as dbutil, \
+         patch.object(sync_industry, "parse_arguments", return_value=_industry_args()), \
+         patch.object(sync_industry, "check_parameters", return_value=True), \
+         patch("datasource.web.fetch_stock_industry_clf_hist_sw", return_value=pd.DataFrame()) as web:
+        myutil.import_source_module.return_value = _source(
+            "fetch_stock_industry_clf_hist_sw", pd.DataFrame())
+        assert sync_industry.main() == 1
+        web.assert_called_once()                                     # 确实走了回退
+        dbutil.save_stock_industry_clf_hist_sw_raw_to_db.assert_not_called()
+
+
+def test_sync_industry_fallback_succeeds_returns_0():
+    """正例: akstock 空但申万官网回退拿到数据 → 0（回退语义保持）"""
+    with patch.object(sync_industry, "myutil") as myutil, \
+         patch.object(sync_industry, "dbutil") as dbutil, \
+         patch.object(sync_industry, "parse_arguments", return_value=_industry_args()), \
+         patch.object(sync_industry, "check_parameters", return_value=True), \
+         patch("datasource.web.fetch_stock_industry_clf_hist_sw", return_value=_df()):
+        myutil.import_source_module.return_value = _source(
+            "fetch_stock_industry_clf_hist_sw", pd.DataFrame())
+        assert sync_industry.main() == 0
+        dbutil.save_stock_industry_clf_hist_sw_raw_to_db.assert_called_once()
+
+
+# ── sync_margin（B044：全批失败判定）──────────────────────────────────────────
+
+def test_sync_margin_summary_empty_returns_1():
+    """反例(本次修复的回归点): 汇总 akstock 与官网回退都空 → 1（此前 warning 后退出 0）"""
+    with patch.object(sync_margin, "myutil") as myutil, \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "web") as web, \
+         patch.object(sync_margin, "parse_arguments", return_value=_margin_args()), \
+         patch.object(sync_margin, "check_parameters", return_value=True):
+        dbutil.get_trade_dates.return_value = ["20260817"]
+        myutil.import_source_module.return_value = _source("fetch_margin_summary", pd.DataFrame())
+        web.fetch_margin_summary.return_value = pd.DataFrame()
+        assert sync_margin.main() == 1
+        dbutil.save_margin_summary_to_db.assert_not_called()
+
+
+def test_sync_margin_detail_all_days_missing_returns_1():
+    """反例: 明细区间内每个交易日两源都空 → 1"""
+    with patch.object(sync_margin, "myutil") as myutil, \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "web") as web, \
+         patch.object(sync_margin, "parse_arguments", return_value=_margin_args(only="detail")), \
+         patch.object(sync_margin, "check_parameters", return_value=True):
+        dbutil.get_trade_dates.return_value = ["20260815", "20260817"]
+        myutil.import_source_module.return_value = _source("fetch_margin_detail", pd.DataFrame())
+        web.fetch_margin_detail.return_value = pd.DataFrame()
+        assert sync_margin.main() == 1
+        dbutil.save_margin_detail_to_db.assert_not_called()
+
+
+def test_sync_margin_detail_partial_days_missing_returns_0():
+    """正例(关键边界): 明细只缺一部分交易日（深市次日才可得是常态）→ 仍为 0，只告警"""
+    with patch.object(sync_margin, "myutil") as myutil, \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "web") as web, \
+         patch.object(sync_margin, "parse_arguments", return_value=_margin_args(only="detail")), \
+         patch.object(sync_margin, "check_parameters", return_value=True):
+        dbutil.get_trade_dates.return_value = ["20260815", "20260817"]
+        module = _source("fetch_margin_detail", None)
+        module.fetch_margin_detail.side_effect = [
+            pd.DataFrame({"exchange_code": ["SH", "SZ"]}),   # 第一天有
+            pd.DataFrame(),                                   # 第二天空
+        ]
+        myutil.import_source_module.return_value = module
+        web.fetch_margin_detail.return_value = pd.DataFrame()
+        assert sync_margin.main() == 0
+        assert dbutil.save_margin_detail_to_db.call_count == 1
+
+
+def test_sync_margin_detail_source_missing_method_returns_1():
+    """反例: 请求明细但数据源模块没有 fetch_margin_detail → 1（此前 logger.error 后退出 0）"""
+    with patch.object(sync_margin, "myutil") as myutil, \
+         patch.object(sync_margin, "dbutil") as dbutil, \
+         patch.object(sync_margin, "parse_arguments", return_value=_margin_args(only="detail")), \
+         patch.object(sync_margin, "check_parameters", return_value=True):
+        dbutil.get_trade_dates.return_value = ["20260817"]
+        myutil.import_source_module.return_value = _source("fetch_margin_summary", pd.DataFrame())
+        assert sync_margin.main() == 1

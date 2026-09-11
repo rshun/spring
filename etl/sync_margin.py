@@ -3,6 +3,8 @@
 #   2026-06-20  Claude  默认日期由"自然日昨天"改为"上一个交易日"(深市数据次交易日才可得, 自然日昨天会漏抓且周一被跳过)
 #   2026-09-11  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出：此前 except
 #                       Exception 后直接 return，写库/取数失败仍退出 0(契约 C1)
+#   2026-09-11  Claude  B044: 新增全批失败判定——汇总一条没拿到、明细区间内全部交易日都没拿到、
+#                       或数据源缺方法时退出 1；逐日/逐交易所缺失仍只告警
 """
 功能: 获取沪深两市融资融券汇总和明细数据
 输入参数:
@@ -166,6 +168,9 @@ def main() -> int:
         conn = dbutil.get_connection(is_read_only=False)
 
         module = myutil.import_source_module(args.source)
+        # 全批失败判定：逐交易所/逐日缺失只告警(深市明细次交易日才可得是常态)，
+        # 但请求的数据一条都没拿到必须退出 1，不能当「今天没数据」(契约 C1)
+        failures: list[str] = []
 
         # ── 汇总 ──────────────────────────────────────────
         if args.only in ('summary', 'all'):
@@ -185,7 +190,8 @@ def main() -> int:
             if df_summary is not None and not df_summary.empty:
                 dbutil.save_margin_summary_to_db(df_summary, conn)
             else:
-                logger.warning("未获取到融资融券汇总数据，跳过数据库写入。")
+                logger.error("未获取到融资融券汇总数据（akstock 与交易所官网均无）。")
+                failures.append("汇总：区间内未获取到任何数据")
 
         # ── 明细 ──────────────────────────────────────────
         if args.only in ('detail', 'all'):
@@ -194,7 +200,9 @@ def main() -> int:
             has_ak_detail = hasattr(module, 'fetch_margin_detail')
             if not args.download and not has_ak_detail:
                 logger.error(f"模块 '{args.source}' 中没有定义 'fetch_margin_detail' 方法。")
+                failures.append("明细：数据源模块缺 fetch_margin_detail")
             else:
+                missing_days: list[str] = []
                 for i, d in enumerate(trade_dates, 1):
                     logger.info(f"  ({i}/{len(trade_dates)}) {d}")
                     if args.download:
@@ -209,7 +217,16 @@ def main() -> int:
                         dbutil.save_margin_detail_to_db(df_detail, conn)
                     else:
                         logger.warning(f"  {d} 未获取到融资融券明细数据，跳过。")
+                        missing_days.append(d)
+                if missing_days and len(missing_days) == len(trade_dates):
+                    failures.append(f"明细：区间内全部 {len(trade_dates)} 个交易日均未获取到")
+                elif missing_days:
+                    logger.warning(f"  明细：{len(missing_days)}/{len(trade_dates)} 个交易日未获取到: {missing_days}")
 
+        if failures:
+            for item in failures:
+                logger.error(f"融资融券同步失败：{item}")
+            return 1
         return 0
 
     except ImportError as e:

@@ -47,10 +47,10 @@ def test_bstock_fetch_adjust_factors():
     assert "back_factor" in result.columns
 
 
-def test_bstock_login_fail_returns_empty():
-    """模拟登录失败（错误 config），应返回空 DataFrame，不崩溃。"""
-    import baostock as bs
-    from datasource.bstock import fetch_adjust_factors
+def test_bstock_login_fail_raises():
+    """模拟登录失败：自 B024(2026-09-10) 起必须抛 BaoQueryError，让调用方退出 1，
+    而不是返回空 DataFrame 被当成「无数据」。"""
+    from datasource.bstock import fetch_adjust_factors, BaoQueryError
     from unittest.mock import patch, MagicMock
 
     mock_lg = MagicMock()
@@ -58,6 +58,5 @@ def test_bstock_login_fail_returns_empty():
     mock_lg.error_msg = "模拟登录失败"
     with patch("datasource.bstock.bs.login", return_value=mock_lg):
         with patch("datasource.bstock.bs.logout"):
-            result = fetch_adjust_factors([("600519", "SH", "2024-01-02", "2024-01-05", "L")])
-    assert isinstance(result, pd.DataFrame)
-    assert result.empty
+            with pytest.raises(BaoQueryError, match="登录失败"):
+                fetch_adjust_factors([("600519", "SH", "2024-01-02", "2024-01-05", "L")])

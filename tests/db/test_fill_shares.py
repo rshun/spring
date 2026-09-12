@@ -2,6 +2,7 @@
 #   2026-09-10  Claude  新增反例：库层失败必须重抛（此前 fill_daily_basic_shares / _mv 吞异常）
 #   2026-09-12  Claude  新增正反测试：float_shares 改以 turnover_rate 反推的
 #                       市场隐含流通盘为准、gbbq 降为 fallback
+#   2026-09-12  Claude  新增反例：吸附候选不得超过当日总股本
 from datetime import date, timedelta
 from unittest.mock import MagicMock
 
@@ -327,3 +328,30 @@ def test_fill_shares_never_exceeds_total_shares(mem_db):
 
     float_shares, total_shares = _float_on(mem_db, last.isoformat())
     assert float_shares <= total_shares
+
+
+def test_fill_shares_ignores_candidates_above_that_day_total(mem_db):
+    """反例: 吸附候选是该股全历史的股本取值, 早期交易日不得吸附到未来才出现的大流通盘。
+
+    不加「候选 <= 当日总股本」的过滤时, 这里会写出 float=2亿 > total=1亿 的非法行
+    (2011-2025 历史回补实测因此净增 1305 行违反)。
+    """
+    insert_stock_info(mem_db, "600644", "SH", "MAIN", "1993-01-01")
+    # 当期: 流通 5000万 / 总股本 1亿
+    _insert_capital_detail(mem_db, "600644", "2020-01-02", "股本变化",
+                           5000.0, 10000.0, 5000.0, 10000.0)
+    # 多年以后才扩股到 2亿 —— 该取值会进入候选集
+    _insert_capital_detail(mem_db, "600644", "2030-01-02", "股本变化",
+                           10000.0, 10000.0, 20000.0, 20000.0)
+    # 测试日落在 2026 年, 当日总股本仍是 1亿;
+    # implied = 2000000 * 100 / 1.0 = 2亿, 正好等于未来那个候选
+    last = _seed_days(mem_db, "600644.SH", "2026-08-01", _SEED_DAYS,
+                      turnover_rate=1.0, volume=2000000)
+
+    fill_daily_basic_shares(last.isoformat(), last.isoformat(), conn=mem_db)
+
+    float_shares, total_shares = _float_on(mem_db, last.isoformat())
+    assert total_shares == 100000000
+    assert float_shares <= total_shares
+    # 2亿候选被排除后, 剩余候选与 implied 差距超出容差 -> 回退 gbbq 的 5000万
+    assert float_shares == 50000000

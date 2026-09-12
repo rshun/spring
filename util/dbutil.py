@@ -28,6 +28,10 @@
 #                       「日期」不可信(实测 001223.SZ 的 4988.2万 事件被记成 2025-12-31,
 #                       实际 2026-04-28 生效, 提前 4 个月套用导致该股 2026-01~04 的
 #                       float_shares / float_mv 全错), 且自然解禁不进 gbbq 会让流通盘长期偏低
+#   2026-09-12  Claude  吸附候选按当日总股本封顶：候选集是该股全历史的股本取值, 早期交易日
+#                       可能吸附到未来才出现的大流通盘, 造成 float_shares > total_shares
+#                       (2011-2025 回补实测净增 1305 行违反); 闸门取的是窗口内的候选,
+#                       窗口跨越总股本减少的时点时同样会溢出, 故在闸门出口再封一次顶
 import logging
 import duckdb
 import pandas as pd
@@ -1104,8 +1108,8 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                   gbbq 的股本数值可信、生效日期不可信, 且自然解禁不产生 gbbq 记录。
 
     采信市场值需同时满足两层条件:
-      1) 当日反推值能「吸附」到该股 gbbq 出现过的股本取值(含总股本), 偏差在
-         snap_tolerance 内 —— 保证写入的是精确整数而非带噪声的反推值;
+      1) 当日反推值能「吸附」到该股 gbbq 出现过的股本取值(含总股本, 且不超过当日
+         总股本), 偏差在 snap_tolerance 内 —— 保证写入的是精确整数而非带噪声的反推值;
       2) 回看 _SHARE_GATE_WINDOW 个交易日内, 所有吸附成功的日子都指向同一个候选,
          且命中天数 >= _SHARE_GATE_MIN_HITS —— 挡掉 turnover_rate 口径本身不稳的个股。
     任一条不满足(含停牌 / 无成交 / turnover_rate 为空)即回退 gbbq 值 ——
@@ -1224,10 +1228,14 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         -- 取数比目标区间往前多 {gate_warmup} 天, 供下面的回看窗口预热。
         implied AS (
             SELECT db.code, db.trade_date,
+                   CAST(ROUND(ce.total_shares_wan * 10000) AS BIGINT) AS total_shares,
                    sd.volume * 100.0 / db.turnover_rate AS implied_float
             FROM DAILY_BASIC db
             JOIN STOCK_INFO i ON db.code = i.code
             JOIN STOCK_DAILY sd ON sd.code = db.code AND sd.date = db.trade_date
+            ASOF JOIN capital_events ce
+                ON db.code = ce.code
+                AND db.trade_date >= ce.date
             WHERE db.trade_date BETWEEN CAST(? AS DATE) - INTERVAL {gate_warmup} DAY
                                     AND CAST(? AS DATE)
                 AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
@@ -1239,6 +1247,8 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         ),
 
         -- 逐日吸附: 当日反推值吸附到最近的候选; 偏差超出容差则当天不作数(不产出行)。
+        -- 候选须 <= 当日总股本: 候选集是该股全历史的取值, 不加这道过滤, 早期交易日
+        -- 会吸附到未来才出现的大流通盘, 写出 float_shares > total_shares 的非法行。
         daily_snap AS (
             SELECT code, trade_date, cand
             FROM (
@@ -1248,7 +1258,9 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                            ORDER BY abs(sc.cand - im.implied_float), sc.cand
                        ) AS rn
                 FROM implied im
-                JOIN share_candidates sc ON sc.code = im.code
+                JOIN share_candidates sc
+                    ON sc.code = im.code
+                   AND sc.cand <= im.total_shares
             ) t
             WHERE t.rn = 1
               AND abs(t.cand - t.implied_float) <= t.implied_float * CAST(? AS DOUBLE)
@@ -1261,9 +1273,12 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                    CASE WHEN win_rows >= {gate_window}
                          AND hits     >= {gate_min_hits}
                          AND lo = hi
+                         -- 窗口内的候选可能来自总股本更大的时期(缩股 / 回购注销),
+                         -- 故最后再按当日总股本封一次顶
+                         AND lo <= total_shares
                         THEN lo END AS float_shares
             FROM (
-                SELECT im.code, im.trade_date,
+                SELECT im.code, im.trade_date, im.total_shares,
                        min(ds.cand)   OVER w AS lo,
                        max(ds.cand)   OVER w AS hi,
                        count(ds.cand) OVER w AS hits,

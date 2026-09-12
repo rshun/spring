@@ -128,3 +128,32 @@ def test_external_suspended_but_status_unknown(mem_db):
     assert result.status == checker.STATUS_MISMATCH
     issues = {r["code"]: r["issue"] for r in result.rows}
     assert issues["600001.SH"] == "外部停牌但库内 tradestatus 未知(-1)"
+
+
+def test_code_filter_binds_params_correctly(mem_db):
+    """正例(守参数绑定): 带 -c 过滤时占位符与参数个数必须匹配
+
+    code_filter 的占位符只在 universe CTE 定义处出现一次, CTE 被引用多次
+    不会重复绑定参数。若参数多传一份, 这里会抛「参数个数不匹配」。
+    """
+    _setup(mem_db)
+    _susp(mem_db, "600001.SH")
+    _daily(mem_db, "600001.SH", 1)
+    _susp(mem_db, "600002.SH")
+    _daily(mem_db, "600002.SH", 1)
+    result = check_suspension(mem_db, [DATE], "20240426", "20240426",
+                              "", "AND i.symbol IN (?)", ["600001"])
+    codes = {r["code"] for r in result.rows}
+    assert codes == {"600001.SH"}
+
+
+def test_code_filter_with_multiple_placeholders(mem_db):
+    """正例: 多个占位符同样要能正确绑定(两个 ? 对应两个参数)"""
+    _setup(mem_db)
+    for code in ("600001.SH", "600002.SH", "000003.SZ"):
+        _susp(mem_db, code)
+        _daily(mem_db, code, 1)
+    result = check_suspension(mem_db, [DATE], "20240426", "20240426",
+                              "", "AND i.symbol IN (?, ?)", ["600001", "000003"])
+    codes = {r["code"] for r in result.rows}
+    assert codes == {"600001.SH", "000003.SZ"}

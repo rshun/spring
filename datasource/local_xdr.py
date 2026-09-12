@@ -1,4 +1,13 @@
 # 修改记录:
+#   2026-09-12  Claude  复权因子漏采「转增股上市」/「未知新类别」类事件(破产重整等
+#                       场景的资本公积转增), 导致后复权价出现虚假跳空; 同时新增
+#                       除权参考价与交易所 pre_close 的偏差校正(gbbq 的转增比例
+#                       在重整场景下不等于原股东实际获得比例)
+#   2026-09-12  Claude  转增类事件收紧为「必须有价格跳空佐证」且比例一律取 pre_close：
+#                       实测 90 条转增事件仅 34 条当日真除权，41 条未跳空(转增股全部
+#                       用于偿债/引入重整投资人，原股东未获配故不除权)，无条件采纳会
+#                       凭空造出 +250% 量级的因子跳变
+# 修改记录:
 #   2026-09-06  Claude  新增：本地自算复权因子主源（方案A，CAPITAL_DETAIL 除权事件
 #                       + STOCK_DAILY 收盘价，见 docs/adj_factor_selfbuild.md §4）
 #   2026-09-06  Claude  修复 BUG-001：输出附带每股窗口前最近一条事件作为锚点行，
@@ -62,28 +71,51 @@ from util import dbutil
 
 logger = logging.getLogger("etl.datasource.local_xdr")
 
-# 只有「除权除息」类事件影响价格连续性；股本变化/送配股上市等不产生因子事件
-_EVENT_CATEGORY = "除权除息"
+# 影响价格连续性的 gbbq 事件类别。
+#   除权除息   —— 常规分红 / 送转 / 配股
+#   转增股上市 —— 破产重整等场景的资本公积转增
+#   未知新类别 —— 与「转增股上市」完全成对同值(各 101 条), 按 (code,date) 去重后只留一条
+# 不能加入「转配股上市」「股本变化」等股本变动类: CAPITAL_DETAIL 这四个字段是双重
+# 语义(见 schema 注释), 股本类记录里 dividend/bonus_share 是「万股」口径的前后股本
+# (实测 bonus_share 最大 416 万万股), 喂进除权公式会算出荒谬的因子。
+_EVENT_CATEGORIES = ("除权除息", "转增股上市", "未知新类别")
+
+# 上述类别中的「非常规除权」类: gbbq 只记了转增总比例, 但转增股常有相当部分用于
+# 偿债和引入重整投资人, 原股东实际获配比例不同甚至为零。因此这类事件必须由当日
+# 价格跳空佐证「交易所确实做了除权」才采纳, 且跳变比例一律取交易所 pre_close。
+_RESERVE_TRANSFER_CATEGORIES = ("转增股上市", "未知新类别")
+
+# 除权参考价与交易所 pre_close 的相对偏差超过此值时, 判定 gbbq 的送转/分红数值不可信,
+# 改以 pre_close 为准(仅限当日价格确实跳空的事件, 见 compute_event_factors)。
+_XDR_PRICE_TOLERANCE = 0.02
+
+# 判定「当日价格确实跳空」的相对阈值: A 股报价精度为分, 0.1% 足以区分舍入与真除权。
+_PRICE_GAP_THRESHOLD = 0.001
 _EVENT_VALUE_COLS = ["dividend", "bonus_share", "allotment_share"]
 RESULT_COLUMNS = ["code", "date", "fore_factor", "back_factor", "adjust_factor"]
 
+# event_pre_close 为事件当日交易所给出的前收(即除权参考价)，用于校正 gbbq 送转数值
+# 不可信的场景（破产重整转增）；当日停牌/无行情时为 NULL，此时只用 gbbq 口径。
 # 事件级取数（BUG-008/012①/014）：取价下推为 ASOF LEFT JOIN，
 # 只取 tradestatus=1 且 close>0 的有效收盘价（停牌行 close 是前收结转的正数，
 # close>0 无过滤作用）；prev_close 为 NULL 的事件保留在行内，由
 # compute_event_factors 分级统计（BUG-011）。候选经 temp_candidates 关联，
 # 不再拼 code IN (...) 占位符。
 _EVENT_SQL = """
-SELECT t.code AS code, c.date AS date,
+SELECT t.code AS code, c.date AS date, c.category,
        c.dividend, c.bonus_share, c.allotment_share, c.allotment_price,
        d.close AS prev_close,
+       cur.pre_close AS event_pre_close,
        (SELECT MIN(dd.date) FROM STOCK_DAILY dd WHERE dd.code = t.code) AS first_price_date
 FROM temp_candidates t
 JOIN CAPITAL_DETAIL c ON c.code = t.symbol
+LEFT JOIN STOCK_DAILY cur
+       ON cur.code = t.code AND cur.date = c.date AND cur.tradestatus = 1
 ASOF LEFT JOIN (
     SELECT code, date, close FROM STOCK_DAILY
     WHERE tradestatus = 1 AND close > 0
 ) d ON d.code = t.code AND d.date < c.date
-WHERE c.category = ?
+WHERE c.category IN ({category_placeholders})
   AND c.date <= CURRENT_DATE
   AND (COALESCE(c.dividend, 0) > 0
        OR COALESCE(c.bonus_share, 0) > 0
@@ -129,7 +161,8 @@ def _empty_result() -> pd.DataFrame:
 
 def _new_stats() -> dict:
     """跳过事件的可观测统计（BUG-011）：N=skipped 总数, M=stocks, X=gap 区间内部缺口"""
-    return {"skipped": 0, "stocks": set(), "gap": 0, "out_of_coverage": 0}
+    return {"skipped": 0, "stocks": set(), "gap": 0, "out_of_coverage": 0,
+            "price_corrected": 0, "transfer_no_gap": 0}
 
 
 def _count_skip(stats: dict | None, df: pd.DataFrame, *, gap: bool = False,
@@ -181,9 +214,21 @@ def compute_event_factors(events_df: pd.DataFrame,
     if events.empty:
         return _empty_result()
 
-    events = (events
-              .sort_values(["code", "date"])
-              .drop_duplicates(["code", "date"], keep="last"))
+    # 同一 (code,date) 可能被打多个 category 标签(实测「转增股上市」与「未知新类别」
+    # 101 条完全成对同值)。排序让常规「除权除息」排在最后, keep="last" 优先保留它,
+    # 使同日兼有常规除权与转增标签时走常规口径。
+    if "category" in events.columns:
+        events["_is_reserve_transfer"] = events["category"].isin(
+            _RESERVE_TRANSFER_CATEGORIES)
+        events = (events
+                  .sort_values(["code", "date", "_is_reserve_transfer"],
+                               ascending=[True, True, False])
+                  .drop_duplicates(["code", "date"], keep="last"))
+    else:
+        events["_is_reserve_transfer"] = False
+        events = (events
+                  .sort_values(["code", "date"])
+                  .drop_duplicates(["code", "date"], keep="last"))
 
     # ── 缺前收盘价（BUG-011）：区分「历史覆盖外」与「区间内部缺口」──────────────
     missing = events["prev_close"].isna() | (events["prev_close"] <= 0)
@@ -232,6 +277,33 @@ def compute_event_factors(events_df: pd.DataFrame,
     if events.empty:
         return _empty_result()
 
+    # ── 转增类事件的准入闸门 ──────────────────────────────────────────
+    # gbbq 的「转增股上市」只说明转增股登记到账, 不等于交易所做了除权:
+    # 转增股若全部用于偿债和引入重整投资人, 原股东未获配, 当天不除权。
+    # 因此要求当日 pre_close 相对前收确实跳空, 否则丢弃该事件。
+    if events["_is_reserve_transfer"].any():
+        prev_c = pd.to_numeric(events["prev_close"], errors="coerce")
+        cur_pc = (pd.to_numeric(events["event_pre_close"], errors="coerce")
+                  if "event_pre_close" in events.columns
+                  else pd.Series(float("nan"), index=events.index))
+        gapped = (cur_pc > 0) & (prev_c > 0) & (
+            (cur_pc - prev_c).abs() / prev_c > _PRICE_GAP_THRESHOLD)
+        drop_transfer = events["_is_reserve_transfer"] & ~gapped
+        if drop_transfer.any():
+            sub_ev = events.loc[drop_transfer]
+            for code, grp in sub_ev.groupby("code"):
+                dates = grp["date"].dt.strftime("%Y-%m-%d").tolist()
+                logger.info(f"{code} 转增类事件当日未见价格跳空（交易所未除权），"
+                            f"跳过 {len(grp)} 条: {dates}")
+            # 不计入 skipped：转增股全部用于偿债/引入投资人时交易所本就不除权，
+            # 属正常结果，不得触发「事件链不完整，停止写入」守卫。
+            if stats is not None:
+                stats["transfer_no_gap"] = (stats.get("transfer_no_gap", 0)
+                                            + int(drop_transfer.sum()))
+            events = events.loc[~drop_transfer]
+        if events.empty:
+            return _empty_result()
+
     c = events["prev_close"]
     d = events["dividend"] / 10.0
     s = events["bonus_share"] / 10.0
@@ -239,6 +311,38 @@ def compute_event_factors(events_df: pd.DataFrame,
     p = events["allotment_price"].fillna(0.0)
 
     x = (c - d + p * n) / (1.0 + s + n)
+
+    # ── 除权参考价校正 ────────────────────────────────────────────────
+    # 破产重整类的资本公积转增, gbbq 的 bonus_share 是「总转增比例」, 但转增股并非
+    # 全部分配给原股东(一部分用于偿债和引入重整投资人), 交易所按原股东实际获得的
+    # 比例计算除权参考价, 于是 gbbq 推出的 X 显著偏大/偏小。
+    # 事件当日的 pre_close 就是交易所给出的权威除权参考价, 偏差超阈值时以它为准。
+    #
+    # 只在「当日价格确实跳空」时校正: 若 pre_close == 上一日收盘(没除权), 说明交易所
+    # 当天不做除权处理(如 2005-06 股改对价送股), 此时 gbbq 的因子跳变是另一套口径,
+    # 不属于本 bug 的范围, 保持原样以免改动历史复权序列。
+    if "event_pre_close" in events.columns:
+        actual = pd.to_numeric(events["event_pre_close"], errors="coerce")
+        price_gapped = (actual > 0) & (
+            (actual - c).abs() / c > _PRICE_GAP_THRESHOLD)
+        # 转增类已过跳空闸门, 其 gbbq 比例实测 100% 与交易所不符, 一律取 pre_close;
+        # 常规除权只在偏差超阈值时才改用 pre_close。
+        deviating = (price_gapped & (x > 0)
+                     & (events["_is_reserve_transfer"]
+                        | ((x - actual).abs() / actual > _XDR_PRICE_TOLERANCE)))
+        if deviating.any():
+            sub_ev = events.loc[deviating]
+            for code, grp in sub_ev.groupby("code"):
+                dates = grp["date"].dt.strftime("%Y-%m-%d").tolist()
+                logger.warning(
+                    f"{code} gbbq 除权参考价与交易所 pre_close 偏差超 "
+                    f"{_XDR_PRICE_TOLERANCE:.0%}，改以 pre_close 为准 "
+                    f"{len(grp)} 条: {dates}")
+            if stats is not None:
+                stats["price_corrected"] = (stats.get("price_corrected", 0)
+                                            + int(deviating.sum()))
+            x = x.where(~deviating, actual)
+
     if (x <= 0).any():
         sub = events.loc[x <= 0]
         for code, grp in sub.groupby("code"):
@@ -371,7 +475,10 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
         # 累计链必须从该股首个事件起算，事件取全历史、不按窗口裁剪
         logger.info(f"开始读取除权事件及事件日前收盘价（ASOF 下推，候选 {len(candidates)} 只）...")
         with _progress_heartbeat("读取事件及前收盘价"):
-            events_df = conn.execute(_EVENT_SQL, [_EVENT_CATEGORY]).fetchdf()
+            category_sql = _EVENT_SQL.format(
+                category_placeholders=", ".join(["?"] * len(_EVENT_CATEGORIES)))
+            events_df = conn.execute(category_sql,
+                                     list(_EVENT_CATEGORIES)).fetchdf()
         logger.info(f"事件读取完成：{len(events_df)} 行，涉及 "
                     f"{events_df['code'].nunique() if not events_df.empty else 0} 只股票")
 
@@ -379,6 +486,14 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
             factors = compute_event_factors(events_df, stats=stats)
 
         # BUG-011：跑批汇总——缺价/缺配股价等被跳过事件的可观测出口
+        if stats.get("transfer_no_gap", 0) > 0:
+            logger.info(f"本次跳过 {stats['transfer_no_gap']} 条转增类事件"
+                        f"（当日未见价格跳空，交易所未做除权处理）")
+
+        if stats.get("price_corrected", 0) > 0:
+            logger.warning(f"本次有 {stats['price_corrected']} 条事件的除权参考价"
+                           f"改用交易所 pre_close（gbbq 送转数值不可信）")
+
         if stats["skipped"] > 0:
             summary = (f"本次跳过 {stats['skipped']} 条事件，涉及 {len(stats['stocks'])} 只股票"
                        f"（其中区间内部缺口 {stats['gap']} 条，"

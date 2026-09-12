@@ -20,6 +20,9 @@
 #   2026-09-10  Claude  废弃 bstock 复权因子源：-s 默认改为 local，bstock 保留为留痕并打
 #                       废弃警告；移除仅服务 bstock 的 --by-date 开关与 resolve_by_date
 #                       （bstock.fetch_adjust_factors_by_date 代码与 ADJ_FACTOR_RAW 数据均保留）
+#   2026-09-12  Claude  -s bstock 恒不稠密化：--densify on 原可越过 auto 语义，拿已知有
+#                       682 条脏行的 ADJ_FACTOR_RAW 去覆盖主表 ADJ_FACTOR；现该源只写
+#                       ADJ_FACTOR_RAW，显式传 --densify 会告警并被忽略
 import argparse
 import duckdb
 import logging
@@ -78,9 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=str.lower,
         choices=['auto', 'on', 'off'],
         default='auto',
-        help='是否稠密化写入 ADJ_FACTOR 逐日表: '
-             'auto=local 源开 / bstock 源关(默认, bstock 只留痕写RAW), '
-             'on=强制稠密化, off=只写事件表'
+        help='是否稠密化写入 ADJ_FACTOR 逐日表（仅对 -s local 生效）: '
+             'auto=开(默认), on=强制稠密化, off=只写事件表。'
+             '-s bstock 恒不稠密化，本开关对其无效'
     )
 
     return parser
@@ -89,9 +92,14 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_densify(mode: str, source: str) -> bool:
     """决定是否稠密化写入 ADJ_FACTOR 逐日表。
 
-    auto 语义: local 源自算整链是主源，必须稠密化(on)；bstock 降级为留痕层，
-    只写 ADJ_FACTOR_RAW 不再喂稠密表(off)。on/off 显式强制。
+    bstock 源恒返回 False：该源已废弃为留痕层，其事件表 ADJ_FACTOR_RAW 存在已知
+    脏行（682 条 adjust_factor != back_factor，见 docs/adj_factor_selfbuild.md §2），
+    拿它喂稠密表会污染主源 ADJ_FACTOR。--densify 对该源不生效。
+
+    local 源：auto 视为 on（自算整链是主源，必须稠密化）；on/off 显式强制。
     """
+    if source == 'bstock':
+        return False
     if mode != 'auto':
         return mode == 'on'
     return source == 'local'
@@ -561,6 +569,10 @@ def main() -> int:
     if args.source == "bstock":
         logger.warning("bstock 复权因子源已废弃（2026-09-10）：仅继续留痕写 ADJ_FACTOR_RAW，"
                        "不再维护 ADJ_FACTOR 稠密表；日常请使用 -s local（现为默认）。")
+        if getattr(args, "densify", "auto") != "auto":
+            logger.warning("-s bstock 恒不稠密化，--densify %s 已忽略：ADJ_FACTOR_RAW "
+                           "存在已知脏行，不得用于覆盖主表 ADJ_FACTOR。",
+                           args.densify)
 
     logger.info("=" * 60)
     logger.info("获取股票复权因子任务启动")

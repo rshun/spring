@@ -23,6 +23,7 @@
 #   2026-09-12  Claude  B046: get_trade_dates 查询失败改为重抛，不再吞成空列表——调用方
 #                       无法区分「区间内真没有交易日」与「查询失败」，后者被当成前者会让
 #                       lday / tdx 整批取数静默产出 0 行并退出 0（契约 C1）
+#   2026-09-12  Claude  新增停牌/涨跌停池写库函数(先删当日再插入, 避免 INSERT OR REPLACE 留幽灵行)
 #   2026-09-12  Claude  fill_daily_basic_shares 的 float_shares 改以 turnover_rate 反推的
 #                       市场隐含流通盘为准、gbbq 降为 fallback：gbbq 的股本「数值」可信但
 #                       「日期」不可信(实测 001223.SZ 的 4988.2万 事件被记成 2025-12-31,
@@ -1549,3 +1550,113 @@ def fill_daily_basic_mv(start_date: str, end_date: str,
     finally:
         if need_close and con is not None:
             con.close()
+
+def _to_std_codes(df: pd.DataFrame, what: str) -> pd.DataFrame:
+    """把 symbol 裸码列转成 code 标准代码列，丢弃北交所行并记数。
+
+    北交所不是错误数据，是本次范围之外，故丢弃 + INFO 记数，不抛错。
+    """
+    out = df.copy()
+    out["code"] = out["symbol"].map(myutil.symbol_to_std_code)
+    dropped = int(out["code"].isna().sum())
+    if dropped:
+        logger.info(f"[{what}] 丢弃 {dropped} 条非沪深(北交所)记录，akstock 源不覆盖该市场")
+    return out[out["code"].notna()].drop(columns=["symbol"])
+
+
+def save_suspension_to_db(df: pd.DataFrame, trade_date: str,
+                          conn: duckdb.DuckDBPyConnection,
+                          source: str = "akstock") -> int:
+    """写入 SUSPENSION_DAILY：先删当日、再整批插入，返回入库行数
+
+    不用 INSERT OR REPLACE：停牌名单是每日全量快照，成员会变，
+    INSERT OR REPLACE 只覆盖同主键行、不删多余旧行，重跑会留下幽灵行。
+    """
+    try:
+        conn.execute("DELETE FROM SUSPENSION_DAILY WHERE trade_date = ?", [trade_date])
+        if df is None or df.empty:
+            logger.warning(f"[SUSPENSION_DAILY] {trade_date} 无停牌数据，已清空当日")
+            return 0
+
+        rows = _to_std_codes(df, "SUSPENSION_DAILY")
+        if rows.empty:
+            return 0
+        rows = rows.assign(trade_date=trade_date, source=source)
+        conn.register("temp_suspension", rows)
+        conn.execute("""
+            INSERT INTO SUSPENSION_DAILY
+                (code, trade_date, name, suspend_time, resume_deadline,
+                 suspend_period, suspend_reason, market, expect_resume, source)
+            SELECT code, CAST(trade_date AS DATE), name,
+                   CAST(suspend_time    AS TIMESTAMP),
+                   CAST(resume_deadline AS TIMESTAMP),
+                   suspend_period, suspend_reason, market,
+                   CAST(expect_resume   AS TIMESTAMP),
+                   source
+            FROM temp_suspension
+        """)
+        logger.info(f"[入库] SUSPENSION_DAILY {trade_date} 写入 {len(rows)} 条")
+        return len(rows)
+    except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码，吞掉就是「写库失败退出 0」（契约 C1）
+        logger.error(f"写入 SUSPENSION_DAILY 表失败: {e}")
+        raise
+    finally:
+        try:
+            conn.unregister("temp_suspension")
+        except Exception:
+            pass
+
+
+def save_limit_pool_to_db(df: pd.DataFrame, trade_date: str, limit_type: str,
+                          conn: duckdb.DuckDBPyConnection,
+                          source: str = "akstock") -> int:
+    """写入 LIMIT_POOL_DAILY 的一个方向：先删当日该方向、再整批插入
+
+    删除必须带 limit_type：一张表装两个池，重写涨停池不能连带删掉跌停池。
+    """
+    if limit_type not in ("U", "D"):
+        raise ValueError(f"limit_type 只能是 U 或 D，收到: {limit_type!r}")
+    try:
+        conn.execute(
+            "DELETE FROM LIMIT_POOL_DAILY WHERE trade_date = ? AND limit_type = ?",
+            [trade_date, limit_type])
+        if df is None or df.empty:
+            logger.warning(f"[LIMIT_POOL_DAILY] {trade_date} {limit_type} "
+                           f"无数据，已清空当日该方向")
+            return 0
+
+        rows = _to_std_codes(df, "LIMIT_POOL_DAILY")
+        if rows.empty:
+            return 0
+        rows = rows.assign(trade_date=trade_date, limit_type=limit_type, source=source)
+        conn.register("temp_limit_pool", rows)
+        conn.execute("""
+            INSERT INTO LIMIT_POOL_DAILY
+                (code, trade_date, limit_type, name, pct_change, close, amount,
+                 float_mv, total_mv, turnover_rate, seal_amount, last_seal_time,
+                 industry, first_seal_time, broken_times, limit_stat, boards,
+                 pe_dynamic, board_amount, down_days, open_times, source)
+            SELECT code, CAST(trade_date AS DATE), limit_type, name,
+                   CAST(pct_change    AS DOUBLE), CAST(close        AS DOUBLE),
+                   CAST(amount        AS DOUBLE), CAST(float_mv     AS DOUBLE),
+                   CAST(total_mv      AS DOUBLE), CAST(turnover_rate AS DOUBLE),
+                   CAST(seal_amount   AS DOUBLE), last_seal_time, industry,
+                   first_seal_time,
+                   CAST(broken_times  AS INTEGER), limit_stat,
+                   CAST(boards        AS INTEGER),
+                   CAST(pe_dynamic    AS DOUBLE), CAST(board_amount AS DOUBLE),
+                   CAST(down_days     AS INTEGER), CAST(open_times  AS INTEGER),
+                   source
+            FROM temp_limit_pool
+        """)
+        logger.info(f"[入库] LIMIT_POOL_DAILY {trade_date} {limit_type} 写入 {len(rows)} 条")
+        return len(rows)
+    except Exception as e:
+        logger.error(f"写入 LIMIT_POOL_DAILY 表失败: {e}")
+        raise
+    finally:
+        try:
+            conn.unregister("temp_limit_pool")
+        except Exception:
+            pass

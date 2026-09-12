@@ -1,6 +1,5 @@
 """sync_suspension 的参数面与纯函数逻辑(不触网、不连库)。"""
 import pandas as pd
-import pytest
 
 from etl import sync_suspension
 

@@ -147,7 +147,12 @@ def main() -> int:
         logger.warning("区间内无交易日，任务结束。")
         return 1
 
-    module = myutil.import_source_module(args.source)
+    try:
+        module = myutil.import_source_module(args.source)
+    except ImportError as e:
+        logger.error(f"无法导入模块 {args.source}，请检查文件名是否存在。{e}")
+        return 1
+
     if not hasattr(module, 'fetch_suspension'):
         logger.error(f"模块 '{args.source}' 中没有定义 'fetch_suspension' 方法。")
         return 1

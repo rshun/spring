@@ -23,6 +23,12 @@
 #   2026-09-12  Claude  -s bstock 恒不稠密化：--densify on 原可越过 auto 语义，拿已知有
 #                       682 条脏行的 ADJ_FACTOR_RAW 去覆盖主表 ADJ_FACTOR；现该源只写
 #                       ADJ_FACTOR_RAW，显式传 --densify 会告警并被忽略
+#   2026-09-12  Claude  -s bstock 恢复按交易日路由(无开关，由参数形态推断)：未指定 -c/-x
+#                       时走 query_daily_adjust_factor 拉全市场并按交易日循环；指定了股票
+#                       代码或具体交易所仍走逐股 query_adjust_factor
+#   2026-09-12  Claude  移除 --densify 开关：on 对 local 与 auto 等价、对 bstock 被忽略，
+#                       唯一有实效的 off 会写下 STATE 却不稠密化(B007)；稠密化改为完全由
+#                       -s 决定(local 开 / bstock 关)，resolve_densify 收为单参数
 import argparse
 import duckdb
 import logging
@@ -76,33 +82,45 @@ def build_parser() -> argparse.ArgumentParser:
              'bstock=【已废弃】baostock 下载, 仅留痕写 ADJ_FACTOR_RAW, 不再维护稠密表'
     )
 
-    parser.add_argument(
-        '--densify',
-        type=str.lower,
-        choices=['auto', 'on', 'off'],
-        default='auto',
-        help='是否稠密化写入 ADJ_FACTOR 逐日表（仅对 -s local 生效）: '
-             'auto=开(默认), on=强制稠密化, off=只写事件表。'
-             '-s bstock 恒不稠密化，本开关对其无效'
-    )
-
     return parser
 
 
-def resolve_densify(mode: str, source: str) -> bool:
-    """决定是否稠密化写入 ADJ_FACTOR 逐日表。
+def resolve_densify(source: str) -> bool:
+    """决定是否稠密化写入 ADJ_FACTOR 逐日表——完全由数据源决定，没有开关。
 
-    bstock 源恒返回 False：该源已废弃为留痕层，其事件表 ADJ_FACTOR_RAW 存在已知
-    脏行（682 条 adjust_factor != back_factor，见 docs/adj_factor_selfbuild.md §2），
-    拿它喂稠密表会污染主源 ADJ_FACTOR。--densify 对该源不生效。
+    bstock 恒 False：该源已废弃为留痕层，其事件表 ADJ_FACTOR_RAW 存在已知脏行
+    （682 条 adjust_factor != back_factor，见 docs/adj_factor_selfbuild.md §2），
+    拿它喂稠密表会污染主源 ADJ_FACTOR。
 
-    local 源：auto 视为 on（自算整链是主源，必须稠密化）；on/off 显式强制。
+    local 恒 True：自算整链是主源，必须维护稠密表。
+
+    原 --densify 开关 2026-09-12 移除：on 对 local 与 auto 等价、对 bstock 被忽略，
+    唯一有实效的 off 还会写下 ADJ_FACTOR_LOCAL_STATE 却不稠密化（B007），把股票
+    标成「已初始化」，下一次日常跑只能靠 check_dense_gaps 拦下再手工回填。
     """
-    if source == 'bstock':
-        return False
-    if mode != 'auto':
-        return mode == 'on'
     return source == 'local'
+
+
+def resolve_by_date(source: str, codes: list[str] | None, exchanges: list[str] | None) -> bool:
+    """决定 bstock 源是否走按交易日的全市场接口 query_daily_adjust_factor。
+
+    没有开关，完全由参数形态推断（与 import_daily.resolve_by_date 同一套思路）：
+      - 只有 bstock 提供按日整市场接口，local 源是纯库内计算，恒 False；
+      - 给了 -c 股票代码、或 -x 指定了具体交易所（非 all），说明只要一部分股票，
+        逐股 query_adjust_factor 比拉全市场再筛更划算 → False；
+      - 其余情况（默认当天、只给起止日期）→ True：按交易日循环，每个交易日一次
+        query_daily_adjust_factor 拿全市场，比逐股 5000+ 次请求快得多。
+
+    日期形态不参与判断：默认当天与显式区间都走按日，区间由 _fetch_market_by_date
+    内部按 TRADE_CAL 展开逐日循环。
+    """
+    if source != 'bstock':
+        return False
+    if codes:
+        return False
+    if exchanges and {str(e).lower() for e in exchanges} != {'all'}:
+        return False
+    return True
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -471,7 +489,7 @@ def check_dense_gaps(conn: duckdb.DuckDBPyConnection, stock_list: list[tuple]) -
     缺口定义（三类，任一命中即拒绝运行，由调用方报错退出）：
       tail  该股已有稠密行，但 (最后稠密日, start_date) 开区间内仍有交易日——日常跑批漏跑
       init  该股尚无稠密行，但 [STOCK_INFO.list_date, start_date) 内有交易日——新股上市日被
-            sync_basic 滞后错过，或 --densify off 先写了 STATE 却从未稠密化
+            sync_basic 滞后错过，或早期 --densify off（开关已移除）先写了 STATE 却从未稠密化
       hole  该股稠密行 [min, max] 区间内部缺交易日——手工删行、半途失败
     首次全量初始化（-b 早于所有上市日）时 start_date == list_date，三类都不会误报。
     只读，不修改任何表。返回按首个缺失日排序的 dict 列表：
@@ -564,15 +582,12 @@ def main() -> int:
     begin_date = myutil.trans_datestr_format(args.begin)
     end_date   = myutil.trans_datestr_format(args.end)
 
-    densify = resolve_densify(getattr(args, 'densify', 'auto'), args.source)
+    densify = resolve_densify(args.source)
+    by_date = resolve_by_date(args.source, args.codes, args.exchanges)
     event_table = "ADJ_FACTOR_LOCAL" if args.source == "local" else "ADJ_FACTOR_RAW"
     if args.source == "bstock":
         logger.warning("bstock 复权因子源已废弃（2026-09-10）：仅继续留痕写 ADJ_FACTOR_RAW，"
                        "不再维护 ADJ_FACTOR 稠密表；日常请使用 -s local（现为默认）。")
-        if getattr(args, "densify", "auto") != "auto":
-            logger.warning("-s bstock 恒不稠密化，--densify %s 已忽略：ADJ_FACTOR_RAW "
-                           "存在已知脏行，不得用于覆盖主表 ADJ_FACTOR。",
-                           args.densify)
 
     logger.info("=" * 60)
     logger.info("获取股票复权因子任务启动")
@@ -582,6 +597,8 @@ def main() -> int:
     logger.info(f"     指定代码:  {args.codes if args.codes else '无 (处理全市场)'}")
     logger.info(f"     数据源:    {args.source}")
     logger.info(f"     事件表:    {event_table}，稠密化: {'开' if densify else '关(仅写事件表留痕)'}")
+    if args.source == "bstock":
+        logger.info(f"     取数接口:  {'按交易日全市场 query_daily_adjust_factor(逐交易日循环)' if by_date else '逐股 query_adjust_factor'}")
     logger.info("=" * 60)
 
     candidate_codes = dbutil.get_candidate_codes(
@@ -612,11 +629,16 @@ def main() -> int:
         # -s local 对应 datasource/local_xdr.py（文件名带 _xdr 后缀，与 CLI 名做个映射）
         module_name = "local_xdr" if args.source == "local" else args.source
         module = myutil.import_source_module(module_name)
-        if not hasattr(module, 'fetch_adjust_factors'):
-            logger.error(f"模块 '{module_name}' 中没有定义 'fetch_adjust_factors' 方法。")
+        # 守卫检查的方法必须与下面实际调用的一致（B005），否则模块能力缺失会漏到兜底 except
+        required = 'fetch_adjust_factors_by_date' if by_date else 'fetch_adjust_factors'
+        if not hasattr(module, required):
+            logger.error(f"模块 '{module_name}' 中没有定义 '{required}' 方法。")
             return 1
 
-        adjust = module.fetch_adjust_factors(candidate_codes)
+        if by_date:
+            adjust = module.fetch_adjust_factors_by_date(candidate_codes, begin_date, end_date)
+        else:
+            adjust = module.fetch_adjust_factors(candidate_codes)
 
         if adjust is None:
             adjust = pd.DataFrame()

@@ -4,6 +4,8 @@
 #                       adjust 缺方法守卫
 #   2026-09-10  Claude  bstock 复权因子源废弃：移除 adjust --by-date 用例，新增无开关/默认 local/
 #                       废弃警告用例；test_main_dispatch 收敛为 import_daily
+#   2026-09-12  Claude  adjust 恢复 bstock 按日路由：新增参数形态推断、main 分派、按日方法
+#                       缺失守卫的正反例；无开关用例改为断言「无 --by-date 但有推断函数」
 """按日期接口的路由、字段转换、范围及失败处理；不连接真实网络或数据库。"""
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch, call
@@ -224,11 +226,83 @@ def test_non_bstock_source_never_uses_by_date_api(source):
 
 
 def test_adjust_has_no_by_date_switch():
-    """反例: bstock 复权因子源废弃后 adjust 不应再有 --by-date（仅服务 bstock 按日接口）"""
+    """反例: adjust 不应有 --by-date 开关, 路由完全由参数形态推断(与 import_daily 一致)"""
     dests = {a.dest for a in adjust.build_parser()._actions}
     assert "by_date" not in dests
     assert "by_date" not in describe_cli.describe("adjust")["arguments"]
-    assert not hasattr(adjust, "resolve_by_date")
+    assert callable(adjust.resolve_by_date)
+
+
+@pytest.mark.parametrize("argv, expected", [
+    ([], True),                                             # 默认当天 → 按日拉全市场
+    (["-b", "20260907", "-e", "20260911"], True),           # 只给起止日期 → 按日逐交易日循环
+    (["-b", "20260907"], True),                             # 只给一端同样只是日期
+    (["-x", "all"], True),                                  # 显式 all 与默认等价, 仍是全市场
+    (["-c", "600000"], False),                              # 指定代码 → 逐股
+    (["-x", "sh"], False),                                  # 指定具体交易所 → 逐股
+    (["-x", "sz", "bj"], False),
+    (["-b", "20260907", "-e", "20260911", "-c", "600000"], False),
+])
+def test_adjust_bstock_route_by_argv_shape(argv, expected):
+    """正反例: -s bstock 未限定范围走按日全市场接口, 指定代码/具体交易所退回逐股"""
+    args = adjust.build_parser().parse_args(["-s", "bstock"] + argv)
+    assert adjust.resolve_by_date(args.source, args.codes, args.exchanges) is expected
+
+
+@pytest.mark.parametrize("argv", [[], ["-b", "20260907", "-e", "20260911"], ["-x", "all"]])
+def test_adjust_local_source_never_uses_by_date(argv):
+    """反例: local 是纯库内计算, 任何参数形态都不得走 bstock 的按日接口"""
+    args = adjust.build_parser().parse_args(argv)
+    assert args.source == "local"
+    assert adjust.resolve_by_date(args.source, args.codes, args.exchanges) is False
+
+
+def _run_adjust_main(argv, source, caplog=None, level="WARNING"):
+    """跑 adjust.main()，外部依赖全部替身；返回退出码"""
+    args = adjust.build_parser().parse_args(argv)
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(adjust, "parse_arguments", return_value=args))
+        stack.enter_context(patch.object(adjust, "check_parameters", return_value=True))
+        stack.enter_context(patch.object(adjust, "check_dense_gaps", return_value=[]))
+        stack.enter_context(patch.object(adjust, "process_and_save_adjust_factors"))
+        util = stack.enter_context(patch.object(adjust, "myutil"))
+        db = stack.enter_context(patch.object(adjust, "dbutil"))
+        util.trans_datestr_format.side_effect = ["2026-09-07", "2026-09-11"]
+        util.import_source_module.return_value = source
+        db.get_candidate_codes.return_value = TARGETS
+        if caplog is not None:
+            with caplog.at_level(level, logger="etl.adjust"):
+                return adjust.main()
+        return adjust.main()
+
+
+@pytest.mark.parametrize("argv, by_date", [
+    (["-s", "bstock", "-b", "20260907", "-e", "20260911"], True),
+    (["-s", "bstock", "-b", "20260907", "-e", "20260911", "-c", "600000"], False),
+])
+def test_adjust_main_dispatch(argv, by_date):
+    """正反例: main 按路由分派, 按日分支传入转换后的 YYYY-MM-DD 区间, 逐股分支只传候选"""
+    source = MagicMock()
+    source.fetch_adjust_factors.return_value = pd.DataFrame()
+    source.fetch_adjust_factors_by_date.return_value = pd.DataFrame()
+    assert _run_adjust_main(argv, source) == 0
+    if by_date:
+        source.fetch_adjust_factors_by_date.assert_called_once_with(
+            TARGETS, "2026-09-07", "2026-09-11")
+        source.fetch_adjust_factors.assert_not_called()
+    else:
+        source.fetch_adjust_factors.assert_called_once_with(TARGETS)
+        source.fetch_adjust_factors_by_date.assert_not_called()
+
+
+def test_adjust_missing_by_date_method_reports_clear_error(caplog):
+    """反例: 走按日分支但模块缺 fetch_adjust_factors_by_date 时, 守卫要按方法名报错(B005),
+    不漏到笼统的兜底 except"""
+    source = MagicMock(spec=["fetch_adjust_factors"])        # 旧版模块: 只有逐股方法
+    rc = _run_adjust_main(["-s", "bstock", "-b", "20260907", "-e", "20260911"],
+                          source, caplog, level="ERROR")
+    assert rc == 1
+    assert "fetch_adjust_factors_by_date" in caplog.text
 
 
 def test_missing_by_date_method_reports_clear_error():
@@ -291,10 +365,11 @@ def test_adjust_missing_fetch_method_reports_clear_error():
 
 def test_adjust_bstock_source_is_deprecated_but_still_writes_raw(caplog):
     """正例(废弃但保留): -s bstock 仍可运行——打废弃警告, 事件表 RAW, densify 关(仅留痕),
-    且因不写稠密表而跳过缺口预检"""
+    且因不写稠密表而跳过缺口预检；未限定范围故走按日接口"""
     args = adjust.build_parser().parse_args(["-s", "bstock", "-b", "20260901", "-e", "20260904"])
     source = MagicMock()
     source.fetch_adjust_factors.return_value = pd.DataFrame()
+    source.fetch_adjust_factors_by_date.return_value = pd.DataFrame()
     with ExitStack() as stack:
         stack.enter_context(patch.object(adjust, "parse_arguments", return_value=args))
         stack.enter_context(patch.object(adjust, "check_parameters", return_value=True))
@@ -310,10 +385,12 @@ def test_adjust_bstock_source_is_deprecated_but_still_writes_raw(caplog):
     assert "已废弃" in caplog.text
     chk.assert_not_called()
     assert save.call_args.kwargs == {"event_table": "ADJ_FACTOR_RAW", "densify": False}
+    source.fetch_adjust_factors_by_date.assert_called_once()
+    source.fetch_adjust_factors.assert_not_called()
 
 
 def test_adjust_default_source_is_local():
     """正例: 不带 -s 时默认 local（纯库内计算, 稠密化开）"""
     args = adjust.build_parser().parse_args([])
     assert args.source == "local"
-    assert adjust.resolve_densify(args.densify, args.source) is True
+    assert adjust.resolve_densify(args.source) is True

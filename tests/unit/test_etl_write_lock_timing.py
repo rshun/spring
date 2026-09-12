@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新增：断言三个下载型 ETL 在下载完成之后才获取写连接
+#   2026-09-12  Claude  adjust 的假数据源改用 fetch_adjust_factors_by_date：bstock 未限定
+#                       -c/-x 时走按日接口，spec 只留逐股方法会被守卫拦下而非真的下载
 """
 写锁获取时机契约
 
@@ -85,10 +87,10 @@ def test_import_daily_print_only_never_opens_write_connection():
 # ── adjust：S3 修正的对象 ──────────────────────────────────────────────────────
 
 def test_adjust_fetches_before_acquiring_write_connection():
-    """正例(S3 修正): 复权因子下载完成后才取写连接"""
+    """正例(S3 修正): 复权因子下载完成后才取写连接（bstock 默认走按日接口）"""
     order: list[str] = []
-    source = MagicMock(spec=["fetch_adjust_factors"])
-    source.fetch_adjust_factors.side_effect = _trace(order, "fetch", _df())
+    source = MagicMock(spec=["fetch_adjust_factors_by_date"])
+    source.fetch_adjust_factors_by_date.side_effect = _trace(order, "fetch", _df())
 
     with patch.object(adjust, "myutil") as myutil, \
          patch.object(adjust, "dbutil") as dbutil, \
@@ -107,8 +109,8 @@ def test_adjust_fetches_before_acquiring_write_connection():
 def test_adjust_download_failure_leaves_no_write_connection():
     """反例: 下载阶段就失败时, 根本不该开过写连接"""
     order: list[str] = []
-    source = MagicMock(spec=["fetch_adjust_factors"])
-    source.fetch_adjust_factors.side_effect = ConnectionError("数据源连接中断")
+    source = MagicMock(spec=["fetch_adjust_factors_by_date"])
+    source.fetch_adjust_factors_by_date.side_effect = ConnectionError("数据源连接中断")
 
     with patch.object(adjust, "myutil") as myutil, \
          patch.object(adjust, "dbutil") as dbutil, \

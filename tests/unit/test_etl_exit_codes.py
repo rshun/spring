@@ -5,6 +5,8 @@
 #   2026-09-11  Claude  纳入 trade_cal / sync_basic / sync_margin / sync_industry /
 #                       sync_finance / init_db（此前 main() 吞异常后 return None，把库层的
 #                       重抛重新吞掉，写库失败仍退出 0）
+#   2026-09-12  Claude  adjust 的 bstock 成功用例改用按日方法：未限定 -c/-x 时该源走
+#                       fetch_adjust_factors_by_date
 """
 ETL 退出码契约测试
 
@@ -175,14 +177,14 @@ def test_import_daily_import_error_returns_1():
 # ── adjust ────────────────────────────────────────────────────────────────────
 
 def test_adjust_success_returns_0():
-    """正例: 正常获取复权因子 → 0"""
+    """正例: 正常获取复权因子 → 0（bstock 未限定 -c/-x, 走按日接口）"""
     with patch.object(adjust, "myutil") as myutil, \
          patch.object(adjust, "dbutil") as dbutil, \
          patch.object(adjust, "process_and_save_adjust_factors") as save, \
          patch.object(adjust, "parse_arguments", return_value=_args(source="bstock")), \
          patch.object(adjust, "check_parameters", return_value=True):
         dbutil.get_candidate_codes.return_value = [("600519", "SH")]
-        myutil.import_source_module.return_value = _source("fetch_adjust_factors", _df())
+        myutil.import_source_module.return_value = _source("fetch_adjust_factors_by_date", _df())
 
         assert adjust.main() == 0
         save.assert_called_once()

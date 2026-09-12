@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-12  Claude  --densify 开关移除：resolve_densify 收为单参数，新增「parser 拒绝
+#                       --densify、自省出口不再列出」的反例
 #   2026-09-06  Claude  新增：本地自算复权因子纯函数正反例测试（docs/adj_factor_selfbuild.md §4）
 #   2026-09-06  Claude  BUG-001 回归：窗口前锚点行的正反例（含 bug.md 复现场景）
 #   2026-09-06  Claude  BUG-004：锚点用例改写为全历史事件链断言（含链首不变量）
@@ -12,6 +14,7 @@
 #   2026-09-12  Claude  fixture 的 STOCK_DAILY 补 pre_close 列（真实 schema 有该列，
 #                       除权参考价校正依赖它）；新增转增类事件与参考价校正的正反例
 """datasource/local_xdr.py 纯函数与路由开关测试；不连接网络与生产库。"""
+import inspect
 import logging
 from unittest.mock import patch
 
@@ -481,34 +484,28 @@ def test_fetch_adjust_factors_empty_stock_list():
 
 # ── etl/adjust.py 路由开关 ────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("mode, source, expected", [
-    ("auto", "local", True),
-    ("on", "local", True),
-    ("off", "local", False),
-    # bstock 恒不稠密化：--densify 对该源不生效（2026-09-12）
-    ("auto", "bstock", False),
-    ("on", "bstock", False),
-    ("off", "bstock", False),
+@pytest.mark.parametrize("source, expected", [
+    ("local", True),      # 自算整链是主源, 必须维护稠密表
+    ("bstock", False),    # 已废弃的留痕源, RAW 有脏行, 不得喂稠密表
 ])
-def test_resolve_densify(mode, source, expected):
-    """正反例: local 受 --densify 控制；bstock 无论传什么都只留痕写 RAW"""
-    assert adjust.resolve_densify(mode, source) is expected
+def test_resolve_densify(source, expected):
+    """正反例: 稠密化完全由数据源决定, 没有开关"""
+    assert adjust.resolve_densify(source) is expected
 
 
-def test_bstock_never_densifies_regardless_of_flag():
+def test_bstock_never_densifies():
     """反例(回归): --densify on 曾能越过 auto 语义, 拿已知有脏行的 ADJ_FACTOR_RAW
-    覆盖主表 ADJ_FACTOR —— 该组合必须失效"""
-    assert adjust.resolve_densify("on", "bstock") is False
-    assert all(adjust.resolve_densify(m, "bstock") is False
-               for m in ("auto", "on", "off"))
+    覆盖主表 ADJ_FACTOR —— 开关移除后该路径彻底不存在"""
+    assert adjust.resolve_densify("bstock") is False
+    assert "mode" not in inspect.signature(adjust.resolve_densify).parameters
 
 
-def test_densify_is_discoverable():
-    """正例: --densify 必须出现在 describe_cli 自省出口(契约 C4)"""
-    spec = describe_cli.describe("adjust")["arguments"]["densify"]
-    assert spec["choices"] == ["auto", "on", "off"]
-    assert spec["default"] == "auto"
-    assert spec["help"]
+def test_densify_switch_is_removed():
+    """反例: --densify 已废弃移除——parser 必须拒绝, 自省出口也不得再列出(契约 C4)"""
+    assert "densify" not in {a.dest for a in adjust.build_parser()._actions}
+    assert "densify" not in describe_cli.describe("adjust")["arguments"]
+    with pytest.raises(SystemExit):
+        adjust.build_parser().parse_args(["--densify", "off"])
 
 
 def test_source_choices_include_local():

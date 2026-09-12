@@ -57,25 +57,29 @@ spring/
 按区间内交易日逐日请求，并保留原候选股票、上市日期和退市过滤规则。
 
 ```bash
-python -m etl.import_daily                          # 当天全市场，走按日接口
-python -m etl.import_daily -b 20260901 -e 20260904  # 区间，走按日接口
-python -m etl.adjust -b 20260901 -e 20260904
+python -m etl.import_daily                              # 当天全市场，走按日接口
+python -m etl.import_daily -b 20260901 -e 20260904      # 区间，走按日接口
+python -m etl.adjust -s bstock                          # 当天全市场，走按日接口
+python -m etl.adjust -s bstock -b 20260907 -e 20260911  # 区间，按交易日逐日循环
 ```
 
-以上命令会按原有流程写入数据库。额外传入 `-c`、`-x`（包括 `-x all`）、
-`-s` 或 `-p` 等参数时，继续使用原接口。
+以上命令会按原有流程写入数据库。
 指数下载、其他数据源、字段转换及复权因子补齐规则保持不变。
 
-`import_daily` 没有额外的路由开关，走哪条完全由参数形态决定：
+两个程序都没有路由开关，走哪条完全由参数形态决定：
 
-| 命令行 | 走哪条 |
-|--------|--------|
-| 不带参数 / 只带 `-b` / 只带 `-e` / `-b` `-e` 都带 | 按日接口 |
-| 带了 `-c`、`-x`、`-s`、`-p` 中任意一个 | 逐股接口 |
+| 程序 | 按日接口 | 逐股接口 |
+|------|----------|----------|
+| `import_daily` | 不带参数 / 只带 `-b` / 只带 `-e` / `-b` `-e` 都带 | 带了 `-c`、`-x`、`-s`、`-p` 中任意一个 |
+| `adjust`（须显式 `-s bstock`） | 不限定范围：默认当天、`-b`/`-e` 区间、`-x all` | 带了 `-c`，或 `-x` 指定了具体交易所（`sh`/`sz`/`bj`） |
 
 带这些参数意味着只要一部分股票或换了数据源，此时逐股请求本就比拉全市场再筛
-更划算，所以不提供强制走按日接口的开关。按日接口也只有 bstock 源提供，
-`-s lday`、`-s tdx` 一律走逐股。
+更划算，所以不提供强制走按日接口的开关。按日接口也只有 bstock 源提供：
+`import_daily` 的 `-s lday`、`-s tdx` 一律走逐股；`adjust` 的默认源 `-s local`
+是纯库内自算、完全不联网，任何参数形态都不走按日接口。
+
+两者在 `-x all` 上的判定不同：`import_daily` 只要出现 `-x` 就退回逐股，
+`adjust` 把显式 `-x all` 视为与默认相同的全市场，仍走按日。
 
 baostock 的网络类错误码（`10002xxx`，连接/收发失败或超时）按瞬时故障处理，
 重登重试；重试耗尽或遇到非瞬时错误仍然中止且不写入部分数据。
@@ -197,7 +201,15 @@ python -m etl.adjust
 
 # 漏跑后按日志提示回填(示例: 从首个缺失交易日起; 可加 -c 只补个别股票)
 python -m etl.adjust -b 20260908
+
+# 【已废弃】baostock 复权因子源: 只留痕写 ADJ_FACTOR_RAW, 不维护 ADJ_FACTOR 稠密表
+# 不限定范围 → 按交易日循环调 query_daily_adjust_factor; 加 -c 或 -x sh → 逐股 query_adjust_factor
+python -m etl.adjust -s bstock -b 20260907 -e 20260911
 ```
+
+稠密化没有开关（2026-09-12 移除 `--densify`），完全由 `-s` 决定：
+`local` 写事件表 `ADJ_FACTOR_LOCAL` 并稠密化 `ADJ_FACTOR`；
+`bstock` 只写留痕事件表 `ADJ_FACTOR_RAW`，不触碰 `ADJ_FACTOR`。
 
 #### 补齐指标量比,涨停,流通市值(流通市值等数据前置条件是需要股本资料)  
 ```bash

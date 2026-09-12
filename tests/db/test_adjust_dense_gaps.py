@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-09-10  Claude  新增：ADJ_FACTOR 运行前缺口预检 check_dense_gaps 的正反例（B006/B007 拦截）
+#   2026-09-12  Claude  _run_main 补按日接口返回值：bstock 未限定 -c/-x 时走
+#                       fetch_adjust_factors_by_date
 """etl/adjust.py check_dense_gaps 预检：漏跑 / 上市日起未稠密化 / 区间内部空洞；仅内存库。"""
 from unittest.mock import MagicMock, patch
 
@@ -137,6 +139,7 @@ def _run_main(gaps, source="local"):
     args = adjust.build_parser().parse_args(["-s", source, "-b", "20260908", "-e", "20260908"])
     module = MagicMock()
     module.fetch_adjust_factors.return_value = pd.DataFrame()
+    module.fetch_adjust_factors_by_date.return_value = pd.DataFrame()
     with patch.object(adjust, "parse_arguments", return_value=args), \
          patch.object(adjust, "check_parameters", return_value=True), \
          patch.object(adjust, "myutil") as util, \
@@ -175,6 +178,7 @@ def test_main_proceeds_when_no_gaps():
 
 def test_main_skips_check_when_densify_off():
     """正例: densify=off 不写稠密表 → 不做预检（bstock 默认 densify 关）"""
-    rc, chk, *_ = _run_main([], source="bstock")
+    rc, chk, _util, module = _run_main([], source="bstock")
     assert rc == 0
     chk.assert_not_called()
+    module.fetch_adjust_factors_by_date.assert_called_once()

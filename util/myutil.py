@@ -216,11 +216,12 @@ def trans_datestr_format(yyyymmdd: str) -> str:
 
 
 def symbol_to_std_code(symbol: str) -> str | None:
-    """6 位裸码 -> 标准代码(600519.SH)。北交所返回 None，非法输入抛 ValueError。
+    """6 位裸码 -> 标准代码(600519.SH)。北交所与 B 股返回 None，非法输入抛 ValueError。
 
     沪深前缀规则在 A 股是确定的，故不需要 join STOCK_INFO——这让取数型 ETL
-    可以无库内前置依赖。北交所(4/8 开头)返回 None 而非抛错：它是「本次范围之外」
-    而不是「数据错误」，由调用方计数丢弃并打日志。
+    可以无库内前置依赖。北交所(4/8 开头)与 B 股(2/9 开头)返回 None 而非抛错：
+    它们属「本次范围之外」（库中 STOCK_INFO.board 枚举不含此类），而不是「数据错误」，
+    由调用方计数丢弃并打日志。
     """
     if not isinstance(symbol, str):
         raise ValueError(f"股票代码必须是字符串，收到 {type(symbol).__name__}: {symbol!r}")
@@ -231,6 +232,6 @@ def symbol_to_std_code(symbol: str) -> str | None:
         return f"{s}.SH"
     if s[0] in ("0", "3", "1"):
         return f"{s}.SZ"
-    if s[0] in ("4", "8"):
+    if s[0] in ("4", "8", "2", "9"):
         return None
     raise ValueError(f"无法判定市场归属的股票代码: {symbol!r}")

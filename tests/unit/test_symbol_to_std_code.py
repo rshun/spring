@@ -1,4 +1,4 @@
-"""6 位裸码 -> 标准代码。北交所返回 None(本次范围只沪深), 非法输入抛错。"""
+"""6 位裸码 -> 标准代码。北交所与 B 股返回 None(本次范围只沪深), 非法输入抛错。"""
 import pytest
 
 from util.myutil import symbol_to_std_code
@@ -20,6 +20,15 @@ def test_sh_sz_symbols_get_correct_suffix(symbol, expected):
 @pytest.mark.parametrize("symbol", ["430047", "830799", "871981"])
 def test_bj_symbols_return_none(symbol):
     """反例: 北交所不在本次范围, 返回 None 由调用方计数丢弃"""
+    assert symbol_to_std_code(symbol) is None
+
+
+@pytest.mark.parametrize("symbol", ["900901", "900957", "200011", "200152"])
+def test_b_share_symbols_return_none(symbol):
+    """反例: B 股不在本次范围(STOCK_INFO.board 枚举无此类), 返回 None 由调用方丢弃
+
+    必须返回 None 而非抛错: 写库函数用 .map() 批量转换, 抛异常会让整天入库失败。
+    """
     assert symbol_to_std_code(symbol) is None
 
 

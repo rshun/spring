@@ -5,6 +5,7 @@
 #   2026-09-12  Claude  B047: fetch_bj_stock_data 取数失败/空结果改为抛出（此前返回空表，
 #                       sync_basic -s akstock 打一句 warning 就退出 0）。akstock 是北交所
 #                       唯一数据源，STOCK_INFO 停更 = 新上市 BJ 股静默漏采，同 B042
+#   2026-09-12  Claude  新增 fetch_suspension 停牌名单取数(第三方核对源)
 import akshare as ak
 import logging
 import time
@@ -577,3 +578,47 @@ def fetch_stock_industry_clf_hist_sw() -> pd.DataFrame:
     except Exception as e:
         logger.error(f"获取股票申万行业历史失败: {e}")
         return pd.DataFrame(columns=_INDUSTRY_OUT_COLS)
+
+# 停牌名单接口的中文列 -> 标准列名。序号列不入库，映射中不出现即被丢弃。
+_SUSPENSION_COLMAP = {
+    "代码": "symbol",
+    "名称": "name",
+    "停牌时间": "suspend_time",
+    "停牌截止时间": "resume_deadline",
+    "停牌期限": "suspend_period",
+    "停牌原因": "suspend_reason",
+    "所属市场": "market",
+    "预计复牌时间": "expect_resume",
+}
+
+_SUSPENSION_DATE_COLS = ("suspend_time", "resume_deadline", "expect_resume")
+
+
+def _require_columns(df: pd.DataFrame, colmap: dict, what: str) -> None:
+    """上游少列时点名缺哪列并抛出，避免下游冒出难以定位的 KeyError。"""
+    missing = [c for c in colmap if c not in df.columns]
+    if missing:
+        raise ValueError(f"{what} 返回帧缺少预期列: {missing}；"
+                         f"实际列: {list(df.columns)}")
+
+
+def fetch_suspension(trade_date: str) -> pd.DataFrame:
+    """拉取指定日期的停牌名单（完整字段，不裁剪）
+
+    参数:
+        trade_date: YYYYMMDD
+    返回:
+        列固定为 _SUSPENSION_COLMAP 的值，空结果返回列齐全的空帧。
+    """
+    df = _retry_call(lambda: ak.stock_tfp_em(date=trade_date),
+                     f"stock_tfp_em({trade_date})")
+    out_cols = list(_SUSPENSION_COLMAP.values())
+    if df is None or df.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    _require_columns(df, _SUSPENSION_COLMAP, "stock_tfp_em")
+    out = df.rename(columns=_SUSPENSION_COLMAP)[out_cols].copy()
+    out["symbol"] = out["symbol"].astype(str).str.strip().str.zfill(6)
+    for col in _SUSPENSION_DATE_COLS:
+        out[col] = pd.to_datetime(out[col], errors="coerce")
+    return out

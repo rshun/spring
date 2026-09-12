@@ -53,3 +53,17 @@ fill_turnover:
   desc: >-
     由 STOCK_DAILY.volume / DAILY_BASIC.float_shares 回填换手率。默认仅补空
     （baostock turn 缺失的行），-o 覆盖重算；须先有当日日线与流通股本。
+
+sync_suspension:
+  requires: []
+  desc: >-
+    停牌名单入库(akshare 东财源)，作为 STOCK_DAILY.tradestatus 的独立交叉核对事实源。
+    从外部接口取数、不依赖库内任何表，可作为拓扑排序起点。
+    仅覆盖沪深；-x bj 为明确告知的空操作，退出码 0。
+
+sync_limit_pool:
+  requires: []
+  desc: >-
+    涨跌停股池入库(akshare 东财源)，作为 DAILY_BASIC 涨跌停价与标志的独立交叉核对事实源。
+    从外部接口取数、不依赖库内任何表，可作为拓扑排序起点。
+    某池当日为空计入部分成功(退出码 3)，因表内 0 行与「未跑」无法区分。

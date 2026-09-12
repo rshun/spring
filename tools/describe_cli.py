@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新增：把 ETL 的 argparse 定义导出为 JSON，作为跨仓自省出口
 #   2026-09-10  Claude  注册 fill_turnover（08-19 契约改造漏掉的程序）
+#   2026-09-12  Claude  注册 sync_suspension / sync_limit_pool 两个新 ETL
 """
 ETL 命令行参数自省出口
 
@@ -35,6 +36,8 @@ PROGRAMS: dict[str, str] = {
     "update_limit":  "etl.update_limit",
     "fill_shares":   "etl.fill_shares",
     "fill_turnover": "etl.fill_turnover",
+    "sync_suspension": "etl.sync_suspension",
+    "sync_limit_pool": "etl.sync_limit_pool",
 }
 
 _ACTION_NAMES = {

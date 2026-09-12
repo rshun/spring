@@ -21,7 +21,7 @@ import pytest
 import yaml
 
 from etl import (adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
-                 import_daily, update_limit)
+                 import_daily, sync_limit_pool, sync_suspension, update_limit)
 from tools import describe_cli
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +35,8 @@ MODULES = {
     "update_limit":  update_limit,
     "fill_shares":   fill_shares,
     "fill_turnover": fill_turnover,
+    "sync_suspension": sync_suspension,
+    "sync_limit_pool":  sync_limit_pool,
 }
 
 # 6 个程序共有的参数, MCP 侧的通用调用面

@@ -23,6 +23,11 @@
 #   2026-09-12  Claude  B046: get_trade_dates 查询失败改为重抛，不再吞成空列表——调用方
 #                       无法区分「区间内真没有交易日」与「查询失败」，后者被当成前者会让
 #                       lday / tdx 整批取数静默产出 0 行并退出 0（契约 C1）
+#   2026-09-12  Claude  fill_daily_basic_shares 的 float_shares 改以 turnover_rate 反推的
+#                       市场隐含流通盘为准、gbbq 降为 fallback：gbbq 的股本「数值」可信但
+#                       「日期」不可信(实测 001223.SZ 的 4988.2万 事件被记成 2025-12-31,
+#                       实际 2026-04-28 生效, 提前 4 个月套用导致该股 2026-01~04 的
+#                       float_shares / float_mv 全错), 且自然解禁不进 gbbq 会让流通盘长期偏低
 import logging
 import duckdb
 import pandas as pd
@@ -31,6 +36,20 @@ from datetime import datetime, date
 from typing import List, Tuple, Optional
 
 logger = logging.getLogger("etl.util.dbutil")
+
+# turnover_rate 反推值吸附到 gbbq 已知股本取值的相对容差。
+_SHARE_SNAP_TOLERANCE = 0.005
+
+# 一致性闸门参数。单日反推值不能直接采信: 实测约 12% 的个股 implied 本身逐日不稳
+# (turnover_rate 口径抖动), 逐日直接吸附会让 float_shares 天天变 —— 实测 1897 只
+# 被修正的个股里有 663 只(35%)取值不唯一。改为要求回看窗口内所有吸附成功的交易日
+# 都指向同一个候选, 不唯一率降到 0.1%。
+# 用「窗口内取值必须一致」而非「窗口内取中位数」: 股本变动是阶跃且以解禁增加为主,
+# 中位数会在阶跃处给出滞后的中间值(实测次新股出现 -69% 量级的误修), 而一致性闸门
+# 在阶跃处直接失效、回退 gbbq, 不会编造中间值。
+_SHARE_GATE_WINDOW = 20     # 回看窗口(交易日)
+_SHARE_GATE_MIN_HITS = 16   # 窗口内至少要有这么多天吸附成功
+_SHARE_GATE_WARMUP_DAYS = 60  # implied 需向前多取的自然日数, 供窗口预热
 
 _DAILY_BASIC_SHARE_EVENT_CATEGORIES = (
     "股本变化",
@@ -1074,10 +1093,29 @@ def save_sw_industry_hierarchy_to_db(
 def fill_daily_basic_shares(start_date: str, end_date: str,
                             codes: list[str] | None = None,
                             exchanges: list[str] | None = None,
-                            conn: duckdb.DuckDBPyConnection | None = None) -> None:
+                            conn: duckdb.DuckDBPyConnection | None = None,
+                            snap_tolerance: float = _SHARE_SNAP_TOLERANCE) -> None:
     """
-    根据 CAPITAL_DETAIL 有效股本状态记录回填 DAILY_BASIC 的 total_shares / float_shares。
-    params 顺序: [start_date, end_date, *code_params, *exchange_params]，三处 SQL 均相同。
+    回填 DAILY_BASIC 的 total_shares / float_shares。
+
+    total_shares: 取自 CAPITAL_DETAIL(gbbq) 的股本状态记录, 口径不变。
+    float_shares: 以 DAILY_BASIC.turnover_rate 反推的「市场隐含流通盘」为准,
+                  CAPITAL_DETAIL 降为 fallback。原因见文件头 2026-09-12 记录:
+                  gbbq 的股本数值可信、生效日期不可信, 且自然解禁不产生 gbbq 记录。
+
+    采信市场值需同时满足两层条件:
+      1) 当日反推值能「吸附」到该股 gbbq 出现过的股本取值(含总股本), 偏差在
+         snap_tolerance 内 —— 保证写入的是精确整数而非带噪声的反推值;
+      2) 回看 _SHARE_GATE_WINDOW 个交易日内, 所有吸附成功的日子都指向同一个候选,
+         且命中天数 >= _SHARE_GATE_MIN_HITS —— 挡掉 turnover_rate 口径本身不稳的个股。
+    任一条不满足(含停牌 / 无成交 / turnover_rate 为空)即回退 gbbq 值 ——
+    宁可沿用旧口径, 也不写入逐日抖动的值。
+
+    注: turnover_rate 若本身是 fill_turnover 由 float_shares 派生的, 反推恰好回到
+    gbbq 值, 吸附后不产生改动 —— 这类行天然免疫, 不会被错误「修正」。
+
+    params 顺序: [*category_params, start_date, end_date, *code_params,
+                  *exchange_params, snap_tolerance]。
     """
     if isinstance(codes, str):
         codes = [codes]
@@ -1099,8 +1137,12 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
 
     share_category_placeholders = ", ".join(["?"] * len(_DAILY_BASIC_SHARE_EVENT_CATEGORIES))
     category_params = list(_DAILY_BASIC_SHARE_EVENT_CATEGORIES)
+    gate_window = int(_SHARE_GATE_WINDOW)
+    gate_lookback = gate_window - 1
+    gate_min_hits = int(_SHARE_GATE_MIN_HITS)
+    gate_warmup = int(_SHARE_GATE_WARMUP_DAYS)
 
-    sql = f"""
+    cte_sql = f"""
         WITH raw_capital_events AS (
             SELECT
                 i.code,
@@ -1147,12 +1189,25 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
             WHERE t.rn = 1
         ),
 
-        matched AS (
+        -- 吸附候选: 该股历史上出现过的一切流通盘 / 总股本取值(股)。
+        -- gbbq 的「数值」可信、「日期」不可信, 故把数值全收进候选集,
+        -- 由 turnover 反推值决定每一天该落在哪一个取值上。
+        -- 总股本也进候选: 全流通个股的真实流通盘就等于总股本, 而这类
+        -- 自然解禁往往没有对应的 gbbq 记录(如 600644.SH)。
+        share_candidates AS (
+            SELECT DISTINCT code, CAST(ROUND(float_shares_wan * 10000) AS BIGINT) AS cand
+            FROM capital_events WHERE float_shares_wan > 0
+            UNION
+            SELECT DISTINCT code, CAST(ROUND(total_shares_wan * 10000) AS BIGINT) AS cand
+            FROM capital_events WHERE total_shares_wan > 0
+        ),
+
+        gbbq_matched AS (
             SELECT
                 db.code,
                 db.trade_date,
                 CAST(ROUND(ce.total_shares_wan * 10000) AS BIGINT) AS total_shares,
-                CAST(ROUND(ce.float_shares_wan * 10000) AS BIGINT) AS float_shares
+                CAST(ROUND(ce.float_shares_wan * 10000) AS BIGINT) AS gbbq_float
             FROM DAILY_BASIC db
             JOIN STOCK_INFO i ON db.code = i.code
             ASOF JOIN capital_events ce
@@ -1162,18 +1217,98 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                 AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                 {code_filter}
                 {exchange_filter}
-        )
+        ),
 
+        -- 市场隐含流通盘。turnover_rate 主来源是 baostock 的 turn(sync_basic 原样写入,
+        -- 不经 float_shares), 因此可独立反推当日真实流通盘。
+        -- 取数比目标区间往前多 {gate_warmup} 天, 供下面的回看窗口预热。
+        implied AS (
+            SELECT db.code, db.trade_date,
+                   sd.volume * 100.0 / db.turnover_rate AS implied_float
+            FROM DAILY_BASIC db
+            JOIN STOCK_INFO i ON db.code = i.code
+            JOIN STOCK_DAILY sd ON sd.code = db.code AND sd.date = db.trade_date
+            WHERE db.trade_date BETWEEN CAST(? AS DATE) - INTERVAL {gate_warmup} DAY
+                                    AND CAST(? AS DATE)
+                AND i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
+                AND sd.tradestatus = 1
+                AND sd.volume > 0
+                AND db.turnover_rate > 0
+                {code_filter}
+                {exchange_filter}
+        ),
+
+        -- 逐日吸附: 当日反推值吸附到最近的候选; 偏差超出容差则当天不作数(不产出行)。
+        daily_snap AS (
+            SELECT code, trade_date, cand
+            FROM (
+                SELECT im.code, im.trade_date, im.implied_float, sc.cand,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY im.code, im.trade_date
+                           ORDER BY abs(sc.cand - im.implied_float), sc.cand
+                       ) AS rn
+                FROM implied im
+                JOIN share_candidates sc ON sc.code = im.code
+            ) t
+            WHERE t.rn = 1
+              AND abs(t.cand - t.implied_float) <= t.implied_float * CAST(? AS DOUBLE)
+        ),
+
+        -- 一致性闸门: 窗口内吸附成功的日子必须全部指向同一个候选(min = max),
+        -- 且命中天数足够, 才允许用市场值覆盖 gbbq。
+        gated AS (
+            SELECT code, trade_date,
+                   CASE WHEN win_rows >= {gate_window}
+                         AND hits     >= {gate_min_hits}
+                         AND lo = hi
+                        THEN lo END AS float_shares
+            FROM (
+                SELECT im.code, im.trade_date,
+                       min(ds.cand)   OVER w AS lo,
+                       max(ds.cand)   OVER w AS hi,
+                       count(ds.cand) OVER w AS hits,
+                       count(*)       OVER w AS win_rows
+                FROM implied im
+                LEFT JOIN daily_snap ds
+                    ON ds.code = im.code AND ds.trade_date = im.trade_date
+                WINDOW w AS (PARTITION BY im.code ORDER BY im.trade_date
+                             ROWS BETWEEN {gate_lookback} PRECEDING AND CURRENT ROW)
+            ) t
+        ),
+
+        resolved AS (
+            SELECT g.code, g.trade_date, g.total_shares, g.gbbq_float,
+                   COALESCE(mf.float_shares, g.gbbq_float) AS float_shares
+            FROM gbbq_matched g
+            LEFT JOIN gated mf
+                ON mf.code = g.code AND mf.trade_date = g.trade_date
+        )
+    """
+
+    sql = cte_sql + """
         UPDATE DAILY_BASIC
         SET total_shares = m.total_shares,
             float_shares = m.float_shares
-        FROM matched m
+        FROM resolved m
         WHERE DAILY_BASIC.code       = m.code
           AND DAILY_BASIC.trade_date = m.trade_date;
     """
 
+    diag_sql = cte_sql + """
+        SELECT COUNT(*) AS matched_rows,
+               COUNT(*) FILTER (WHERE float_shares IS DISTINCT FROM gbbq_float)
+                   AS corrected_rows,
+               COUNT(DISTINCT code) FILTER (WHERE float_shares IS DISTINCT FROM gbbq_float)
+                   AS corrected_codes
+        FROM resolved
+    """
+
     range_params: list = [start_date, end_date, *code_params, *exchange_params]
-    update_params: list = [*category_params, *range_params]
+    # cte_sql 内 ? 的出现顺序:
+    #   category(raw_capital_events) -> range(gbbq_matched) -> range(implied)
+    #   -> snap_tolerance(daily_snap)
+    update_params: list = [*category_params, *range_params, *range_params,
+                           float(snap_tolerance)]
 
     need_close = conn is None
     con: duckdb.DuckDBPyConnection | None = None
@@ -1201,6 +1336,16 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
         cd_stocks = cd_result[0] if cd_result else 0
         logger.info(f"  CAPITAL_DETAIL 中共 {cd_stocks} 只股票有有效股本状态记录")
         logger.info(f"  DAILY_BASIC 目标区间共 {total_rows} 行待处理")
+
+        diag = con.execute(diag_sql, update_params).fetchone()
+        if diag is not None:
+            matched_rows, corrected_rows, corrected_codes = diag
+            logger.info(f"  其中 {matched_rows} 行匹配到股本状态记录")
+            if corrected_rows:
+                logger.warning(
+                    f"  流通股本以 turnover_rate 反推值为准修正了 {corrected_rows} 行"
+                    f"(涉及 {corrected_codes} 只股票), gbbq 记录的股本生效日与市场不符"
+                )
 
         con.execute(sql, update_params)
 

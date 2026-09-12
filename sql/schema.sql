@@ -151,6 +151,80 @@ COMMENT ON COLUMN DAILY_BASIC.volume_ratio IS '量比';
 COMMENT ON COLUMN DAILY_BASIC.total_shares IS '总股本(股)';
 COMMENT ON COLUMN DAILY_BASIC.float_shares IS '流通股本(股)';
 
+-- 停牌名单（每日快照，第三方独立事实源）
+CREATE TABLE IF NOT EXISTS SUSPENSION_DAILY (
+  code            VARCHAR(20),
+  trade_date      DATE,
+  name            VARCHAR(50),
+  suspend_time    TIMESTAMP,
+  resume_deadline TIMESTAMP,
+  suspend_period  VARCHAR(50),
+  suspend_reason  VARCHAR(200),
+  market          VARCHAR(20),
+  expect_resume   TIMESTAMP,
+  source          VARCHAR(20),
+  PRIMARY KEY (code, trade_date)
+);
+COMMENT ON COLUMN SUSPENSION_DAILY.code IS '股票代码(标准代码 600519.SH)';
+COMMENT ON COLUMN SUSPENSION_DAILY.trade_date IS '查询日(接口入参, 非接口返回字段)';
+COMMENT ON COLUMN SUSPENSION_DAILY.name IS '股票名称';
+COMMENT ON COLUMN SUSPENSION_DAILY.suspend_time IS '停牌时间';
+COMMENT ON COLUMN SUSPENSION_DAILY.resume_deadline IS '停牌截止时间';
+COMMENT ON COLUMN SUSPENSION_DAILY.suspend_period IS '停牌期限(如 连续停牌)';
+COMMENT ON COLUMN SUSPENSION_DAILY.suspend_reason IS '停牌原因';
+COMMENT ON COLUMN SUSPENSION_DAILY.market IS '所属市场';
+COMMENT ON COLUMN SUSPENSION_DAILY.expect_resume IS '预计复牌时间';
+COMMENT ON COLUMN SUSPENSION_DAILY.source IS '数据源(akstock)';
+
+-- 涨跌停池（每日快照，limit_type 区分方向）
+CREATE TABLE IF NOT EXISTS LIMIT_POOL_DAILY (
+  code            VARCHAR(20),
+  trade_date      DATE,
+  limit_type      VARCHAR(1) CHECK (limit_type IN ('U','D')),
+  name            VARCHAR(50),
+  pct_change      DOUBLE,
+  close           DOUBLE,
+  amount          DOUBLE,
+  float_mv        DOUBLE,
+  total_mv        DOUBLE,
+  turnover_rate   DOUBLE,
+  seal_amount     DOUBLE,
+  last_seal_time  VARCHAR(8),
+  industry        VARCHAR(50),
+  first_seal_time VARCHAR(8),
+  broken_times    INTEGER,
+  limit_stat      VARCHAR(20),
+  boards          INTEGER,
+  pe_dynamic      DOUBLE,
+  board_amount    DOUBLE,
+  down_days       INTEGER,
+  open_times      INTEGER,
+  source          VARCHAR(20),
+  PRIMARY KEY (code, trade_date, limit_type)
+);
+COMMENT ON COLUMN LIMIT_POOL_DAILY.code IS '股票代码(标准代码 600519.SH)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.trade_date IS '交易日';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.limit_type IS '方向(U:涨停 D:跌停)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.name IS '股票名称';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.pct_change IS '涨跌幅(%), 仅入库留存不参与核对';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.close IS '最新价(元)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.amount IS '成交额(元)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.float_mv IS '流通市值(元)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.total_mv IS '总市值(元)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.turnover_rate IS '换手率(%)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.seal_amount IS '封板资金(U)/封单资金(D), 单位元';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.last_seal_time IS '最后封板时间(HH:MM:SS)';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.industry IS '所属行业';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.first_seal_time IS '首次封板时间(HH:MM:SS), 仅涨停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.broken_times IS '炸板次数, 仅涨停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.limit_stat IS '涨停统计(如 3/5), 仅涨停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.boards IS '连板数(1=首板), 仅涨停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.pe_dynamic IS '动态市盈率, 仅跌停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.board_amount IS '板上成交额(元), 仅跌停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.down_days IS '连续跌停天数, 仅跌停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.open_times IS '开板次数, 仅跌停池';
+COMMENT ON COLUMN LIMIT_POOL_DAILY.source IS '数据源(akstock)';
+
 -- 申万行业定义（一/二/三级，按版本区分）
 CREATE TABLE IF NOT EXISTS SW_INDUSTRY (
     sw_version    VARCHAR(10),

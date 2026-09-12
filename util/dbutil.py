@@ -20,6 +20,9 @@
 #                       save_calendar_to_db 补空表早退，避免重抛后空表触发 Binder Error
 #   2026-09-11  Claude  get_trade_dates 改用只读连接：纯 SELECT 却申请写锁，正式库被
 #                       MCP server 占用时 lday / tdx 取数链在第一步就失败
+#   2026-09-12  Claude  B046: get_trade_dates 查询失败改为重抛，不再吞成空列表——调用方
+#                       无法区分「区间内真没有交易日」与「查询失败」，后者被当成前者会让
+#                       lday / tdx 整批取数静默产出 0 行并退出 0（契约 C1）
 import logging
 import duckdb
 import pandas as pd
@@ -937,7 +940,12 @@ def get_last_trade_date(before: Optional[str] = None) -> Optional[str]:
 
 
 def get_trade_dates(start_date: str, end_date: str) -> list[str]:
-    """查询 [start_date, end_date] 内的交易日列表，返回 YYYYMMDD 格式"""
+    """查询 [start_date, end_date] 内的交易日列表，返回 YYYYMMDD 格式
+
+    空列表只表示「该区间内确实没有交易日」。查询失败一律抛出，不吞成空列表：
+    两者对调用方是同一个信号，而把失败当成「没有交易日」会让 lday / tdx 的批量
+    取数一个文件都不读就返回空表，import_daily 据此退出 0（契约 C1）。
+    """
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         # 只读：本函数是纯 SELECT，用写连接会去抢 DuckDB 写锁，正式库被 MCP server
@@ -950,8 +958,9 @@ def get_trade_dates(start_date: str, end_date: str) -> list[str]:
         ).fetchall()
         return [r[0].strftime('%Y%m%d') for r in rows]
     except Exception as e:
+        # 记录后必须重抛：吞成空列表 = 把「查不到日历」伪装成「区间内没有交易日」
         logger.error(f"获取交易日列表失败: {e}")
-        return []
+        raise
     finally:
         if conn is not None:
             conn.close()

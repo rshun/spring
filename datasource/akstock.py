@@ -2,6 +2,9 @@
 #   2026-05-29  Claude  修复深交所融资融券汇总(_fetch_summary_szse)字段映射: akshare 实际返回列为「融券余额」, 原映射「融券余量金额」已失效导致 short_balance_amount 入库为空
 #   2026-05-29  Claude  4 个融资融券 akshare 调用加异常重试(_retry_call), 重试次数/间隔放 config.yaml akshare.tries/retry_delay, 缓解 szse/sse 官网偶发 SSL 断连
 #   2026-05-29  Claude  深交所汇总(_fetch_summary_szse)金额/数量由"亿"显示值统一 ×1e8 转 元/股, 对齐 schema 与其它数据源
+#   2026-09-12  Claude  B047: fetch_bj_stock_data 取数失败/空结果改为抛出（此前返回空表，
+#                       sync_basic -s akstock 打一句 warning 就退出 0）。akstock 是北交所
+#                       唯一数据源，STOCK_INFO 停更 = 新上市 BJ 股静默漏采，同 B042
 import akshare as ak
 import logging
 import time
@@ -93,8 +96,8 @@ def fetch_bj_stock_data(trade_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     try:
         df_raw = ak.stock_info_bj_name_code()
         if df_raw.empty:
-            logger.warning("未获取到北交所数据")
-            return pd.DataFrame(), pd.DataFrame()
+            # 全市场北交所名录不存在「今天恰好没有」，空结果即取数失败（同 B042/B043）
+            raise RuntimeError("akshare 返回空的北交所股票名录，判为取数失败")
 
         df_raw['symbol'] = df_raw['证券代码'].astype(str)
         df_raw['code'] = df_raw['symbol'] + '.BJ'
@@ -121,8 +124,10 @@ def fetch_bj_stock_data(trade_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         logger.info(f"[成功] 获取到 {len(df_info)} 条北交所数据")
         return df_info, df_basic
     except Exception as e:
+        # 记录后必须重抛：返回空表会让 sync_basic 打一句「未获取到任何股票基本信息」
+        # 后退出 0，北交所基本信息停更且无人察觉（契约 C1）
         logger.error(f"获取北交所数据出错: {e}")
-        return pd.DataFrame(), pd.DataFrame()
+        raise
 
 
 def fetch_stock_info(exchanges: list) -> tuple[pd.DataFrame, pd.DataFrame]:

@@ -157,7 +157,12 @@ def main() -> int:
     logger.info("=" * 60)
 
     # 获取区间内交易日 (YYYYMMDD)，供 SZ summary 与 detail 逐日抓取使用
-    trade_dates = dbutil.get_trade_dates(begin_date, end_date)
+    # get_trade_dates 查询失败会抛出(B046)，在这里收成退出码 1 而不是裸栈退出
+    try:
+        trade_dates = dbutil.get_trade_dates(begin_date, end_date)
+    except Exception as e:
+        logger.error(f"获取交易日列表失败: {e}")
+        return 1
     if not trade_dates:
         logger.warning("区间内无交易日，任务结束。")
         return 1

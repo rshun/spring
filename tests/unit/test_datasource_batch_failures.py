@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-09-11  Claude  新增：lday / tdx 批量取数的「全批失败必须抛错」契约，
 #                       tdx 跳过北交所，tdx_offline 的 HEAD 加固与 md5 原子更新
+#   2026-09-12  Claude  B046: 补「交易日历为空」守卫的正反例——该失败发生在逐股循环之前，
+#                       failed 为空所以全批失败判定不触发，是上一轮的漏网
 """datasource 批量取数与下载的失败路径契约。全部 mock，不联网、不碰真实库。
 
 核心约定（契约 C1）：逐只标的失败只跳过、不中止整批；但**所有**候选都失败时必须抛错。
@@ -13,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from datasource import lday, tdx, tdx_offline
+from datasource import bstock, lday, tdx, tdx_offline
 
 TRADE_DATES = ["20260908"]
 
@@ -161,3 +163,48 @@ def test_head_passes_timeout(dl_cfg):
     with patch("requests.head", return_value=resp) as head:
         assert tdx_offline.ManyThreadDownload()._probe_total("http://x/gpcw.zip") == 1024
     assert head.call_args.kwargs["timeout"] == 30
+
+
+# ── 2026-09-12 B046: 交易日历取空必须抛错（发生在逐股循环之前） ────────────────
+
+def test_lday_empty_trade_dates_raises():
+    """反例(本次修复的回归点): get_trade_dates 返回空时必须抛错。
+
+    此前每只股票都拿不到取数日期 → 返回空帧 → 不计入 failed → 全批失败判定不触发
+    → 返回空表 → import_daily 打一句 warning 就退出 0。
+    """
+    with patch.object(lday.dbutil, "get_trade_dates", return_value=[]):
+        with pytest.raises(RuntimeError, match="没有交易日"):
+            lday.fetch_batch_data(_lday_stocks(2))
+
+
+def test_tdx_empty_trade_dates_raises(tdx_env):
+    """反例(本次修复的回归点): tdx 侧同样不得静默返回空表"""
+    with patch.object(tdx.dbutil, "get_trade_dates", return_value=[]):
+        with pytest.raises(RuntimeError, match="没有交易日"):
+            tdx.fetch_batch_data(_lday_stocks(2))
+
+
+def test_lday_nonempty_trade_dates_still_works(tmp_path):
+    """正例(边界): 日历正常时不受守卫影响，照常返回数据"""
+    good = pd.DataFrame({"code": ["600000.SH"], "date": ["2026-09-08"], "open": [1.0],
+                         "high": [1.0], "low": [1.0], "close": [1.0], "pre_close": [1.0],
+                         "tradestatus": [1], "volume": [1], "amount": [1.0]})
+    fake_dir = MagicMock()
+    fake_dir.__truediv__ = lambda self, name: _fake_file(name, {"sh600000.day", "sh600001.day"})
+    with patch.object(lday.dbutil, "get_trade_dates", return_value=TRADE_DATES),          patch.object(lday.myutil, "get_lday_path", return_value=fake_dir),          patch.object(lday, "fetch_stock_data", return_value=good):
+        daily, _ = lday.fetch_batch_data(_lday_stocks(2))
+    assert not daily.empty
+
+
+def test_bstock_by_date_empty_calendar_raises():
+    """反例(本次修复的回归点): baostock 返回空交易日历时，按日采集一个行情接口都不会调用，
+    必须抛错而不是返回空表让 CLI 退出 0"""
+    cal = MagicMock(error_code="0", error_msg="ok",
+                    fields=["calendar_date", "is_trading_day"])
+    cal.next.side_effect = [False]
+    with patch.object(bstock.bs, "login", return_value=MagicMock(error_code="0")),          patch.object(bstock.bs, "logout"),          patch.object(bstock.bs, "query_trade_dates", return_value=cal),          patch.object(bstock.socket, "setdefaulttimeout"),          patch.object(bstock, "_get_max_fetch_attempts", return_value=1),          patch.object(bstock, "_get_progress_heartbeat_seconds", return_value=30),          patch.object(bstock.bs, "query_daily_history_k_AStock", create=True) as q:
+        with pytest.raises(bstock.BaoQueryError, match="没有交易日"):
+            bstock.fetch_daily_data_by_date(
+                _lday_stocks(2), "2026-09-01", "2026-09-05")
+    assert q.call_count == 0          # 确实一次行情请求都没发出

@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-12  Claude  B046: fetch_batch_data 补「交易日历为空」守卫——该失败发生在逐股
+#                       循环之前，下面的全批失败判定(failed 为空)根本不触发，会静默返回空表
 #   2026-09-11  Claude  fetch_batch_data 新增「全批失败」判定：逐只失败仍只跳过，但所有
 #                       候选都失败时抛 RuntimeError——此前返回空表，import_daily 只打一句
 #                       warning 就退出 0（Vipdoc 路径失效/权限变更会被当成「今天没数据」）
@@ -132,6 +134,12 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     min_begin = min(b for b, _ in active)
     max_end   = max(e for _, e in active)
     trade_dates = dbutil.get_trade_dates(min_begin, max_end)  # YYYYMMDD 升序列表
+    # 没有交易日历就生成不出取数日期，每只股票都会返回空帧且不计入 failed，
+    # 下面的「全批失败」判定不触发 → 静默返回空表 → import_daily 退出 0
+    if not trade_dates:
+        raise RuntimeError(
+            f"[本地] TRADE_CAL 在 {min_begin} ~ {max_end} 内没有交易日，无法生成取数日历；"
+            "若该区间本应有交易日，请先运行 python -m etl.trade_cal 补齐日历")
 
     logger.info(f"[本地] 开始获取数据，共计 {total} 只股票...")
     for symbol, market, begindate, enddate, status in stock_list:

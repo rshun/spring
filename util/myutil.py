@@ -2,6 +2,9 @@
 #   2026-05-30  Claude  get_default_dbfile 支持 prod/test 库切换(local_paths.db_active)
 #   2026-08-19  Claude  修正 configure_etl_logging docstring 的日志路径笔误(实为项目根 log/)
 #   2026-08-19  Claude  configure_etl_logging 支持指定控制台输出流，供 --json 类工具把日志改走 stderr
+#   2026-09-12  Claude  B048: db_active=test 但 db_test 未配置时抛错，不再回落内置默认路径——
+#                       那个默认路径恰好就是正式库 ~/data/quant.db，后果同 B045（人以为在
+#                       测试库，实际写生产）
 #   2026-09-11  Claude  B045: get_default_dbfile 对非法 db_active 抛 ValueError——此前任何非 test 的
 #                       取值都静默回落正式库，实测 "db_test" 把「测试」跑批写进了 quant.db
 import time
@@ -64,7 +67,8 @@ def get_default_dbfile() -> Path:
         db          正式库路径
         db_test     测试库路径
         db_active   prod | test，缺省为 prod(向后兼容)；大小写不敏感
-    db_active=test 但 db_test 未配置时，回退内置默认路径。
+    db_active=test 但 db_test 未配置时**抛错**，绝不回退内置默认路径：
+    那个默认路径就是正式库 ~/data/quant.db，回退等于把「测试」跑批写进生产(B048)。
 
     返回:
         数据库文件的完整路径 Path 对象
@@ -83,6 +87,11 @@ def get_default_dbfile() -> Path:
 
     db_path = (local_paths.get(key) or "").strip()
     if not db_path:
+        if active == "test":
+            # 不得回落：内置默认路径恰好是正式库，回落会让以为在测试库的人直接写生产
+            raise ValueError(
+                "config.yaml local_paths.db_active=test 但 db_test 未配置(或为空)；"
+                "拒绝回落内置默认路径——那就是正式库 ~/data/quant.db")
         db_path = str(Path.home() / "data" / "quant.db")
     return Path(db_path).expanduser()
 

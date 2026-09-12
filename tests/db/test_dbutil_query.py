@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-08-19  Claude  新增 get_trading_day_status 的正反例（休市 / 日历无记录 / 查询失败）
 #   2026-09-11  Claude  新增 get_trade_dates 必须用只读连接的断言
+#   2026-09-12  Claude  B046: get_trade_dates 查询失败必须抛出（空列表只代表「真的没有
+#                       交易日」），另补两者不可混淆的正反例
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -170,3 +172,25 @@ def test_get_trade_dates_uses_readonly_connection(mem_db):
     with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)) as gc:
         get_trade_dates("2023-01-03", "2023-01-03")
     gc.assert_called_once_with()          # 无参 = 默认 is_read_only=True
+
+
+def test_get_trade_dates_query_failure_raises(mem_db):
+    """反例(B046): 查询失败必须抛出，不得吞成空列表。
+
+    空列表对调用方的含义是「区间内确实没有交易日」；把失败也压成空列表，
+    lday / tdx 会一个文件都不读就返回空表，import_daily 据此退出 0（契约 C1）。
+    """
+    broken = MagicMock()
+    broken.execute.side_effect = RuntimeError("数据库被占用")
+    broken.close = MagicMock()
+    with patch("util.dbutil.get_connection", return_value=broken):
+        with pytest.raises(RuntimeError, match="数据库被占用"):
+            get_trade_dates("2023-01-03", "2023-01-06")
+    broken.close.assert_called_once()
+
+
+def test_get_trade_dates_empty_still_means_no_trading_days(mem_db):
+    """正例(边界): 区间内确实没有交易日仍然返回空列表，不能因为加了抛错就一律报错"""
+    insert_trade_cal(mem_db, "2023-01-07", 0)
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)):
+        assert get_trade_dates("2023-01-07", "2023-01-07") == []

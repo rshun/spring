@@ -48,18 +48,21 @@ def test_fetch_bj_stock_data_basic_has_shares():
     assert "float_shares" in df_basic.columns
 
 
-def test_fetch_bj_stock_data_empty_response():
+def test_fetch_bj_stock_data_empty_response_raises():
+    """反例(B047): 全市场北交所名录不存在「今天恰好没有」，空结果即取数失败。
+
+    此前返回空表，sync_basic -s akstock 打一句 warning 就退出 0，
+    北交所基本信息停更且无人察觉（akstock 是 BJ 的唯一数据源）。"""
     with patch("datasource.akstock.ak.stock_info_bj_name_code", return_value=pd.DataFrame()):
-        df_info, df_basic = fetch_bj_stock_data("2024-01-02")
-    assert df_info.empty
-    assert df_basic.empty
+        with pytest.raises(RuntimeError, match="北交所"):
+            fetch_bj_stock_data("2024-01-02")
 
 
 def test_fetch_bj_stock_data_ak_raises():
+    """反例(B047): akshare 抛错时必须抛给调用方，不能吞成空表（同 B042 的 bstock 侧）"""
     with patch("datasource.akstock.ak.stock_info_bj_name_code", side_effect=Exception("网络错误")):
-        df_info, df_basic = fetch_bj_stock_data("2024-01-02")
-    assert df_info.empty
-    assert df_basic.empty
+        with pytest.raises(Exception, match="网络错误"):
+            fetch_bj_stock_data("2024-01-02")
 
 
 # ── fetch_stock_info 路由逻辑 ─────────────────────────────────────────────────

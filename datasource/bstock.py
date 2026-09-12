@@ -10,6 +10,8 @@
 #   2026-09-10  Claude  三个批量取数函数首次登录失败改为抛 BaoQueryError（此前返回空表，CLI 当作
 #                       「无数据」退出 0）；逐股/逐指数路径的 _raise_for_query_error 补传 error_code，
 #                       网络类错误码 10002xxx 进入既有 broken-pipe 重试分支而非静默跳过该股
+#   2026-09-12  Claude  B046: _fetch_market_by_date 补「交易日历为空」守卫——baostock 日历
+#                       返回空时一个行情接口都不会调用，却返回空表让 CLI 退出 0
 #   2026-09-11  Claude  三个批量取数函数新增「全批失败」判定：逐只失败仍只跳过不中止（保持
 #                       既有语义），但全部被处理的标的都失败时抛 BaoQueryError——此前返回
 #                       空表，import_daily / fetch_index 只打 warning 就退出 0
@@ -394,6 +396,12 @@ def _fetch_market_by_date(stock_list: list[tuple], begin_date: str, end_date: st
         dates = calendar.loc[
             calendar["is_trading_day"].astype(str) == "1", "calendar_date"
         ].sort_values().drop_duplicates().tolist()
+        # 日历为空 = 下面的循环一次都不进，一个行情接口都不会调用却返回空表，
+        # CLI 会把它当「今天没数据」退出 0（契约 C1）
+        if not dates:
+            raise BaoQueryError(
+                f"[Baostock] 交易日历在 {begin_date} ~ {end_date} 内没有交易日，"
+                "按日采集不会发出任何行情请求，判为取数失败")
         heartbeat = _get_progress_heartbeat_seconds()
         last_progress_at = time.monotonic()
         logger.info(f"[Baostock] {api_name} 按日采集，共 {len(dates)} 个交易日")

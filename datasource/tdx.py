@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-09-11  Claude  fetch_batch_data 跳过北交所(market=2)：模块约定与 fetch_xdxr_data
 #                       都跳过，只有它没跳，会对 344 只 920xxx 发注定无效的请求并污染失败计数
+#   2026-09-12  Claude  B046: fetch_batch_data 补「交易日历为空」守卫（同 lday，该失败在逐股
+#                       循环之前发生，全批失败判定不触发）
 #   2026-09-11  Claude  fetch_batch_data 新增「全批失败」判定：逐只失败仍只跳过，全部候选
 #                       都失败时抛 RuntimeError（此前返回空表，import_daily 退出 0）
 """
@@ -197,6 +199,11 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     min_begin = min(b for b, _ in active)
     max_end   = max(e for _, e in active)
     trade_dates = dbutil.get_trade_dates(min_begin, max_end)  # YYYYMMDD 升序
+    # 同 lday：没有日历就每只股票都返回空帧且不计入 failed，全批失败判定不触发
+    if not trade_dates:
+        raise RuntimeError(
+            f"[pytdx] TRADE_CAL 在 {min_begin} ~ {max_end} 内没有交易日，无法生成取数日历；"
+            "若该区间本应有交易日，请先运行 python -m etl.trade_cal 补齐日历")
 
     api = _connect_api()
 

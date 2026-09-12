@@ -6,6 +6,7 @@
 #                       sync_basic -s akstock 打一句 warning 就退出 0）。akstock 是北交所
 #                       唯一数据源，STOCK_INFO 停更 = 新上市 BJ 股静默漏采，同 B042
 #   2026-09-12  Claude  新增 fetch_suspension 停牌名单取数(第三方核对源)
+#   2026-09-12  Claude  新增涨跌停池取数(两池列对齐, 第三方核对源)
 import akshare as ak
 import logging
 import time
@@ -622,3 +623,65 @@ def fetch_suspension(trade_date: str) -> pd.DataFrame:
     for col in _SUSPENSION_DATE_COLS:
         out[col] = pd.to_datetime(out[col], errors="coerce")
     return out
+
+# 两池对齐后的统一列集。本池不具备的字段填 None，使两池可直接 concat 入同一张表。
+_LIMIT_POOL_COLUMNS = [
+    "symbol", "name", "pct_change", "close", "amount", "float_mv", "total_mv",
+    "turnover_rate", "seal_amount", "last_seal_time", "industry",
+    "first_seal_time", "broken_times", "limit_stat", "boards",
+    "pe_dynamic", "board_amount", "down_days", "open_times",
+]
+
+_ZT_COLMAP = {
+    "代码": "symbol", "名称": "name", "涨跌幅": "pct_change", "最新价": "close",
+    "成交额": "amount", "流通市值": "float_mv", "总市值": "total_mv",
+    "换手率": "turnover_rate", "封板资金": "seal_amount",
+    "最后封板时间": "last_seal_time", "所属行业": "industry",
+    "首次封板时间": "first_seal_time", "炸板次数": "broken_times",
+    "涨停统计": "limit_stat", "连板数": "boards",
+}
+
+_DT_COLMAP = {
+    "代码": "symbol", "名称": "name", "涨跌幅": "pct_change", "最新价": "close",
+    "成交额": "amount", "流通市值": "float_mv", "总市值": "total_mv",
+    "换手率": "turnover_rate", "封单资金": "seal_amount",
+    "最后封板时间": "last_seal_time", "所属行业": "industry",
+    "动态市盈率": "pe_dynamic", "板上成交额": "board_amount",
+    "连续跌停": "down_days", "开板次数": "open_times",
+}
+
+
+def _normalize_limit_pool(df: pd.DataFrame, colmap: dict, what: str) -> pd.DataFrame:
+    """把某一池的原始帧对齐到 _LIMIT_POOL_COLUMNS，缺的字段填 None。"""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_LIMIT_POOL_COLUMNS)
+
+    _require_columns(df, colmap, what)
+    out = df.rename(columns=colmap)[list(colmap.values())].copy()
+    out["symbol"] = out["symbol"].astype(str).str.strip().str.zfill(6)
+    for col in _LIMIT_POOL_COLUMNS:
+        if col not in out.columns:
+            out[col] = None
+    return out[_LIMIT_POOL_COLUMNS]
+
+
+def fetch_limit_pool(trade_date: str) -> pd.DataFrame:
+    """拉取指定日期的涨停股池（完整字段，不裁剪）
+
+    参数:
+        trade_date: YYYYMMDD
+    """
+    df = _retry_call(lambda: ak.stock_zt_pool_em(date=trade_date),
+                     f"stock_zt_pool_em({trade_date})")
+    return _normalize_limit_pool(df, _ZT_COLMAP, "stock_zt_pool_em")
+
+
+def fetch_limit_down_pool(trade_date: str) -> pd.DataFrame:
+    """拉取指定日期的跌停股池（完整字段，不裁剪）
+
+    参数:
+        trade_date: YYYYMMDD
+    """
+    df = _retry_call(lambda: ak.stock_zt_pool_dtgc_em(date=trade_date),
+                     f"stock_zt_pool_dtgc_em({trade_date})")
+    return _normalize_limit_pool(df, _DT_COLMAP, "stock_zt_pool_dtgc_em")

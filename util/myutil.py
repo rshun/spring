@@ -7,6 +7,7 @@
 #                       测试库，实际写生产）
 #   2026-09-11  Claude  B045: get_default_dbfile 对非法 db_active 抛 ValueError——此前任何非 test 的
 #                       取值都静默回落正式库，实测 "db_test" 把「测试」跑批写进了 quant.db
+#   2026-09-12  Claude  新增 symbol_to_std_code 裸码转标准代码
 import time
 import os
 import pkgutil
@@ -212,3 +213,24 @@ def trans_datestr_format(yyyymmdd: str) -> str:
         return datetime.strptime(yyyymmdd, "%Y%m%d").strftime("%Y-%m-%d")
     except ValueError as e:
         raise ValueError(f"日期格式错误: {yyyymmdd}") from e
+
+
+def symbol_to_std_code(symbol: str) -> str | None:
+    """6 位裸码 -> 标准代码(600519.SH)。北交所返回 None，非法输入抛 ValueError。
+
+    沪深前缀规则在 A 股是确定的，故不需要 join STOCK_INFO——这让取数型 ETL
+    可以无库内前置依赖。北交所(4/8 开头)返回 None 而非抛错：它是「本次范围之外」
+    而不是「数据错误」，由调用方计数丢弃并打日志。
+    """
+    if not isinstance(symbol, str):
+        raise ValueError(f"股票代码必须是字符串，收到 {type(symbol).__name__}: {symbol!r}")
+    s = symbol.strip()
+    if len(s) != 6 or not s.isdigit():
+        raise ValueError(f"非法股票代码(应为 6 位数字): {symbol!r}")
+    if s[0] in ("6", "5"):
+        return f"{s}.SH"
+    if s[0] in ("0", "3", "1"):
+        return f"{s}.SZ"
+    if s[0] in ("4", "8"):
+        return None
+    raise ValueError(f"无法判定市场归属的股票代码: {symbol!r}")

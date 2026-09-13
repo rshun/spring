@@ -6,6 +6,7 @@
 #                       _check_table 改返回结构化结果; 拆出 build_parser()
 #   2026-08-19  Claude  logger 更名为 "etl.tools.check_daily"：原名不在 etl 之下，
 #                       日志从未进过 ETL 日志文件(同目录另两个工具本就用 etl.tools.*)
+#   2026-09-12  Claude  接入停牌/涨停/跌停三个新核对项, 告警类检查改返回结构化 CheckResult
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
       1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
@@ -45,6 +46,9 @@ from pathlib import Path
 
 import duckdb
 
+from tools.checks.limit_pool import check_limit_pool
+from tools.checks.suspension import check_suspension
+from util import checker
 from util import dbutil, myutil
 from util import validators as pv
 
@@ -815,6 +819,63 @@ def _truncate_detail(checks: list[dict], limit: int) -> bool:
     return truncated
 
 
+def begin_date_of(trade_dates: list[str], fallback: str) -> str:
+    """既有 5 项按区间查询，取交易日列表首日；列表为空则回退到入参
+
+    注意: fallback 约定已是 YYYY-MM-DD(调用方传入 begin_date/end_date，
+    而非 args.begin/args.end 的 YYYYMMDD)，这里不再做格式转换——
+    与偏离 2(CSV 文件名改用 YYYY-MM-DD)保持同一套格式，避免同一参数
+    在函数内部出现两种日期格式语义。
+    """
+    return trade_dates[0] if trade_dates else fallback
+
+
+def end_date_of(trade_dates: list[str], fallback: str) -> str:
+    return trade_dates[-1] if trade_dates else fallback
+
+
+def run_warn_checks(conn: duckdb.DuckDBPyConnection,
+                    trade_dates: list[str],
+                    begin: str, end: str,
+                    ex_filter: str, code_filter: str,
+                    code_params: list) -> list[checker.CheckResult]:
+    """执行全部告警类核对项，返回结构化结果列表
+
+    这些检查只写 CSV 与日志，不影响退出码。
+    既有 5 项保持原判定逻辑不变，仅把返回的计数包装成 CheckResult；
+    新增 3 项来自 tools/checks/ 子包。
+    """
+    range_begin = begin_date_of(trade_dates, begin)
+    range_end = end_date_of(trade_dates, end)
+    legacy = [
+        ("日线价量空值", _check_stock_daily_nulls(conn, range_begin, range_end,
+                                                  ex_filter, code_filter, code_params)),
+        ("复权因子空值", _check_adj_factor_nulls(conn, range_begin, range_end,
+                                                 ex_filter, code_filter, code_params)),
+        ("is_st 空值", _check_is_st_null(conn, range_begin, range_end,
+                                         ex_filter, code_filter, code_params)),
+        ("指标空值", _check_daily_basic_nulls(conn, range_begin, range_end,
+                                              ex_filter, code_filter, code_params)),
+        ("除权前收价", _check_xdr_preclose(conn, range_begin, range_end,
+                                           ex_filter, code_filter, code_params)),
+    ]
+    results = [
+        checker.CheckResult(
+            label=label,
+            status=checker.STATUS_MISMATCH if count else checker.STATUS_OK,
+            count=count, blocking=False)
+        for label, count in legacy
+    ]
+
+    results.append(check_suspension(conn, trade_dates, begin, end,
+                                    ex_filter, code_filter, code_params))
+    results.append(check_limit_pool(conn, trade_dates, begin, end, "U",
+                                    ex_filter, code_filter, code_params))
+    results.append(check_limit_pool(conn, trade_dates, begin, end, "D",
+                                    ex_filter, code_filter, code_params))
+    return results
+
+
 def main() -> int:
     """返回值: 0=核心日线完整, 1=核心日线有缺失, 2=检查出错
     (除权前收价/指标空值/is_st 仅告警写 CSV，不影响返回码)
@@ -877,26 +938,27 @@ def main() -> int:
                              is_self_table=True, board_sql="board = 'INDEX'"))
         core_missing = sum(c["missing"] for c in core_checks)
 
+        # 交易日列表: 新核对项按日逐天判定外部源可用性。
+        # 注意 get_trade_dates 入参是 YYYY-MM-DD、返回却是 YYYYMMDD，
+        # 而核对项与表内 trade_date 都用 YYYY-MM-DD，必须在这里转回来。
+        trade_dates = [myutil.trans_datestr_format(d)
+                       for d in dbutil.get_trade_dates(begin_date, end_date)]
+
         # 以下几类: 继续检查、写 CSV、打日志告警，但不阻断管道
-        warn_checks = [
-            ("日线价量空值", _check_stock_daily_nulls(conn, begin_date, end_date,
-                                                      ex_filter, code_filter, code_params)),
-            ("复权因子空值", _check_adj_factor_nulls(conn, begin_date, end_date,
-                                                     ex_filter, code_filter, code_params)),
-            ("is_st 空值", _check_is_st_null(conn, begin_date, end_date,
-                                             ex_filter, code_filter, code_params)),
-            ("指标空值", _check_daily_basic_nulls(conn, begin_date, end_date,
-                                                  ex_filter, code_filter, code_params)),
-            ("除权前收价", _check_xdr_preclose(conn, begin_date, end_date,
-                                               ex_filter, code_filter, code_params)),
-        ]
-        warn_missing = sum(count for _, count in warn_checks)
+        # begin/end 传 begin_date/end_date(YYYY-MM-DD)而非 args.begin/args.end
+        # (YYYYMMDD)，使新增两项核对的 CSV 文件名与既有 csv/ 目录下的命名一致。
+        warn_results = run_warn_checks(conn, trade_dates, begin_date, end_date,
+                                       ex_filter, code_filter, code_params)
+        warn_missing = sum(r.count for r in warn_results)
+        unchecked = sum(1 for r in warn_results
+                        if r.status in (checker.STATUS_SOURCE_MISSING,
+                                        checker.STATUS_PARTIAL))
 
         logger.info("-" * 60)
         if warn_missing:
             logger.warning(f"非阻断检查: 共发现 {warn_missing} 条告警记录"
-                           f"(日线价量/复权因子/指标空值/is_st/除权前收价，"
-                           f"已写 CSV，不阻断管道)")
+                           f"(日线价量/复权因子/指标空值/is_st/除权前收价/"
+                           f"停牌/涨停/跌停，已写 CSV，不阻断管道)")
         exit_code = 0 if core_missing == 0 else 1
         if core_missing == 0:
             logger.info("检查完成: 核心日线数据完整 OK")
@@ -921,8 +983,8 @@ def main() -> int:
                 },
                 "warnings": {
                     "total": warn_missing,
-                    "checks": [{"label": label, "count": count}
-                               for label, count in warn_checks],
+                    "unchecked": unchecked,
+                    "checks": [r.to_json() for r in warn_results],
                     "note": "告警类仅写 CSV 与日志，不影响 status 与退出码",
                 },
                 "error": None,

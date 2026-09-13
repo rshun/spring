@@ -10,6 +10,9 @@
 #   2026-09-13  Claude  ETL_MODULES 补齐第 4 处遗漏注册: 新增 sync_suspension /
 #                       sync_limit_pool 两个 ETL(main() -> int 且含 sys.exit(main())，
 #                       已核对满足契约)，纳入通用退出码契约的自检
+#   2026-09-13  Claude  纳入 sync_xdr_ths(第 6 个 Task, 同花顺除权事件入库):
+#                       只接入通用退出码契约(main() -> int / sys.exit(main()))，
+#                       不新增专属分支测试(已在 test_sync_xdr_ths.py 覆盖参数面与纯函数)
 """
 ETL 退出码契约测试
 
@@ -30,12 +33,12 @@ import pytest
 from etl import (adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
                  import_daily, init_db, sync_basic, sync_capital, sync_finance,
                  sync_industry, sync_limit_pool, sync_margin, sync_suspension,
-                 trade_cal, update_limit)
+                 sync_xdr_ths, trade_cal, update_limit)
 
 ETL_MODULES = [adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
                import_daily, update_limit,
                trade_cal, sync_basic, sync_margin, sync_industry, sync_finance,
-               sync_capital, sync_suspension, sync_limit_pool]
+               sync_capital, sync_suspension, sync_limit_pool, sync_xdr_ths]
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────

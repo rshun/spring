@@ -7,6 +7,7 @@
 #   2026-08-19  Claude  logger 更名为 "etl.tools.check_daily"：原名不在 etl 之下，
 #                       日志从未进过 ETL 日志文件(同目录另两个工具本就用 etl.tools.*)
 #   2026-09-12  Claude  接入停牌/涨停/跌停三个新核对项, 告警类检查改返回结构化 CheckResult
+#   2026-09-12  Claude  正确的核对项不再输出日志, 结尾保留一行总结
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
       1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
@@ -750,7 +751,7 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
         "csv_path": None,
     }
     if not gap_dates:
-        logger.info(f"[{label}]    完整 OK")
+        # 正确的一律不输出日志: 核对每天跑, OK 行占满屏幕会让异常淹没其中
         return result
 
     total_missing = sum(exp - act for _, exp, act in gap_dates)
@@ -787,6 +788,25 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
         logger.warning(f"[{label}]    发现 {total_missing} 条缺失记录，但未能定位具体代码，请手动核查")
 
     return result
+
+
+def build_summary(core_missing: int,
+                  warn_results: list[checker.CheckResult]) -> str:
+    """结尾总结行。正常项不打日志，这行是「跑过了」的唯一凭据。"""
+    warn_total = sum(r.count for r in warn_results)
+    unchecked = sum(1 for r in warn_results
+                    if r.status in (checker.STATUS_SOURCE_MISSING,
+                                    checker.STATUS_PARTIAL))
+    head = ("检查完成: 核心日线数据完整 OK" if core_missing == 0
+            else f"检查完成: 核心日线发现 {core_missing} 条缺失记录")
+    parts = [head]
+    if warn_total:
+        parts.append(f"{warn_total} 项告警")
+    if unchecked:
+        parts.append(f"{unchecked} 项未核对")
+    if warn_total or unchecked:
+        parts.append("明细见 csv/")
+    return "；".join(parts)
 
 
 def _emit_json(payload: dict) -> None:
@@ -955,15 +975,9 @@ def main() -> int:
                                         checker.STATUS_PARTIAL))
 
         logger.info("-" * 60)
-        if warn_missing:
-            logger.warning(f"非阻断检查: 共发现 {warn_missing} 条告警记录"
-                           f"(日线价量/复权因子/指标空值/is_st/除权前收价/"
-                           f"停牌/涨停/跌停，已写 CSV，不阻断管道)")
         exit_code = 0 if core_missing == 0 else 1
-        if core_missing == 0:
-            logger.info("检查完成: 核心日线数据完整 OK")
-        else:
-            logger.warning(f"检查完成: 核心日线发现 {core_missing} 条缺失记录")
+        summary = build_summary(core_missing, warn_results)
+        (logger.info if core_missing == 0 else logger.warning)(summary)
 
         if args.json:
             detail_truncated = _truncate_detail(core_checks, args.json_max_detail)

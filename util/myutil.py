@@ -8,6 +8,7 @@
 #   2026-09-11  Claude  B045: get_default_dbfile 对非法 db_active 抛 ValueError——此前任何非 test 的
 #                       取值都静默回落正式库，实测 "db_test" 把「测试」跑批写进了 quant.db
 #   2026-09-12  Claude  新增 symbol_to_std_code 裸码转标准代码
+#   2026-09-13  Claude  新增 load_env 读取 .env，不引入 python-dotenv
 import time
 import os
 import pkgutil
@@ -235,3 +236,38 @@ def symbol_to_std_code(symbol: str) -> str | None:
     if s[0] in ("4", "8", "2", "9"):
         return None
     raise ValueError(f"无法判定市场归属的股票代码: {symbol!r}")
+
+
+def load_env(path: str | Path | None = None) -> int:
+    """把项目根目录 .env 的 KEY=VALUE 读进 os.environ，返回写入的键数。
+
+    不引入 python-dotenv：全项目只有一个密钥要读，格式简单，
+    不值得为它多一个依赖（依赖红线）。
+
+    优先级：**已存在的环境变量不被覆盖**——真实环境变量（如 systemd 注入、
+    CI secret）应当压过本地 .env 文件。
+
+    文件不存在返回 0 且不抛错：未配置 .env 是常态，调用方靠
+    os.environ.get() 拿不到值时再报错，错误信息更贴近使用场景。
+    """
+    env_path = Path(path) if path else Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.is_file():
+        return 0
+
+    written = 0
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")     # 只按第一个等号切, 值里的 = 保留
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key in os.environ:                   # 真实环境变量优先
+            continue
+        os.environ[key] = value
+        written += 1
+    return written

@@ -228,3 +228,16 @@ tdx:
     "13": "送认购权证"
     "14": "送认沽权证"
     "15": "未知新类别"
+
+ths:
+  # 同花顺除权事件接口(fuyao.aicubes.cn)
+  # 密钥不放这里: 本文件已入库。真实 key 走环境变量 THS_API_KEY(见 .env.example)
+  base_url: "https://fuyao.aicubes.cn/api/a-share/corporate-actions/adjustment-factors"
+  # 单次请求超时(秒)
+  request_timeout: 30
+  # 重试次数
+  tries: 3
+  # 重试间隔(秒)
+  retry_delay: 3
+  # 逐只限频间隔(秒) —— 官方文档未说明限频, 先保守
+  sleep_between_stocks: 0.2

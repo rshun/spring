@@ -55,3 +55,34 @@ def test_json_warning_entry_has_status_and_missing_dates(mem_db):
     assert set(entry) == {"label", "count", "status", "missing_dates"}
     assert entry["missing_dates"] == [DATE]
     json.dumps(entry)  # 必须可序列化
+
+
+def test_empty_trade_dates_yields_source_missing_not_ok(mem_db):
+    """反例: 区间内无交易日(-f 强制运行) -> 三个新核对项必须 source_missing
+
+    这是 begin_date_of/end_date_of 兜底分支唯一的执行路径。
+    绝不能因为「没有交易日可核对」而判成 ok —— 把「没查」当成「一致」
+    正是本项目核对设计要防的那类 bug。
+    """
+    from tools import check_daily
+    from util import checker
+    _setup(mem_db)
+    results = check_daily.run_warn_checks(mem_db, [], "2024-04-26", "2024-04-26",
+                                          "", "", [])
+    new_items = [r for r in results
+                 if r.label in ("停牌核对", "涨停核对", "跌停核对")]
+    assert len(new_items) == 3
+    assert all(r.status == checker.STATUS_SOURCE_MISSING for r in new_items)
+    assert all(r.count == 0 for r in new_items)
+
+
+def test_empty_trade_dates_does_not_crash_legacy_checks(mem_db):
+    """正例: 区间内无交易日时, 5 个既有告警检查仍能正常返回(不抛异常)
+
+    兜底分支把 begin/end 原样透传给既有检查, 若格式不对会在这里炸。
+    """
+    from tools import check_daily
+    _setup(mem_db)
+    results = check_daily.run_warn_checks(mem_db, [], "2024-04-26", "2024-04-26",
+                                          "", "", [])
+    assert len(results) == 8  # 5 既有 + 3 新增

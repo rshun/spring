@@ -3,6 +3,10 @@
 #   2026-09-13  Claude  _write_parquet 改用 duckdb COPY 写 parquet, 不再用
 #                       pandas.to_parquet(需要未安装且不打算装的 pyarrow, 依赖红线);
 #                       与项目其它测试(tests/db/test_etl_tables_sync.py)写法一致
+#   2026-09-13  Claude  补测 load_xdr_events(SQL 路径)的 1991 夏令时行为, 以及
+#                       Python 路径(ms_to_cn_date)与 SQL 路径的一致性, 锁住两条
+#                       独立实现不会静默分叉(下个 Task 的 fetch_xdr_events 走
+#                       Python 路径, load_xdr_events 走 SQL 路径)
 """同花顺 dump 读取: 时区转换与列对齐。不触网。"""
 import datetime
 
@@ -115,6 +119,35 @@ def test_load_missing_file_raises(tmp_path):
     """反例: 文件不存在必须抛错, 不能静默返回空帧当成「今天没数据」"""
     with pytest.raises(ths.ThsError):
         ths.load_xdr_events(tmp_path / "nope.parquet")
+
+
+@pytest.mark.parametrize("ms, expected", [
+    (673110000000, datetime.date(1991, 5, 2)),
+    (675702000000, datetime.date(1991, 6, 1)),
+    (676306800000, datetime.date(1991, 6, 8)),
+    (683132400000, datetime.date(1991, 8, 26)),
+])
+def test_load_xdr_events_handles_1991_dst(tmp_path, ms, expected):
+    """反例(SQL 路径的夏令时): load_xdr_events 走的是 DuckDB AT TIME ZONE,
+    与 ms_to_cn_date 的 Python 路径是两套独立实现。
+
+    这条测试锁住 SQL 路径对 1986-91 夏令时(UTC+9)的处理 ——
+    两条路径若分叉, 同一事件从 parquet 进和从 API 进会得到不同日期且不报错。
+    """
+    p = _write_parquet(tmp_path, [{"thscode": "000001.SZ", "ms": ms, "div": 0.1}])
+    df = ths.load_xdr_events(p)
+    assert df.loc[0, "ex_date"] == expected
+
+
+@pytest.mark.parametrize("ms", [673110000000, 675702000000,
+                                676306800000, 683132400000, 1788192000000])
+def test_python_and_sql_paths_agree(tmp_path, ms):
+    """反例(双路径一致性): Python 与 DuckDB 两条转换路径必须给出同一日期
+
+    任一路径将来被改动而另一条没跟上时, 这条会红。
+    """
+    p = _write_parquet(tmp_path, [{"thscode": "000001.SZ", "ms": ms, "div": 0.1}])
+    assert ths.load_xdr_events(p).loc[0, "ex_date"] == ths.ms_to_cn_date(ms)
 
 
 def test_load_missing_column_raises_clear_error(tmp_path):

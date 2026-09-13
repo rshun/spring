@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-09-13  Claude  新建同花顺除权事件取数源(复权因子外部校验)
+#   2026-09-13  Claude  补全 ms_to_cn_date/load_xdr_events 的类型注解(brief 里有,
+#                       实现时漏了)
 """同花顺(fuyao.aicubes.cn)除权事件取数(只取数, 不入库)
 
 两个入口返回**同一套列**, 调用方不关心数据来自本地文件还是接口:
@@ -45,7 +47,7 @@ class ThsError(RuntimeError):
     """同花顺取数失败(文件缺失/结构异常/接口错误)"""
 
 
-def ms_to_cn_date(ms) -> datetime.date:
+def ms_to_cn_date(ms: int | float) -> datetime.date:
     """毫秒时间戳 -> 北京时间日期。
 
     必须用 IANA 'Asia/Shanghai' 而非固定 +08: 中国 1986-1991 实行过夏令时,
@@ -67,7 +69,7 @@ def _drop_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df[keep].reset_index(drop=True)
 
 
-def load_xdr_events(parquet_path) -> pd.DataFrame:
+def load_xdr_events(parquet_path: str | Path) -> pd.DataFrame:
     """读取本地 dump, 返回列为 XDR_COLUMNS 的帧
 
     文件不存在抛 ThsError 而非返回空帧: 把「路径配错」伪装成「今天没数据」

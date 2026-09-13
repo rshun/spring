@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-08-18  Claude  新增: export_etl_tables 程序->表解析 / WHERE 拼装 的正反测试
 #   2026-09-13  Claude  补充 sync_suspension / sync_limit_pool 两个新程序的表规格解析用例
+#   2026-09-13  Claude  接入 sync_xdr_ths：修复 test_specs_all_covers_four_tables 因新增
+#                       XDR_EVENT_THS 而破的硬编码集合断言，并补一条表规格解析用例
 """tools.export_etl_tables 纯逻辑单元测试(不依赖数据库)"""
 import pytest
 
@@ -85,7 +87,7 @@ def test_specs_two_programs_merge_stock_daily_scope():
 def test_specs_all_covers_four_tables():
     assert set(resolve_table_specs(["all"])) == {
         "STOCK_DAILY", "DAILY_BASIC", "ADJ_FACTOR", "ADJ_FACTOR_RAW", "ADJ_FACTOR_LOCAL",
-        "ADJ_FACTOR_LOCAL_STATE", "SUSPENSION_DAILY", "LIMIT_POOL_DAILY",
+        "ADJ_FACTOR_LOCAL_STATE", "SUSPENSION_DAILY", "LIMIT_POOL_DAILY", "XDR_EVENT_THS",
     }
 
 
@@ -103,6 +105,14 @@ def test_specs_sync_limit_pool_only():
     assert set(specs) == {"LIMIT_POOL_DAILY"}
     assert specs["LIMIT_POOL_DAILY"].board_scope is None
     assert specs["LIMIT_POOL_DAILY"].date_col == "trade_date"
+
+
+def test_specs_sync_xdr_ths_only():
+    """反例(易错): 日期列必须是 ex_date，不是 trade_date"""
+    specs = resolve_table_specs(["sync_xdr_ths"])
+    assert set(specs) == {"XDR_EVENT_THS"}
+    assert specs["XDR_EVENT_THS"].board_scope is None
+    assert specs["XDR_EVENT_THS"].date_col == "ex_date"
 
 
 # ---------- 正反例: WHERE 拼装 ----------

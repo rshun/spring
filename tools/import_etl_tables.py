@@ -10,6 +10,9 @@
 #                       清理"，且日志无感知；本项目刚在同一模块(见 5273f4a)把静默
 #                       排除/静默空帧改成显式 WARNING/INFO，这里不能再留新的静默点。
 #                       现改为该场景下打一条 WARNING，并补全注释的另一面
+#   2026-09-13  Claude  接入 sync_xdr_ths(XDR_EVENT_THS)。该表全量替换语义、成员会变，
+#                       同 SUSPENSION_DAILY / LIMIT_POOL_DAILY 一样纳入 SNAPSHOT_TABLES
+#                       走"先删后插"；注意日期列是 ex_date，不是 trade_date
 """
 功能: 把 export_etl_tables.py 导出的 parquet 合并进本机 DuckDB。
 
@@ -20,16 +23,17 @@
   ADJ_FACTOR      覆盖 fore/back/adjust_factor + updated_at，保留原 created_at
   ADJ_FACTOR_RAW / ADJ_FACTOR_LOCAL  同上
 
-  SUSPENSION_DAILY / LIMIT_POOL_DAILY 不走 upsert，走"按 trade_date 区间先删后插"
-  (区间取 parquet 内 MIN/MAX(trade_date))：这两张表是每日全量快照，成员会变，
-  upsert 只覆盖同主键行、不删多余旧行，会在目标库留下幽灵行(同一 bug 在写库侧
-  已被 util/dbutil.py 的 save_suspension_to_db / save_limit_pool_to_db 规避过，
-  见其 docstring)。LIMIT_POOL_DAILY 的删除只按 trade_date，不按 limit_type，
-  确保涨停/跌停两个方向在同一批导入里一起清干净。
+  SUSPENSION_DAILY / LIMIT_POOL_DAILY / XDR_EVENT_THS 不走 upsert，走"按日期区间
+  先删后插"(区间取 parquet 内 MIN/MAX(date_col)，date_col 见 TABLE_META)：这几张表
+  是全量快照，成员会变，upsert 只覆盖同主键行、不删多余旧行，会在目标库留下幽灵行
+  (同一 bug 在写库侧已被 util/dbutil.py 的 save_suspension_to_db / save_limit_pool_to_db /
+  save_xdr_event_ths_to_db 规避过，见其 docstring)。LIMIT_POOL_DAILY 的删除只按
+  trade_date，不按 limit_type，确保涨停/跌停两个方向在同一批导入里一起清干净。
+  XDR_EVENT_THS 的日期列是 ex_date，不是 trade_date。
 
 输入参数:
   -p, --programs  程序范围: adjust / import_daily / fetch_index / sync_suspension /
-                  sync_limit_pool / all (默认 all，可多选)
+                  sync_limit_pool / sync_xdr_ths / all (默认 all，可多选)
   -i, --input     parquet 目录 (默认 tmp/db_sync/out)
       --db        目标库路径 (默认取 config.yaml 中当前生效的库)
       --dry-run   只读打开目标库，统计待导入行数，不写库
@@ -125,15 +129,25 @@ UPSERT_SQL: dict[str, str] = {
 
 }
 
-# 每日全量快照表：成员会变，不能 upsert，导入走"按 trade_date 区间先删后插"。
+# 全量快照表：成员会变，不能 upsert，导入走"按 date_col 区间先删后插"(date_col 取自
+# TABLE_META[table][1]，不是写死的 trade_date——XDR_EVENT_THS 是 ex_date)。
 # 与 UPSERT_SQL 互斥，一张表只能出现在其中一个字典里。
-SNAPSHOT_TABLES: frozenset[str] = frozenset({"SUSPENSION_DAILY", "LIMIT_POOL_DAILY"})
+SNAPSHOT_TABLES: frozenset[str] = frozenset(
+    {"SUSPENSION_DAILY", "LIMIT_POOL_DAILY", "XDR_EVENT_THS"})
 
 # 快照表的插入语句：整行覆盖(导出列即为 "*")，删除逻辑见 import_tables 里的
 # "DELETE ... WHERE {date_col} BETWEEN ? AND ?"。
 SNAPSHOT_INSERT_SQL: dict[str, str] = {
     "SUSPENSION_DAILY": "INSERT INTO SUSPENSION_DAILY SELECT * FROM read_parquet('{src}')",
     "LIMIT_POOL_DAILY": "INSERT INTO LIMIT_POOL_DAILY SELECT * FROM read_parquet('{src}')",
+    "XDR_EVENT_THS": """
+        INSERT INTO XDR_EVENT_THS
+            (code, ex_date, seq, dividend_per_share, per_share_bonus,
+             allotment_ratio, allotment_price, source)
+        SELECT code, ex_date, seq, dividend_per_share, per_share_bonus,
+               allotment_ratio, allotment_price, source
+        FROM read_parquet('{src}')
+    """,
 }
 
 
@@ -249,7 +263,7 @@ def parse_arguments() -> argparse.Namespace:
         default=['all'],
         type=str.lower,
         choices=[*PROGRAMS, 'all'],
-        help='指定程序范围: adjust / import_daily / fetch_index / sync_suspension / sync_limit_pool / all (默认全部)'
+        help='指定程序范围: adjust / import_daily / fetch_index / sync_suspension / sync_limit_pool / sync_xdr_ths / all (默认全部)'
     )
 
     parser.add_argument(

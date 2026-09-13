@@ -5,6 +5,10 @@
 #                       用来守住"不能用 upsert"这个决策) + 不误伤其它日期/另一方向 + dry-run
 #   2026-09-13  Claude  复核意见修复: 补测"快照表 parquet 为空时不清理旧行，且必须有
 #                       WARNING 感知到这一点"，固化"只告警不处理"这个决策
+#   2026-09-13  Claude  接入 sync_xdr_ths(XDR_EVENT_THS)：全量替换语义、成员会变，
+#                       同 SUSPENSION_DAILY / LIMIT_POOL_DAILY 一样必须走快照表(先删后
+#                       插)而非 upsert，否则在目标库留幽灵行；补测覆盖该决策与日期列
+#                       (ex_date 而非 trade_date)易错点
 """导出 + 导入的库级测试：按程序切分、日期区间、幂等、宽表列保护"""
 import logging
 from pathlib import Path
@@ -329,7 +333,7 @@ def _insert_limit_pool(conn: duckdb.DuckDBPyConnection, code: str, trade_date: s
 def test_snapshot_tables_disjoint_from_upsert_sql():
     """SNAPSHOT_TABLES / UPSERT_SQL 是互斥的两类标记，不应有表同时出现在两边"""
     from tools.import_etl_tables import SNAPSHOT_TABLES, UPSERT_SQL
-    assert SNAPSHOT_TABLES == {"SUSPENSION_DAILY", "LIMIT_POOL_DAILY"}
+    assert SNAPSHOT_TABLES == {"SUSPENSION_DAILY", "LIMIT_POOL_DAILY", "XDR_EVENT_THS"}
     assert SNAPSHOT_TABLES.isdisjoint(UPSERT_SQL)
 
 
@@ -513,3 +517,62 @@ def test_local_factor_roundtrip_updated_since_and_idempotency(mem_db, tmp_path):
         assert rows == [(0.5, 3.9, 3.9, date(2019, 1, 1), date(2026, 8, 18))]
     finally:
         target.close()
+
+
+def test_xdr_ths_is_snapshot_table():
+    """正例: XDR_EVENT_THS 必须被标记为快照表
+
+    它是全量替换语义、成员会变; 走 upsert 会在目标库留幽灵行。
+    """
+    from tools import import_etl_tables as imp
+    assert "XDR_EVENT_THS" in imp.SNAPSHOT_TABLES
+    assert "XDR_EVENT_THS" in imp.SNAPSHOT_INSERT_SQL
+    assert "XDR_EVENT_THS" not in imp.UPSERT_SQL
+
+
+def test_xdr_ths_date_col_is_ex_date():
+    """反例(易错): 日期列是 ex_date 不是 trade_date
+
+    填错会让先删后插的 DELETE 报「列不存在」。
+    """
+    from tools.export_etl_tables import TABLE_META
+    assert TABLE_META["XDR_EVENT_THS"][1] == "ex_date"
+
+
+def test_xdr_ths_program_registered():
+    """正例: sync_xdr_ths 进导出工具的程序表(与 MCP 注册表无关)"""
+    from tools.export_etl_tables import PROGRAMS, PROGRAM_TABLES
+    assert "sync_xdr_ths" in PROGRAMS
+    assert PROGRAM_TABLES["sync_xdr_ths"] == {"XDR_EVENT_THS": None}
+
+
+def test_import_xdr_ths_removes_ghost_row(mem_db, tmp_path):
+    """反例(幽灵行): 目标库该区间成员多于 parquet 时, 多余的必须被删除
+
+    若有人把实现改回 upsert, 本用例会变红。
+    """
+    import pandas as pd
+    from tools import import_etl_tables as imp
+
+    for code in ("000001.SZ", "600519.SH", "300750.SZ"):
+        mem_db.execute(
+            "INSERT INTO XDR_EVENT_THS (code, ex_date, seq, dividend_per_share, source) "
+            "VALUES (?, DATE '2026-09-01', 0, 0.1, 'parquet')", [code])
+
+    # 用 duckdb 的 COPY 写 parquet, 不用 pandas 的 to_parquet ——
+    # 后者需要 pyarrow, 本项目未安装且不打算装(依赖红线); 项目一贯用 duckdb 读写 parquet。
+    p = tmp_path / "xdr_event_ths.parquet"
+    mem_db.execute(f"""
+        COPY (
+            SELECT * FROM (VALUES
+                ('000001.SZ', DATE '2026-09-01', 0, 0.1, 0.0, 0.0, 0.0, 'parquet'),
+                ('600519.SH', DATE '2026-09-01', 0, 0.1, 0.0, 0.0, 0.0, 'parquet')
+            ) AS t(code, ex_date, seq, dividend_per_share, per_share_bonus,
+                   allotment_ratio, allotment_price, source)
+        ) TO '{p.as_posix()}' (FORMAT PARQUET)
+    """)
+
+    imp.import_tables(mem_db, tmp_path, ["XDR_EVENT_THS"], dry_run=False)
+    codes = {r[0] for r in mem_db.execute("SELECT code FROM XDR_EVENT_THS").fetchall()}
+    assert codes == {"000001.SZ", "600519.SH"}
+    assert "300750.SZ" not in codes

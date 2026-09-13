@@ -155,6 +155,50 @@ def test_normalize_known_gbbq_anomalies_corrects_only_verified_rows():
     assert source["bonus_share"].tolist() == [0.0, 0.0, 0.0]
 
 
+def test_normalize_drops_known_phantom_event():
+    """正例：已核实的幻象除权事件被整行剔除。
+
+    301097.SZ 天益医疗: gbbq 记 2026-06-02(每10股派5送4)与 2026-06-08(派5.004425
+    送4.00354)两条, 交易所实际除权日是 06-08(50.75 -> 36.31), 同花顺也只有 06-08。
+    保留 06-02 会对同一次分配除权两次, 该股复权价错约 41%。
+    """
+    source = pd.DataFrame([
+        _gbbq_row("301097", 20260602, 5.0, 0.0, 4.0, 0.0),        # 幻象, 应剔除
+        _gbbq_row("301097", 20260608, 5.004425, 0.0, 4.00354, 0.0),  # 真实, 应保留
+    ])
+
+    got = tdx_offline._normalize_known_gbbq_anomalies(source)
+
+    assert len(got) == 1
+    assert str(got.iloc[0]["date"]).replace("-", "")[:8] == "20260608"
+    # 不原地修改数据源帧
+    assert len(source) == 2
+
+
+def test_normalize_phantom_requires_full_signature():
+    """反例：键相同但数值已变更（上游修复或改值）时不得删除。"""
+    source = pd.DataFrame([
+        _gbbq_row("301097", 20260602, 5.0, 0.0, 4.5, 0.0),   # bonus_share 不同
+        _gbbq_row("301097", 20260602, 6.0, 0.0, 4.0, 0.0),   # dividend 不同
+    ])
+
+    got = tdx_offline._normalize_known_gbbq_anomalies(source)
+
+    pd.testing.assert_frame_equal(got, source)
+
+
+def test_normalize_phantom_does_not_touch_other_categories():
+    """反例：同日同码的非「除权除息」记录(如转配股上市)不受影响。"""
+    source = pd.DataFrame([
+        _gbbq_row("301097", 20260602, 5.0, 0.0, 4.0, 0.0),
+    ])
+    source.loc[0, "category"] = "转配股上市"
+
+    got = tdx_offline._normalize_known_gbbq_anomalies(source)
+
+    pd.testing.assert_frame_equal(got, source)
+
+
 def test_normalize_known_gbbq_anomalies_preserves_real_allotment():
     """反例：同一股票的真实配股（配股价为正）不受影响。"""
     source = pd.DataFrame([

@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-13  Claude  新增 _KNOWN_GBBQ_PHANTOM_EVENTS: 剔除已核实的幻象除权
+#                       事件(301097/20260602), 交易所当日未除权且同花顺无记录,
+#                       保留会对同一次分配除权两次(该股复权价错约 41%)
 #   2026-05-26  Claude  从 etl/sync_capital.py 拆分通达信"离线文件"数据源逻辑
 #   2026-05-26  Claude  加固 ManyThreadDownload: 收集线程异常 + run 后校验 size，
 #                       sync_cw_files 单文件失败跳过，避免静默产出错误大小的 zip
@@ -61,6 +64,21 @@ _KNOWN_GBBQ_ALLOTMENT_ANOMALIES = (
     ("000863", "20000919", 0.0, 0.0, 0.0, 10.0),
     ("600602", "20000623", 1.0, 0.0, 0.0, 1.0),
     ("600657", "20011022", 0.0, 0.0, 0.0, 3.0),
+)
+
+# 通达信 gbbq 中已核实的「幻象除权事件」: 该日交易所并未做除权处理(pre_close 与
+# 前一交易日收盘相等), 独立源(同花顺 XDR_EVENT_THS)亦无对应记录, 而同一次分配在
+# 数日后另有一条真实记录。保留会让复权因子对同一事件除权两次。
+#   301097.SZ 天益医疗: gbbq 记 2026-06-02(每10股派5送4) 与 2026-06-08
+#     (派5.004425送4.00354) 两条; 交易所实际除权日是 06-08(50.75 -> 36.31,
+#     比例 1.397687), 同花顺也只有 06-08 一条。保留 06-02 会使该股复权价错约 41%。
+# 全历史扫描「同股 30 天内两条参数近似的除权除息」只有 7 对, 其中 2011 年以后仅此
+# 一例且参数非零, 所以按个案定点处理, 不写通用去重规则——真实的短间隔两次分配
+# 并非不可能, 通用规则会有误删风险。
+# 与上表同样按整条记录签名匹配: 上游若修复或改值, 本规则自动不再命中。
+_KNOWN_GBBQ_PHANTOM_EVENTS = (
+    # code, date, dividend, allotment_price, bonus_share, allotment_share
+    ("301097", "20260602", 5.0, 0.0, 4.0, 0.0),
 )
 
 
@@ -570,6 +588,26 @@ def _normalize_known_gbbq_anomalies(df: pd.DataFrame) -> pd.DataFrame:
                 "已修正通达信 gbbq 已知字段异常: %s/%s "
                 "allotment_share=%s -> bonus_share=%s（%d 条）",
                 code, date, allotment_share, allotment_share, count,
+            )
+
+    for code, date, dividend, allotment_price, bonus_share, allotment_share in             _KNOWN_GBBQ_PHANTOM_EVENTS:
+        phantom = (
+            (codes == code) & (dates == date) & (categories == "除权除息")
+            & pd.to_numeric(result["dividend"], errors="coerce").eq(dividend)
+            & pd.to_numeric(result["allotment_price"], errors="coerce").eq(allotment_price)
+            & pd.to_numeric(result["bonus_share"], errors="coerce").eq(bonus_share)
+            & pd.to_numeric(result["allotment_share"], errors="coerce").eq(allotment_share)
+        )
+        count = int(phantom.sum())
+        if count:
+            result = result.loc[~phantom]
+            codes = codes.loc[result.index]
+            dates = dates.loc[result.index]
+            categories = categories.loc[result.index]
+            logger.warning(
+                "已剔除通达信 gbbq 已知幻象除权事件: %s/%s（%d 条）"
+                "——交易所当日未除权且独立源无记录，保留会造成双重除权",
+                code, date, count,
             )
 
     return result

@@ -922,6 +922,29 @@ def test_fetch_keeps_gbbq_for_large_cash_without_price_gap():
     assert out.iloc[0]["back_factor"] == pytest.approx(7.79 / 6.19)
 
 
+def test_micro_dividend_below_half_cent_is_corrected():
+    """正例(2026-09-13): 名义扣减小于半分(每股派 0.004)同样要采信交易所。
+
+    交易所四舍五入后 pre_close == 前收, 当日未除权; 名义公式却扣掉那 0.004,
+    留下 0.05% 的假跳变。原判据在微额闸门之上还叠了「|X - pre_close| > 半分」,
+    与闸门自身的「|X - 前收| <= 半分」互相打架, 结果只有恰好等于半分的平局才
+    放行 —— 派 0.005 的被修、派 0.004 的不被修, 而交易所对两者处理完全一样。
+    实例 001236.SZ 2026-08-07: 前收 7.63, 每股派 0.004, 交易所 pre_close 仍 7.63。
+    实测这一处不一致贡献了 139 条「多事件」。
+    """
+    conn = _seed_mem_conn()
+    _insert_event(conn, "600000", "2026-03-11", dividend=0.04)     # 每股 0.004
+    _insert_close(conn, "600000.SH", "2026-03-09", 7.63)
+    # 7.63 - 0.004 = 7.626 -> 交易所四舍五入回 7.63, 当日无跳空
+    _insert_close(conn, "600000.SH", "2026-03-11", 7.70, pre_close=7.63)
+
+    out = _fetch(conn, [("600000", "SH", "2026-01-01", "2026-12-31", "L")])
+    conn.close()
+
+    # 采信交易所: 当天没除权 -> 不产生因子跳变
+    assert out.empty or out.iloc[0]["back_factor"] == pytest.approx(1.0)
+
+
 def test_micro_gate_is_restricted_to_pure_cash():
     """反例(契约): 微额闸门只对纯现金分红开放, 含送转/配股的事件即使同样落在
     「当日无跳空 + 幅度恰在半分」的区间, 也不得借道该闸门。

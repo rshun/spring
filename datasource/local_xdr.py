@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-13  Claude  微额闸门成立即采信交易所, 去掉与之冲突的「偏差超半分」
+#                       叠加条件: 每股派 0.004 与 0.005 交易所处理相同, 原判据却
+#                       只放行后者, 前者留下 0.05% 假跳变(实测 139 条多事件)
 #   2026-09-13  Claude  跳空闸门由「相对 0.1%」改为「绝对 0.005 元」: 高价股小额分红
 #                       跳空不足 0.1% 被挡在校正之外, 实测 2011 年以来 103 条比例错
 #                       卡在这里(改后残留 4)。股改期跳空恰为 0, 保护不受影响
@@ -367,10 +370,17 @@ def compute_event_factors(events_df: pd.DataFrame,
                            & ((x - c).abs() <= _XDR_PRICE_ROUNDING + _XDR_PRICE_EPS))
         # 转增类已过跳空闸门, 其 gbbq 比例实测 100% 与交易所不符, 一律取 pre_close;
         # 常规除权只在偏差超出舍入可解释范围时才改用 pre_close。
-        deviating = ((price_gapped | pure_micro_cash) & (x > 0)
-                     & (events["_is_reserve_transfer"]
-                        | ((x - actual).abs()
-                           > _XDR_PRICE_ROUNDING - _XDR_PRICE_EPS)))
+        # 微额闸门一旦成立即直接采信交易所, 不再叠加「偏差超半分」那道阈值 ——
+        # 两者会互相打架: 闸门本身已限定 |X - 前收| <= 半分, 再要求 |X - pre_close|
+        # > 半分, 就只有恰好相等的平局才通过。于是每股派 0.005 的被校正成不跳,
+        # 每股派 0.004 的却保留 0.05% 的假跳变, 而交易所对两者的处理完全一样
+        # (都四舍五入回原价、不除权)。实测 139 条「多事件」由此而来。
+        deviating = (x > 0) & (
+            pure_micro_cash
+            | (price_gapped
+               & (events["_is_reserve_transfer"]
+                  | ((x - actual).abs()
+                     > _XDR_PRICE_ROUNDING - _XDR_PRICE_EPS))))
         if deviating.any():
             sub_ev = events.loc[deviating]
             for code, grp in sub_ev.groupby("code"):

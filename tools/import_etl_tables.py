@@ -5,6 +5,11 @@
 #                       不能沿用 upsert(会在目标库留下幽灵行)，改为按 parquet 的
 #                       trade_date 区间"先删后插"；新增 SNAPSHOT_TABLES 标记这类表，
 #                       现有 6 张 upsert 表行为不变
+#   2026-09-13  Claude  复核意见修复: 快照表 parquet 为空时 d_min/d_max 为 NULL，
+#                       DELETE 恒不删任何行，此前只在注释里提"不会误删"、未提"也不会
+#                       清理"，且日志无感知；本项目刚在同一模块(见 5273f4a)把静默
+#                       排除/静默空帧改成显式 WARNING/INFO，这里不能再留新的静默点。
+#                       现改为该场景下打一条 WARNING，并补全注释的另一面
 """
 功能: 把 export_etl_tables.py 导出的 parquet 合并进本机 DuckDB。
 
@@ -193,10 +198,18 @@ def import_tables(conn: duckdb.DuckDBPyConnection,
                 stats[table] = {"src": n_src, "before": 0, "after": 0}
                 continue
 
+            if table in SNAPSHOT_TABLES and d_min is None:
+                # parquet 0 行时 d_min/d_max 都是 NULL，BETWEEN 恒为 UNKNOWN，不会误删——
+                # 但代价是也不会清理：若目标库该区间(未知，无法界定)恰好留有旧行/幽灵行，
+                # 这次导入不会把它们删掉。不能静默过去，必须让用户知道这次没清理。
+                logger.warning(
+                    f"[{table}] parquet 为空，无法确定日期区间，"
+                    f"目标库该区间(若有)的旧行不会被清理"
+                )
+
             before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             if table in SNAPSHOT_TABLES:
                 # 快照表：按 parquet 的 trade_date 区间先删后插，避免 upsert 留幽灵行。
-                # d_min/d_max 为 NULL 时(parquet 0 行) BETWEEN 恒为 UNKNOWN，不会误删。
                 conn.execute(
                     f"DELETE FROM {table} WHERE {date_col} BETWEEN ? AND ?",
                     [d_min, d_max]

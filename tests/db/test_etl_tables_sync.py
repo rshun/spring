@@ -3,7 +3,10 @@
 #   2026-09-13  Claude  接入 sync_suspension(SUSPENSION_DAILY) / sync_limit_pool
 #                       (LIMIT_POOL_DAILY) 后补测: 往返一致 + 幽灵行必须被删掉(核心反例,
 #                       用来守住"不能用 upsert"这个决策) + 不误伤其它日期/另一方向 + dry-run
+#   2026-09-13  Claude  复核意见修复: 补测"快照表 parquet 为空时不清理旧行，且必须有
+#                       WARNING 感知到这一点"，固化"只告警不处理"这个决策
 """导出 + 导入的库级测试：按程序切分、日期区间、幂等、宽表列保护"""
+import logging
 from pathlib import Path
 
 import duckdb
@@ -462,6 +465,35 @@ def test_import_suspension_dry_run_does_not_write(mem_db, tmp_path):
 
         codes = {r[0] for r in target.execute("SELECT code FROM SUSPENSION_DAILY").fetchall()}
         assert codes == {"000099.SZ"}
+    finally:
+        target.close()
+
+
+def test_import_suspension_empty_parquet_warns_and_keeps_old_rows(mem_db, tmp_path, caplog):
+    """反例: parquet 为空(d_min/d_max 为 NULL)时不清理旧行，且必须打 WARNING 让用户感知到。
+
+    这条测试把"我们知道这个洞、选择只告警不处理"的决策固化下来：日后若把这条 WARNING
+    删掉，或者改成静默跳过，本测试必须变红。
+    """
+    # 源库当日没有任何停牌数据 -> 导出的 parquet 是 0 行，d_min/d_max 为 NULL
+    specs = resolve_table_specs(["sync_suspension"])
+    export_tables(mem_db, specs, SD1, SD1, tmp_path)
+
+    target = _fresh_db()
+    try:
+        _insert_suspension(target, "000099.SZ", SD1, "导入前就在的旧行")
+
+        with caplog.at_level(logging.WARNING, logger="etl.tools.import_etl_tables"):
+            import_tables(target, tmp_path, list(specs))
+
+        # 行为不变: 区间未知，不清理，旧行原样保留
+        codes = {r[0] for r in target.execute("SELECT code FROM SUSPENSION_DAILY").fetchall()}
+        assert codes == {"000099.SZ"}
+
+        assert any(
+            "SUSPENSION_DAILY" in r.message and "无法确定日期区间" in r.message
+            for r in caplog.records if r.levelno == logging.WARNING
+        )
     finally:
         target.close()
 

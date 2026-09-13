@@ -1,5 +1,8 @@
 # 修改记录:
 #   2026-08-18  Claude  新增: export_etl_tables / import_etl_tables 的库级正反测试
+#   2026-09-13  Claude  接入 sync_suspension(SUSPENSION_DAILY) / sync_limit_pool
+#                       (LIMIT_POOL_DAILY) 后补测: 往返一致 + 幽灵行必须被删掉(核心反例,
+#                       用来守住"不能用 upsert"这个决策) + 不误伤其它日期/另一方向 + dry-run
 """导出 + 导入的库级测试：按程序切分、日期区间、幂等、宽表列保护"""
 from pathlib import Path
 
@@ -293,6 +296,174 @@ def test_all_factor_tables_have_sync_mapping(mem_db):
     tables = {r[0] for r in mem_db.execute("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'ADJ_FACTOR%'").fetchall()}
     assert tables <= set(resolve_table_specs(["adjust"]))
     assert tables <= set(UPSERT_SQL)
+
+
+# ---------- 正反例: 快照表(SUSPENSION_DAILY / LIMIT_POOL_DAILY) 先删后插 ----------
+
+SD0 = "2026-09-10"
+SD1 = "2026-09-11"
+SD2 = "2026-09-12"
+
+
+def _insert_suspension(conn: duckdb.DuckDBPyConnection, code: str, trade_date: str,
+                       name: str = "测试停牌") -> None:
+    conn.execute(
+        "INSERT INTO SUSPENSION_DAILY (code, trade_date, name, source) "
+        "VALUES (?, ?, ?, 'akstock')",
+        [code, trade_date, name]
+    )
+
+
+def _insert_limit_pool(conn: duckdb.DuckDBPyConnection, code: str, trade_date: str,
+                       limit_type: str, name: str = "测试涨跌停") -> None:
+    conn.execute(
+        "INSERT INTO LIMIT_POOL_DAILY (code, trade_date, limit_type, name, source) "
+        "VALUES (?, ?, ?, ?, 'akstock')",
+        [code, trade_date, limit_type, name]
+    )
+
+
+def test_snapshot_tables_disjoint_from_upsert_sql():
+    """SNAPSHOT_TABLES / UPSERT_SQL 是互斥的两类标记，不应有表同时出现在两边"""
+    from tools.import_etl_tables import SNAPSHOT_TABLES, UPSERT_SQL
+    assert SNAPSHOT_TABLES == {"SUSPENSION_DAILY", "LIMIT_POOL_DAILY"}
+    assert SNAPSHOT_TABLES.isdisjoint(UPSERT_SQL)
+
+
+def test_export_import_suspension_roundtrip(mem_db, tmp_path):
+    """正例: 往返一致"""
+    _insert_suspension(mem_db, "000001.SZ", SD1, "A")
+    _insert_suspension(mem_db, "000002.SZ", SD1, "B")
+
+    specs = resolve_table_specs(["sync_suspension"])
+    export_tables(mem_db, specs, SD1, SD1, tmp_path)
+
+    target = _fresh_db()
+    try:
+        stats = import_tables(target, tmp_path, list(specs))
+        assert stats["SUSPENSION_DAILY"]["after"] == 2
+        codes = {r[0] for r in target.execute("SELECT code FROM SUSPENSION_DAILY").fetchall()}
+        assert codes == {"000001.SZ", "000002.SZ"}
+    finally:
+        target.close()
+
+
+def test_export_import_limit_pool_roundtrip(mem_db, tmp_path):
+    """正例: 往返一致，涨跌停两个方向都要如实到达"""
+    _insert_limit_pool(mem_db, "000001.SZ", SD1, "U")
+    _insert_limit_pool(mem_db, "000002.SZ", SD1, "D")
+
+    specs = resolve_table_specs(["sync_limit_pool"])
+    export_tables(mem_db, specs, SD1, SD1, tmp_path)
+
+    target = _fresh_db()
+    try:
+        stats = import_tables(target, tmp_path, list(specs))
+        assert stats["LIMIT_POOL_DAILY"]["after"] == 2
+        rows = {(r[0], r[1]) for r in
+                target.execute("SELECT code, limit_type FROM LIMIT_POOL_DAILY").fetchall()}
+        assert rows == {("000001.SZ", "U"), ("000002.SZ", "D")}
+    finally:
+        target.close()
+
+
+def test_import_suspension_removes_ghost_row(mem_db, tmp_path):
+    """反例(最关键): 源库当日只有 A/B，目标库当日原有 A/B/C -> 导入后 C(幽灵行)必须被删掉。
+
+    这条直接守住"这两张表不能用 upsert"的决策：如果实现被改回 upsert，
+    C 不会被删，本测试必须变红。
+    """
+    _insert_suspension(mem_db, "000001.SZ", SD1, "A")
+    _insert_suspension(mem_db, "000002.SZ", SD1, "B")
+
+    specs = resolve_table_specs(["sync_suspension"])
+    export_tables(mem_db, specs, SD1, SD1, tmp_path)
+
+    target = _fresh_db()
+    try:
+        _insert_suspension(target, "000001.SZ", SD1, "A")
+        _insert_suspension(target, "000002.SZ", SD1, "B")
+        _insert_suspension(target, "000003.SZ", SD1, "C-幽灵行")
+
+        import_tables(target, tmp_path, list(specs))
+
+        codes = {r[0] for r in
+                 target.execute("SELECT code FROM SUSPENSION_DAILY WHERE trade_date = ?",
+                                [SD1]).fetchall()}
+        assert codes == {"000001.SZ", "000002.SZ"}
+        assert "000003.SZ" not in codes
+    finally:
+        target.close()
+
+
+def test_import_suspension_does_not_affect_other_dates(mem_db, tmp_path):
+    """反例: 只导入 SD1 当日的数据，不得影响 SD0 / SD2 的行"""
+    _insert_suspension(mem_db, "000001.SZ", SD1, "本日")
+
+    specs = resolve_table_specs(["sync_suspension"])
+    export_tables(mem_db, specs, SD1, SD1, tmp_path)
+
+    target = _fresh_db()
+    try:
+        _insert_suspension(target, "000009.SZ", SD0, "前一天")
+        _insert_suspension(target, "000008.SZ", SD2, "后一天")
+
+        import_tables(target, tmp_path, list(specs))
+
+        before_day = {r[0] for r in
+                      target.execute("SELECT code FROM SUSPENSION_DAILY WHERE trade_date = ?",
+                                     [SD0]).fetchall()}
+        after_day = {r[0] for r in
+                     target.execute("SELECT code FROM SUSPENSION_DAILY WHERE trade_date = ?",
+                                    [SD2]).fetchall()}
+        assert before_day == {"000009.SZ"}
+        assert after_day == {"000008.SZ"}
+    finally:
+        target.close()
+
+
+def test_import_limit_pool_cleans_both_directions_same_day(mem_db, tmp_path):
+    """反例: 涨停/跌停同一天在同一个 parquet 里，先删后插必须把两个方向的幽灵行一起清掉"""
+    _insert_limit_pool(mem_db, "000001.SZ", SD1, "U")
+    _insert_limit_pool(mem_db, "000002.SZ", SD1, "D")
+
+    specs = resolve_table_specs(["sync_limit_pool"])
+    export_tables(mem_db, specs, SD1, SD1, tmp_path)
+
+    target = _fresh_db()
+    try:
+        _insert_limit_pool(target, "000001.SZ", SD1, "U")
+        _insert_limit_pool(target, "000002.SZ", SD1, "D")
+        _insert_limit_pool(target, "000099.SZ", SD1, "U", "涨停幽灵行")
+        _insert_limit_pool(target, "000098.SZ", SD1, "D", "跌停幽灵行")
+
+        import_tables(target, tmp_path, list(specs))
+
+        rows = {(r[0], r[1]) for r in
+                target.execute("SELECT code, limit_type FROM LIMIT_POOL_DAILY WHERE trade_date = ?",
+                               [SD1]).fetchall()}
+        assert rows == {("000001.SZ", "U"), ("000002.SZ", "D")}
+    finally:
+        target.close()
+
+
+def test_import_suspension_dry_run_does_not_write(mem_db, tmp_path):
+    """反例: --dry-run 不得写库，目标库原有行(哪怕是幽灵行)也不能被删或改"""
+    _insert_suspension(mem_db, "000001.SZ", SD1, "A")
+
+    specs = resolve_table_specs(["sync_suspension"])
+    export_tables(mem_db, specs, SD1, SD1, tmp_path)
+
+    target = _fresh_db()
+    try:
+        _insert_suspension(target, "000099.SZ", SD1, "应保留-幽灵行")
+        stats = import_tables(target, tmp_path, list(specs), dry_run=True)
+        assert stats["SUSPENSION_DAILY"]["src"] == 1
+
+        codes = {r[0] for r in target.execute("SELECT code FROM SUSPENSION_DAILY").fetchall()}
+        assert codes == {"000099.SZ"}
+    finally:
+        target.close()
 
 
 def test_local_factor_roundtrip_updated_since_and_idempotency(mem_db, tmp_path):

@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-18  Claude  新增: export_etl_tables 程序->表解析 / WHERE 拼装 的正反测试
+#   2026-09-13  Claude  补充 sync_suspension / sync_limit_pool 两个新程序的表规格解析用例
 """tools.export_etl_tables 纯逻辑单元测试(不依赖数据库)"""
 import pytest
 
@@ -83,8 +84,25 @@ def test_specs_two_programs_merge_stock_daily_scope():
 
 def test_specs_all_covers_four_tables():
     assert set(resolve_table_specs(["all"])) == {
-        "STOCK_DAILY", "DAILY_BASIC", "ADJ_FACTOR", "ADJ_FACTOR_RAW", "ADJ_FACTOR_LOCAL", "ADJ_FACTOR_LOCAL_STATE"
+        "STOCK_DAILY", "DAILY_BASIC", "ADJ_FACTOR", "ADJ_FACTOR_RAW", "ADJ_FACTOR_LOCAL",
+        "ADJ_FACTOR_LOCAL_STATE", "SUSPENSION_DAILY", "LIMIT_POOL_DAILY",
     }
+
+
+# ---------- 正例: 表规格解析(新表: sync_suspension / sync_limit_pool) ----------
+
+def test_specs_sync_suspension_only():
+    specs = resolve_table_specs(["sync_suspension"])
+    assert set(specs) == {"SUSPENSION_DAILY"}
+    assert specs["SUSPENSION_DAILY"].board_scope is None
+    assert specs["SUSPENSION_DAILY"].date_col == "trade_date"
+
+
+def test_specs_sync_limit_pool_only():
+    specs = resolve_table_specs(["sync_limit_pool"])
+    assert set(specs) == {"LIMIT_POOL_DAILY"}
+    assert specs["LIMIT_POOL_DAILY"].board_scope is None
+    assert specs["LIMIT_POOL_DAILY"].date_col == "trade_date"
 
 
 # ---------- 正反例: WHERE 拼装 ----------

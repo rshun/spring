@@ -1,5 +1,10 @@
 # 修改记录:
 #   2026-08-18  Claude  新增: 导入 export_etl_tables.py 导出的 parquet(按程序选择, 幂等 upsert)
+#   2026-09-13  Claude  接入 sync_suspension(SUSPENSION_DAILY) / sync_limit_pool
+#                       (LIMIT_POOL_DAILY)。这两张表是"每日全量快照，成员会变"，
+#                       不能沿用 upsert(会在目标库留下幽灵行)，改为按 parquet 的
+#                       trade_date 区间"先删后插"；新增 SNAPSHOT_TABLES 标记这类表，
+#                       现有 6 张 upsert 表行为不变
 """
 功能: 把 export_etl_tables.py 导出的 parquet 合并进本机 DuckDB。
 
@@ -10,8 +15,16 @@
   ADJ_FACTOR      覆盖 fore/back/adjust_factor + updated_at，保留原 created_at
   ADJ_FACTOR_RAW / ADJ_FACTOR_LOCAL  同上
 
+  SUSPENSION_DAILY / LIMIT_POOL_DAILY 不走 upsert，走"按 trade_date 区间先删后插"
+  (区间取 parquet 内 MIN/MAX(trade_date))：这两张表是每日全量快照，成员会变，
+  upsert 只覆盖同主键行、不删多余旧行，会在目标库留下幽灵行(同一 bug 在写库侧
+  已被 util/dbutil.py 的 save_suspension_to_db / save_limit_pool_to_db 规避过，
+  见其 docstring)。LIMIT_POOL_DAILY 的删除只按 trade_date，不按 limit_type，
+  确保涨停/跌停两个方向在同一批导入里一起清干净。
+
 输入参数:
-  -p, --programs  程序范围: adjust / import_daily / fetch_index / all (默认 all，可多选)
+  -p, --programs  程序范围: adjust / import_daily / fetch_index / sync_suspension /
+                  sync_limit_pool / all (默认 all，可多选)
   -i, --input     parquet 目录 (默认 tmp/db_sync/out)
       --db        目标库路径 (默认取 config.yaml 中当前生效的库)
       --dry-run   只读打开目标库，统计待导入行数，不写库
@@ -107,6 +120,17 @@ UPSERT_SQL: dict[str, str] = {
 
 }
 
+# 每日全量快照表：成员会变，不能 upsert，导入走"按 trade_date 区间先删后插"。
+# 与 UPSERT_SQL 互斥，一张表只能出现在其中一个字典里。
+SNAPSHOT_TABLES: frozenset[str] = frozenset({"SUSPENSION_DAILY", "LIMIT_POOL_DAILY"})
+
+# 快照表的插入语句：整行覆盖(导出列即为 "*")，删除逻辑见 import_tables 里的
+# "DELETE ... WHERE {date_col} BETWEEN ? AND ?"。
+SNAPSHOT_INSERT_SQL: dict[str, str] = {
+    "SUSPENSION_DAILY": "INSERT INTO SUSPENSION_DAILY SELECT * FROM read_parquet('{src}')",
+    "LIMIT_POOL_DAILY": "INSERT INTO LIMIT_POOL_DAILY SELECT * FROM read_parquet('{src}')",
+}
+
 
 def import_tables(conn: duckdb.DuckDBPyConnection,
                   in_dir: Path,
@@ -170,12 +194,22 @@ def import_tables(conn: duckdb.DuckDBPyConnection,
                 continue
 
             before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            conn.execute(UPSERT_SQL[table].format(src=src_posix))
+            if table in SNAPSHOT_TABLES:
+                # 快照表：按 parquet 的 trade_date 区间先删后插，避免 upsert 留幽灵行。
+                # d_min/d_max 为 NULL 时(parquet 0 行) BETWEEN 恒为 UNKNOWN，不会误删。
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {date_col} BETWEEN ? AND ?",
+                    [d_min, d_max]
+                )
+                conn.execute(SNAPSHOT_INSERT_SQL[table].format(src=src_posix))
+            else:
+                conn.execute(UPSERT_SQL[table].format(src=src_posix))
             after = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             stats[table] = {"src": n_src, "before": before, "after": after}
+            verb = "先删后插" if table in SNAPSHOT_TABLES else "更新"
             logger.info(
                 f"[导入] {table:<16} parquet {n_src:>9} 行 ({d_min}~{d_max}) | "
-                f"表 {before} -> {after} (新增 {after - before}，其余为更新)"
+                f"表 {before} -> {after} (新增 {after - before}，其余为{verb})"
             )
 
         if not dry_run:
@@ -202,7 +236,7 @@ def parse_arguments() -> argparse.Namespace:
         default=['all'],
         type=str.lower,
         choices=[*PROGRAMS, 'all'],
-        help='指定程序范围: adjust / import_daily / fetch_index / all (默认全部)'
+        help='指定程序范围: adjust / import_daily / fetch_index / sync_suspension / sync_limit_pool / all (默认全部)'
     )
 
     parser.add_argument(

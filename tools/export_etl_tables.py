@@ -1,22 +1,30 @@
 # 修改记录:
 #   2026-08-18  Claude  新增: 按程序(adjust/import_daily/fetch_index)导出其写入的表,
 #                       用于把执行成功机器上的增量数据搬运到执行失败的机器
+#   2026-09-13  Claude  接入 sync_suspension(SUSPENSION_DAILY) / sync_limit_pool
+#                       (LIMIT_POOL_DAILY) 两张表；两表都不区分个股/指数
 """
 功能: 按 ETL 程序维度，导出该程序写入的表数据(parquet)，供另一台机器导入。
 
 各程序写入的表(只导出"写入表"，STOCK_INFO / TRADE_CAL 属只读依赖，不在此列):
-  import_daily  -> STOCK_DAILY(个股)、DAILY_BASIC(仅 turnover_rate/pe/pb/is_st 四列)
-  fetch_index   -> STOCK_DAILY(指数)
-  adjust        -> ADJ_FACTOR、ADJ_FACTOR_RAW、ADJ_FACTOR_LOCAL
+  import_daily      -> STOCK_DAILY(个股)、DAILY_BASIC(仅 turnover_rate/pe/pb/is_st 四列)
+  fetch_index       -> STOCK_DAILY(指数)
+  adjust            -> ADJ_FACTOR、ADJ_FACTOR_RAW、ADJ_FACTOR_LOCAL
+  sync_suspension   -> SUSPENSION_DAILY
+  sync_limit_pool   -> LIMIT_POOL_DAILY
 
 说明:
   1) STOCK_DAILY 为个股与指数共用表，按 STOCK_INFO.board 区分:
      只选 import_daily 时仅导出个股行，只选 fetch_index 时仅导出指数行，两者都选则不过滤。
   2) DAILY_BASIC 是多程序共用的宽表，涨跌停价/量比/股本/市值等列由其它程序生成，
      故只导出 import_daily 负责的四列，避免导入端覆盖掉这些列。
+  3) SUSPENSION_DAILY / LIMIT_POOL_DAILY 只含沪深 A 股，不区分个股/指数。这两张表
+     导入侧是"按日期先删后插"而非 upsert(见 import_etl_tables.py 的 SNAPSHOT_TABLES)，
+     因为它们是每日全量快照、成员会变，upsert 会在目标库留下幽灵行。
 
 输入参数:
-  -p, --programs      程序范围: adjust / import_daily / fetch_index / all (默认 all，可多选)
+  -p, --programs      程序范围: adjust / import_daily / fetch_index / sync_suspension /
+                       sync_limit_pool / all (默认 all，可多选)
   -b, --begin         起始日期 (格式: YYYYMMDD)，默认为当天
   -e, --end           结束日期 (格式: YYYYMMDD)，默认为当天
   -o, --out           输出目录 (默认 tmp/db_sync/out)
@@ -45,7 +53,7 @@ from util import validators as pv
 
 logger = logging.getLogger("etl.tools.export_etl_tables")
 
-PROGRAMS = ("adjust", "import_daily", "fetch_index")
+PROGRAMS = ("adjust", "import_daily", "fetch_index", "sync_suspension", "sync_limit_pool")
 
 # 表名 -> (导出列, 日期字段)
 TABLE_META: dict[str, tuple[str, str]] = {
@@ -55,6 +63,8 @@ TABLE_META: dict[str, tuple[str, str]] = {
     "ADJ_FACTOR_RAW": ("*", "trade_date"),
     "ADJ_FACTOR_LOCAL": ("*", "trade_date"),
     "ADJ_FACTOR_LOCAL_STATE": ("*", "updated_at"),
+    "SUSPENSION_DAILY": ("*", "trade_date"),
+    "LIMIT_POOL_DAILY": ("*", "trade_date"),
 }
 
 # 程序 -> {表名: board 范围}；board 范围为 None 表示该表不区分个股/指数
@@ -62,6 +72,8 @@ PROGRAM_TABLES: dict[str, dict[str, str | None]] = {
     "import_daily": {"STOCK_DAILY": "stock", "DAILY_BASIC": None},
     "fetch_index": {"STOCK_DAILY": "index"},
     "adjust": {"ADJ_FACTOR": None, "ADJ_FACTOR_RAW": None, "ADJ_FACTOR_LOCAL": None, "ADJ_FACTOR_LOCAL_STATE": None},
+    "sync_suspension": {"SUSPENSION_DAILY": None},
+    "sync_limit_pool": {"LIMIT_POOL_DAILY": None},
 }
 
 _BOARD_FILTER = {
@@ -220,7 +232,7 @@ def parse_arguments() -> argparse.Namespace:
         default=['all'],
         type=str.lower,
         choices=[*PROGRAMS, 'all'],
-        help='指定程序范围: adjust / import_daily / fetch_index / all (默认全部)'
+        help='指定程序范围: adjust / import_daily / fetch_index / sync_suspension / sync_limit_pool / all (默认全部)'
     )
 
     parser.add_argument(

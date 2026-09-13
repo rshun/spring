@@ -13,12 +13,13 @@ from util.dbutil import (
 from tests.conftest import insert_stock_info
 
 
-def _daily_df(code="600519.SH", trade_date="2023-01-03", tradestatus=1):
+def _daily_df(code="600519.SH", trade_date="2023-01-03", tradestatus=1,
+              volume=10000, amount=18200000.0):
     return pd.DataFrame({
         "code": [code], "date": [trade_date],
         "open": [1800.0], "high": [1850.0], "low": [1780.0], "close": [1820.0],
         "pre_close": [1790.0], "tradestatus": [tradestatus],
-        "volume": [10000], "amount": [18200000.0],
+        "volume": [volume], "amount": [amount],
     })
 
 
@@ -39,9 +40,13 @@ def test_save_daily_inserts_row(mem_db):
 
 
 def test_save_daily_upsert_on_duplicate(mem_db):
-    """同一 (code, date) 重复入库时 UPSERT：不产生重复行，且新值生效。"""
+    """同一 (code, date) 重复入库时 UPSERT：不产生重复行，且新值生效。
+
+    第二次写成「真停牌行」(volume/amount 均为 0)：_normalize_daily_df 会把
+    「有成交却标停牌」纠正回 1，用带成交量的行做观测字段就测不出 UPSERT 了。
+    """
     save_daily_to_db(_daily_df(tradestatus=1), mem_db)
-    save_daily_to_db(_daily_df(tradestatus=0), mem_db)  # 同一 (code, date)
+    save_daily_to_db(_daily_df(tradestatus=0, volume=0, amount=0.0), mem_db)
     count = mem_db.execute("SELECT COUNT(*) FROM STOCK_DAILY").fetchone()[0]
     assert count == 1
     row = mem_db.execute("SELECT tradestatus FROM STOCK_DAILY").fetchone()

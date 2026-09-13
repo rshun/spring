@@ -53,6 +53,47 @@ def test_normalize_tradestatus_nan_filled_minus_one():
     assert result["tradestatus"].iloc[0] == -1
 
 
+def test_normalize_corrects_tradestatus_when_really_traded():
+    """正例: 有成交量且有成交额却被标停牌 -> 纠正为 1。
+
+    实测全库 4 行(603133/600647/600766 的 2024-06-13、688065 的 2023-06-15), 它们的
+    close 正是次一交易日的 pre_close, 佐证当天确实在交易。标错会让一切「按
+    tradestatus=1 取前收」的逻辑跳过该日 —— 复权因子的逐日恒等式核对因此把一条
+    完全正确的因子链报成漏事件。
+    """
+    df = pd.DataFrame({"code": ["A"], "date": ["2023-06-15"],
+                       "open": [55.04], "high": [55.80], "low": [54.76], "close": [55.53],
+                       "pre_close": [55.02], "volume": [353426], "amount": [19589785.99],
+                       "tradestatus": [0]})
+    assert _normalize_daily_df(df)["tradestatus"].iloc[0] == 1
+
+
+def test_normalize_keeps_suspended_row_with_carried_volume():
+    """反例: 停牌占位行会结转前一交易日的 volume 却不结转 amount, 不得误判为交易日。
+
+    实例 002500.SZ 2020-06-17: volume 与 06-16 完全相同(38945309)、amount=0、
+    四价全等于前收, 同花顺该日无行 —— 确为停牌。判据必须同时要求 amount>0。
+    """
+    df = pd.DataFrame({"code": ["A"], "date": ["2020-06-17"],
+                       "open": [6.39], "high": [6.39], "low": [6.39], "close": [6.39],
+                       "pre_close": [6.39], "volume": [38945309], "amount": [0.0],
+                       "tradestatus": [0]})
+    assert _normalize_daily_df(df)["tradestatus"].iloc[0] == 0
+
+
+def test_normalize_does_not_promote_unknown_status():
+    """反例: -1(未知)是有意保留的状态, 不得据成交量悄悄推断成 1。
+
+    tools/checks/suspension.py 专为 tradestatus=-1 设了一类告警;
+    在此推断掉会让那类异常永远查不出来。
+    """
+    df = pd.DataFrame({"code": ["A"], "date": ["2023-01-03"],
+                       "open": [10.0], "high": [11.0], "low": [9.5], "close": [10.5],
+                       "pre_close": [10.0], "volume": [100], "amount": [105000.0],
+                       "tradestatus": [-1]})
+    assert _normalize_daily_df(df)["tradestatus"].iloc[0] == -1
+
+
 # ── get_connection 异常 ───────────────────────────────────────────────────────
 
 def test_get_connection_readonly_missing_file_raises(tmp_path):

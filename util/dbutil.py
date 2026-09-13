@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-13  Claude  _normalize_daily_df 纠正「有成交却标非交易日」的 tradestatus
+#                       (volume>0 且 amount>0), 实测全库 4 行; 只看 volume 会误伤
+#                       停牌占位行——它结转 volume 但不结转 amount
 #   2026-05-26  Claude  新增 save_capital_detail_to_db (从 etl/sync_capital.py 迁入)
 #   2026-05-29  Claude  新增 save_finance_report_to_db (专业财务报表 cw 数据入库)
 #   2026-05-30  Claude  新增 fill_daily_basic_turnover (换手率, 支持 overwrite 开关并返回更新行数)
@@ -256,6 +259,21 @@ def _normalize_daily_df(df: pd.DataFrame) -> pd.DataFrame:
             df["tradestatus"] = -1
 
     df["tradestatus"] = df["tradestatus"].fillna(-1)
+
+    # 有真实成交却被标成「停牌」-> 纠正为 1。
+    # 判据同时要求 volume>0 与 amount>0, 缺一不可: 停牌占位行会结转前一交易日的
+    # volume 却不结转 amount(实测 002500.SZ 2020-06-17 的 volume 与 06-16 完全相同
+    # 而 amount=0, 同花顺该日无行, 确为停牌), 只看 volume 会把这类误判成交易日。
+    # 实测全库仅 4 行命中(603133/600647/600766 的 2024-06-13, 688065 的 2023-06-15),
+    # 它们的 close 正是次一交易日的 pre_close, 佐证当天确实在交易。
+    # 影响: 标错会让一切「按 tradestatus=1 取前收」的逻辑跳过该日, 复权因子的
+    # 逐日恒等式核对会因此把一条正确的因子链报成漏事件。
+    # 只处理 0(停牌), 不碰 -1: -1 表示「未知」, 是本项目有意保留的状态,
+    # tools/checks/suspension.py 专为它设了一类告警, 不能在此悄悄推断掉。
+    if {"volume", "amount"}.issubset(df.columns):
+        traded = (pd.to_numeric(df["volume"], errors="coerce").fillna(0) > 0) &                  (pd.to_numeric(df["amount"], errors="coerce").fillna(0) > 0)
+        df.loc[traded & (df["tradestatus"] == 0), "tradestatus"] = 1
+
     return df
 
 

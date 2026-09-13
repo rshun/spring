@@ -1,9 +1,12 @@
 # 修改记录:
 #   2026-09-13  Claude  新增 save_xdr_event_ths_to_db 写库测试(seq 分配、先删后插、区间隔离)
+#   2026-09-13  Claude  补充半区间(begin/end 只给一侧)必须报错的测试：BETWEEN ? AND NULL
+#                       三值逻辑恒不匹配, 会让先删后插静默失效
 """XDR_EVENT_THS 写库: seq 分配、先删后插、区间隔离。"""
 import datetime
 
 import pandas as pd
+import pytest
 
 from util import dbutil
 
@@ -112,3 +115,27 @@ def test_source_column_recorded(mem_db):
     dbutil.save_xdr_event_ths_to_db(_df([("600519.SH", D1, 0.1, 0.0, 0.0, 0.0)]),
                                     mem_db, source="api")
     assert mem_db.execute("SELECT source FROM XDR_EVENT_THS").fetchone()[0] == "api"
+
+
+@pytest.mark.parametrize("begin, end", [(D1, None), (None, D1)])
+def test_half_open_range_rejected(mem_db, begin, end):
+    """反例: 只给一侧边界必须报错, 不得静默删 0 行
+
+    BETWEEN ? AND NULL 在 SQL 三值逻辑下恒不匹配, 会让「先删后插」
+    防幽灵行的设计悄悄失效。
+    """
+    with pytest.raises(ValueError, match="begin/end"):
+        dbutil.save_xdr_event_ths_to_db(
+            _df([("600519.SH", D1, 0.1, 0.0, 0.0, 0.0)]), mem_db,
+            begin=begin, end=end)
+
+
+def test_half_open_range_does_not_write_anything(mem_db):
+    """反例: 守卫必须在任何写库动作之前触发, 不能删了一半才报错"""
+    dbutil.save_xdr_event_ths_to_db(_df([("000001.SZ", D1, 0.1, 0.0, 0.0, 0.0)]), mem_db)
+    before = mem_db.execute("SELECT COUNT(*) FROM XDR_EVENT_THS").fetchone()[0]
+    with pytest.raises(ValueError):
+        dbutil.save_xdr_event_ths_to_db(
+            _df([("600519.SH", D1, 0.2, 0.0, 0.0, 0.0)]), mem_db, begin=D1, end=None)
+    after = mem_db.execute("SELECT COUNT(*) FROM XDR_EVENT_THS").fetchone()[0]
+    assert before == after == 1

@@ -1683,8 +1683,12 @@ def save_xdr_event_ths_to_db(df: pd.DataFrame,
                              begin=None, end=None) -> int:
     """写入 XDR_EVENT_THS：先删后插，返回入库行数
 
-    begin/end 均为 None -> 清空整表（全量替换，用于 parquet 灌库）；
-    否则只删 [begin, end] 区间（用于 api 增量）。
+    begin/end 必须同时给出或同时为 None，不接受半区间：
+    - 均为 None -> 清空整表（全量替换，用于 parquet 灌库）；
+    - 均给出 -> 只删 [begin, end] 区间（用于 api 增量）。
+    只给一侧会让 SQL 的 `BETWEEN ? AND NULL` 在三值逻辑下恒不匹配，
+    导致该删的行没删、直接插入，「先删后插」防幽灵行的设计静默失效，
+    因此在删除之前显式校验并报错，不允许悄悄跳过。
 
     不用 INSERT OR REPLACE：事件集合会因数据源修订而变化，
     它只覆盖同主键行、不删多余旧行，重跑会留下幽灵行。
@@ -1692,6 +1696,10 @@ def save_xdr_event_ths_to_db(df: pd.DataFrame,
     seq 按 (dividend, bonus, allotment_ratio, allotment_price) 排序后分配，
     而非按输入顺序——保证同一份输入多次运行得到相同的 seq。
     """
+    if (begin is None) != (end is None):
+        raise ValueError(
+            f"begin/end 必须同时给出或同时为 None（收到 begin={begin!r}, end={end!r}）；"
+            "半区间会让 BETWEEN 恒不匹配，静默跳过删除")
     try:
         if begin is None and end is None:
             conn.execute("DELETE FROM XDR_EVENT_THS")

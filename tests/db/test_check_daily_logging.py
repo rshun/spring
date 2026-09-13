@@ -1,3 +1,6 @@
+# 修改记录:
+#   2026-09-13  Claude  build_summary 总结行量词改动(N 项告警 -> N 条告警)后
+#                       同步更新断言，防止断言与实现失配
 """日志形态: 正确的一律不输出, 结尾保留一行总结"""
 from tests.conftest import insert_stock_info, insert_trade_cal
 from util import checker
@@ -32,7 +35,7 @@ def test_summary_counts_warnings_and_unchecked(mem_db):
     from tools import check_daily
     line = check_daily.build_summary(
         0, [_mismatch("停牌核对", 3), _missing("跌停核对"), _ok("涨停核对")])
-    assert "3 项告警" in line
+    assert "3 条告警" in line
     assert "1 项未核对" in line
 
 

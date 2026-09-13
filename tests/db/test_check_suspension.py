@@ -1,3 +1,7 @@
+# 修改记录:
+#   2026-09-13  Claude  _run 传给 begin/end 的日期改成 "YYYY-MM-DD"(此前用
+#                       "20240426" 紧凑格式), 与实际调用约定(check_daily.py
+#                       run_warn_checks 传 YYYY-MM-DD)对齐，防止测试守着错误约定
 """停牌一致性核对: 四种情形 + source_missing"""
 from tests.conftest import insert_stock_info, insert_trade_cal
 from tools.checks.suspension import check_suspension
@@ -28,7 +32,7 @@ def _susp(conn, code):
 
 
 def _run(conn):
-    return check_suspension(conn, [DATE], "20240426", "20240426",
+    return check_suspension(conn, [DATE], "2024-04-26", "2024-04-26",
                             NO_EX_FILTER, NO_CODE_FILTER, [])
 
 
@@ -108,7 +112,7 @@ def test_partial_when_one_of_two_dates_missing(mem_db):
     insert_trade_cal(mem_db, prev, 1)
     _susp(mem_db, "600001.SH")
     _daily(mem_db, "600001.SH", 1)
-    result = check_suspension(mem_db, [prev, DATE], "20240425", "20240426",
+    result = check_suspension(mem_db, [prev, DATE], "2024-04-25", "2024-04-26",
                               NO_EX_FILTER, NO_CODE_FILTER, [])
     assert result.status == checker.STATUS_PARTIAL
     assert result.missing_dates == [prev]
@@ -141,7 +145,7 @@ def test_code_filter_binds_params_correctly(mem_db):
     _daily(mem_db, "600001.SH", 1)
     _susp(mem_db, "600002.SH")
     _daily(mem_db, "600002.SH", 1)
-    result = check_suspension(mem_db, [DATE], "20240426", "20240426",
+    result = check_suspension(mem_db, [DATE], "2024-04-26", "2024-04-26",
                               "", "AND i.symbol IN (?)", ["600001"])
     codes = {r["code"] for r in result.rows}
     assert codes == {"600001.SH"}
@@ -153,7 +157,7 @@ def test_code_filter_with_multiple_placeholders(mem_db):
     for code in ("600001.SH", "600002.SH", "000003.SZ"):
         _susp(mem_db, code)
         _daily(mem_db, code, 1)
-    result = check_suspension(mem_db, [DATE], "20240426", "20240426",
+    result = check_suspension(mem_db, [DATE], "2024-04-26", "2024-04-26",
                               "", "AND i.symbol IN (?, ?)", ["600001", "000003"])
     codes = {r["code"] for r in result.rows}
     assert codes == {"600001.SH", "000003.SZ"}

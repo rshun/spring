@@ -10,6 +10,14 @@
 #   2026-09-12  Claude  正确的核对项不再输出日志, 结尾保留一行总结
 #   2026-09-12  Claude  补齐遗漏: 5 处旧式告警检查(is_st/指标空值/日线价量/
 #                       复权因子值/除权前收价)的 OK 分支也一并去掉逐项日志
+#   2026-09-13  Claude  修正 run_warn_checks 区间收窄的误用: _check_xdr_preclose
+#                       查 CAPITAL_DETAIL.date、无 TRADE_CAL 门, 收窄到
+#                       [range_begin, range_end] 会静默丢掉落在交易日列表首尾外的
+#                       XDR 事件, 改回用原始 [begin, end]; 其余 4 项(有 trading_days
+#                       门)维持收窄不变; 同步修正声称「等价」的注释
+#   2026-09-13  Claude  build_summary 总结行「N 项告警」改成「N 条告警」:
+#                       该数是差异行数之和而非核对项个数, 用「项」与下文
+#                       「N 项未核对」的量词冲突, 让人误以为告警只有 N 个核对项
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
       1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
@@ -803,7 +811,7 @@ def build_summary(core_missing: int,
             else f"检查完成: 核心日线发现 {core_missing} 条缺失记录")
     parts = [head]
     if warn_total:
-        parts.append(f"{warn_total} 项告警")
+        parts.append(f"{warn_total} 条告警")
     if unchecked:
         parts.append(f"{unchecked} 项未核对")
     if warn_total or unchecked:
@@ -866,6 +874,17 @@ def run_warn_checks(conn: duckdb.DuckDBPyConnection,
     这些检查只写 CSV 与日志，不影响退出码。
     既有 5 项保持原判定逻辑不变，仅把返回的计数包装成 CheckResult；
     新增 3 项来自 tools/checks/ 子包。
+
+    前 4 项(_check_stock_daily_nulls / _check_adj_factor_nulls / _check_is_st_null /
+    _check_daily_basic_nulls)内部都有 INNER JOIN trading_days(TRADE_CAL, is_open=1)，
+    区间收窄到 [range_begin, range_end] 与用原始 [begin, end] 等价——之间不存在的
+    日期必被 trading_days 过滤掉，二者查询结果相同。
+    _check_xdr_preclose 不满足这个前提：它经 _count_xdr_uncomputable /
+    _query_xdr_preclose_mismatches 过滤的是 CAPITAL_DETAIL.date BETWEEN ? AND ?，
+    没有任何 TRADE_CAL 门；而 gbbq 的除权除息.date 本身不可靠(已知会把事件记成
+    非交易日，见 CAPITAL_DETAIL 相关记忆)。用收窄后的 [range_begin, range_end]
+    会把落在 trade_dates 首尾之外(如区间开头的假期)的 XDR 事件静默丢掉，因此
+    _check_xdr_preclose 必须继续使用原始的 [begin, end]，不能跟前 4 项一起收窄。
     """
     range_begin = begin_date_of(trade_dates, begin)
     range_end = end_date_of(trade_dates, end)
@@ -878,7 +897,7 @@ def run_warn_checks(conn: duckdb.DuckDBPyConnection,
                                          ex_filter, code_filter, code_params)),
         ("指标空值", _check_daily_basic_nulls(conn, range_begin, range_end,
                                               ex_filter, code_filter, code_params)),
-        ("除权前收价", _check_xdr_preclose(conn, range_begin, range_end,
+        ("除权前收价", _check_xdr_preclose(conn, begin, end,
                                            ex_filter, code_filter, code_params)),
     ]
     results = [

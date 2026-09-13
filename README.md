@@ -24,6 +24,8 @@ spring/
 │   ├── sync_industry.py # 同步申万行业分类
 │   ├── sync_margin.py   # 同步融资融券汇总和明细数据
 │   ├── sync_finance.py  # 同步专业财务报表 (通达信 cw, 按报告期)
+│   ├── sync_suspension.py  # 同步停牌名单 (第三方独立事实源, 供 check_daily 交叉核对)
+│   ├── sync_limit_pool.py  # 同步涨跌停股池 (第三方独立事实源, 供 check_daily 交叉核对)
 │   ├── fill_volratio.py # 补齐量比
 │   ├── update_limit.py  # 补齐涨跌停
 │   └── fill_shares.py   # 回填总股本/流通股本(及市值)
@@ -35,14 +37,18 @@ spring/
 ├── sql/                 # 数据库定义与管理
 │   └── schema.sql       # DuckDB 核心表结构定义（如 STOCK_INFO, STOCK_DAILY 等）
 ├── tools/               # 工具类
-│   ├── check_daily.py          # 校验数据是否完整
+│   ├── check_daily.py          # 校验数据是否完整(含停牌/涨跌停一致性核对)
+│   ├── checks/                 # check_daily 的告警类核对项子包
+│   │   ├── suspension.py       # 停牌一致性核对(SUSPENSION_DAILY vs STOCK_DAILY)
+│   │   └── limit_pool.py       # 涨跌停一致性核对(LIMIT_POOL_DAILY vs DAILY_BASIC)
 │   ├── export_etl_tables.py    # 按程序导出其写入的表 (跨机器搬运数据)
 │   └── import_etl_tables.py    # 导入上面导出的 parquet (幂等 upsert)
 ├── util/                # 核心工具包
 │   ├── dbutil.py        # 数据库连接与执行工具
 │   ├── myutil.py        # 通用辅助函数
 │   ├── config.py        # 读取 config/config.yaml 配置
-│   └── validators.py    # 数据校验逻辑
+│   ├── validators.py    # 数据校验逻辑
+│   └── checker.py       # 核对框架: 结果状态机与外部数据源可用性判定
 ├── config/              # 配置文件 (config.yaml: 数据库路径、数据源等)
 ├── tests/               # 测试 (unit / db / integration 三层)
 └── requirements.txt     # Python 依赖清单
@@ -115,6 +121,9 @@ python -m pip install --upgrade baostock -i https://pypi.org/simple
 ```bash
    python -m etl.init_db
 ```
+新增 `SUSPENSION_DAILY`（停牌名单）/ `LIMIT_POOL_DAILY`（涨跌停股池）两张表，
+供 `check_daily` 与它们做交叉核对；老库升级到本版本只需重新执行一遍上面的
+`python -m etl.init_db`（`CREATE TABLE IF NOT EXISTS`，幂等，不影响已有表）。
 
 **校验数据是否完整**
 ```bash
@@ -271,6 +280,22 @@ python -m etl.sync_finance --start 20200101 --end 20241231
 # 仅导入指定股票 (逗号或空格分隔的裸代码)
 python -m etl.sync_finance --codes 000001,600519
 ```
+
+#### 同步停牌名单 / 涨跌停股池 (akstock 数据源, 第三方独立事实源, 供 check_daily 交叉核对)
+```bash
+# 每天运行(获取当天全量停牌名单)
+python -m etl.sync_suspension
+
+# 每天运行(获取当天全量涨跌停股池, 涨停+跌停)
+python -m etl.sync_limit_pool
+
+# 仅同步涨停池 (--only up|down|all, 默认 all)
+python -m etl.sync_limit_pool --only up
+```
+`-c` / `-x` 仅供人工排查个别股票，**日常入库必须全量运行**（不带 `-c`，
+`-x` 用默认的 `all`）：这两个 ETL 写库时按日期(及方向)整体删除当日旧数据、
+再插入本次范围取到的行；缩小范围会让未覆盖到的股票从当日快照里消失，
+被 `check_daily` 的停牌/涨跌停核对项误判成「库内多标」，产生整片误报。
 
 ## 🤖 MCP 工具能力 (Tools)
 

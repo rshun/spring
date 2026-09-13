@@ -1,5 +1,8 @@
 # 修改记录:
 #   2026-09-12  Claude  新建停牌一致性核对项(SUSPENSION_DAILY vs STOCK_DAILY.tradestatus)
+#   2026-09-13  Claude  修正 check_suspension docstring: begin/end 实际约定是
+#                       YYYY-MM-DD(调用方 check_daily.run_warn_checks 如此传入)，
+#                       不是此前写的 YYYYMMDD
 """停牌一致性核对
 
 把 SUSPENSION_DAILY(第三方独立事实) 与 STOCK_DAILY.tradestatus 做双向比对。
@@ -85,7 +88,10 @@ def check_suspension(conn: duckdb.DuckDBPyConnection,
 
     参数:
         trade_dates: 待核对的交易日(YYYY-MM-DD)
-        begin / end: 原始 YYYYMMDD, 仅用于 CSV 文件名
+        begin / end: YYYY-MM-DD, 仅用于 CSV 文件名(调用方 tools/check_daily.py 的
+                     run_warn_checks 传入的是 begin_date/end_date，故意与其他核对项
+                     一致，以匹配既有 CSV 产物 check_isst_null_2023-11-05_2023-11-05.csv
+                     的命名，不是 YYYYMMDD)
     """
     result = checker.CheckResult(label=LABEL, blocking=False)
     has_dates, missing_dates = checker.split_dates_by_source(

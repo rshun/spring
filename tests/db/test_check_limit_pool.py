@@ -1,3 +1,9 @@
+# 修改记录:
+#   2026-09-13  Claude  新增 num_close 返回 None(一侧缺失)的正反例: 不产生差异行、
+#                       不改变 status，但计入聚合 WARNING 的「无法比较」计数
+#   2026-09-13  Claude  _run 传给 begin/end 的日期改成 "YYYY-MM-DD"(此前用
+#                       "20260911" 紧凑格式), 与实际调用约定(check_daily.py
+#                       run_warn_checks 传 YYYY-MM-DD)对齐，防止测试守着错误约定
 """涨跌停一致性核对: 标志集合差 + 涨跌停价 + 抽样数值 + 按 limit_type 判源"""
 from tests.conftest import insert_stock_info, insert_trade_cal
 from tools.checks.limit_pool import check_limit_pool
@@ -32,7 +38,7 @@ def _basic(conn, code, is_up=0, is_down=0, limit_up=11.0, limit_down=9.0,
 
 
 def _run(conn, limit_type="U"):
-    return check_limit_pool(conn, [DATE], "20260911", "20260911",
+    return check_limit_pool(conn, [DATE], "2026-09-11", "2026-09-11",
                             limit_type, "", "", [])
 
 
@@ -132,3 +138,22 @@ def test_up_direction_still_checked_when_down_missing(mem_db):
     _basic(mem_db, "600001.SH", is_up=1, limit_up=11.0)
     result = _run(mem_db, limit_type="U")
     assert result.status == checker.STATUS_OK
+
+
+def test_null_field_uncomputable_not_reported_but_counted(mem_db, caplog):
+    """反例: 池内 turnover_rate 为 NULL(一侧缺失, 无法比较) -> 不产生差异行、
+    不影响 status, 但会被计入「无法比较」的聚合计数(一条 WARNING, 不逐条输出)"""
+    _setup(mem_db)
+    mem_db.execute(
+        "INSERT INTO LIMIT_POOL_DAILY (code, trade_date, limit_type, name, "
+        "close, turnover_rate, float_mv, total_mv, source) "
+        "VALUES (?, ?, 'U', '测试', ?, NULL, ?, ?, 'akstock')",
+        ["600001.SH", DATE, 11.0, 5.0e9, 8.0e9])
+    _basic(mem_db, "600001.SH", is_up=1, limit_up=11.0)
+    with caplog.at_level("WARNING"):
+        result = _run(mem_db)
+    assert result.rows == []
+    assert result.count == 0
+    assert result.status == checker.STATUS_OK
+    assert "1 个数值" in caplog.text
+    assert "无法比较" in caplog.text

@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-09-12  Claude  新建停牌名单入库 ETL(第三方独立事实源, 供 check_daily 交叉核对)
+#   2026-09-13  Claude  -c / -x 缩小范围运行前追加警告: 写库按日期整体删除后重插,
+#                       未被本次范围覆盖的股票会从当日快照消失, 导致核对侧整片误报
 """停牌名单入库工具 (支持指定日期区间)
 
 退出码: 0=成功 / 1=失败 / 2=argparse 用法错 / 3=部分成功
@@ -137,6 +139,11 @@ def main() -> int:
         logger.warning("akstock 源不覆盖北交所，本次无数据入库。"
                        "若需沪深数据请用 -x sh sz 或 -x all。")
         return 0
+
+    if codes or wanted != {"SH", "SZ"}:
+        logger.warning("部分范围运行(-c / -x)会覆盖当日全量快照: 写库按日期整体删除后重插，"
+                       "未被本次范围覆盖的股票会从当日快照中消失，导致核对侧产生整片误报。"
+                       "该用法仅供人工排查，日常入库请全量运行。")
 
     try:
         trade_dates = dbutil.get_trade_dates(begin_date, end_date)

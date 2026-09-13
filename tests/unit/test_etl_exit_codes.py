@@ -7,6 +7,9 @@
 #                       重抛重新吞掉，写库失败仍退出 0）
 #   2026-09-12  Claude  adjust 的 bstock 成功用例改用按日方法：未限定 -c/-x 时该源走
 #                       fetch_adjust_factors_by_date
+#   2026-09-13  Claude  ETL_MODULES 补齐第 4 处遗漏注册: 新增 sync_suspension /
+#                       sync_limit_pool 两个 ETL(main() -> int 且含 sys.exit(main())，
+#                       已核对满足契约)，纳入通用退出码契约的自检
 """
 ETL 退出码契约测试
 
@@ -26,12 +29,13 @@ import pytest
 
 from etl import (adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
                  import_daily, init_db, sync_basic, sync_capital, sync_finance,
-                 sync_industry, sync_margin, trade_cal, update_limit)
+                 sync_industry, sync_limit_pool, sync_margin, sync_suspension,
+                 trade_cal, update_limit)
 
 ETL_MODULES = [adjust, fetch_index, fill_shares, fill_turnover, fill_volratio,
                import_daily, update_limit,
                trade_cal, sync_basic, sync_margin, sync_industry, sync_finance,
-               sync_capital]
+               sync_capital, sync_suspension, sync_limit_pool]
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────

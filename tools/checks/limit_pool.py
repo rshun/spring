@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-09-12  Claude  新建涨跌停一致性核对项(LIMIT_POOL_DAILY vs DAILY_BASIC)
+#   2026-09-13  Claude  num_close 返回 None(一侧缺失/无法比较)此前被静默丢弃, 与
+#                       「比过了且一致」无法区分; 现累计计数, 结尾打一条聚合 WARNING
 """涨跌停一致性核对
 
 三组比较，都只用库内已有字段，不推算任何涨跌幅比例
@@ -64,12 +66,18 @@ def _load_basic(conn, dt, spec, ex_filter, code_filter, code_params):
 
 
 def _compare_one_date(conn, dt, limit_type, spec,
-                      ex_filter, code_filter, code_params) -> list[dict]:
+                      ex_filter, code_filter, code_params) -> tuple[list[dict], int]:
+    """返回 (差异行, 因一侧缺失/无法比较而跳过的数值比较次数)
+
+    后者不是差异——它是「没法比」，不进 rows、不计入 result.count，
+    单独统计后由调用方聚合成一条 WARNING(不逐条输出)。
+    """
     pool = _load_pool(conn, dt, limit_type, ex_filter, code_filter, code_params)
     basic = _load_basic(conn, dt, spec, ex_filter, code_filter, code_params)
     flagged = {c for c, v in basic.items() if v["flag"] == 1}
 
     rows: list[dict] = []
+    uncomputable = 0
 
     # 组 1: 标志集合差(双向)
     only_pool, only_db = checker.set_diff(set(pool), flagged)
@@ -84,13 +92,17 @@ def _compare_one_date(conn, dt, limit_type, spec,
         if same_price is False:
             rows.append({"date": dt, "code": code,
                          "issue": f"{spec['price_issue']}: 池 {p['close']} / 库 {b['price']}"})
+        elif same_price is None:
+            uncomputable += 1
 
         for field in _SAMPLE_FIELDS:
             same = checker.num_close(p[field], b[field], SAMPLE_REL_TOL)
             if same is False:
                 rows.append({"date": dt, "code": code,
                              "issue": f"{field} 不符: 池 {p[field]} / 库 {b[field]}"})
-    return rows
+            elif same is None:
+                uncomputable += 1
+    return rows, uncomputable
 
 
 def check_limit_pool(conn: duckdb.DuckDBPyConnection,
@@ -112,9 +124,12 @@ def check_limit_pool(conn: duckdb.DuckDBPyConnection,
     result.missing_dates = missing_dates
 
     rows: list[dict] = []
+    uncomputable_total = 0
     for dt in has_dates:
-        rows.extend(_compare_one_date(conn, dt, limit_type, spec,
-                                      ex_filter, code_filter, code_params))
+        dt_rows, dt_uncomputable = _compare_one_date(
+            conn, dt, limit_type, spec, ex_filter, code_filter, code_params)
+        rows.extend(dt_rows)
+        uncomputable_total += dt_uncomputable
 
     result.rows = rows
     result.count = len(rows)
@@ -124,6 +139,10 @@ def check_limit_pool(conn: duckdb.DuckDBPyConnection,
         checker.logger.warning(
             f"[{spec['label']}] LIMIT_POOL_DAILY({limit_type}) "
             f"以下日期无数据，未核对: {missing_dates}")
+    if uncomputable_total:
+        checker.logger.warning(
+            f"[{spec['label']}] 有 {uncomputable_total} 个数值因一侧缺失(NULL/NaN)"
+            f"无法比较，未计入差异")
     checker.log_rows(spec["label"],
                      [f"{r['date']}  {r['code']}  {r['issue']}" for r in rows])
     result.csv_path = checker.write_diff_csv(

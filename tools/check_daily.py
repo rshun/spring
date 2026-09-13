@@ -8,6 +8,8 @@
 #                       日志从未进过 ETL 日志文件(同目录另两个工具本就用 etl.tools.*)
 #   2026-09-12  Claude  接入停牌/涨停/跌停三个新核对项, 告警类检查改返回结构化 CheckResult
 #   2026-09-12  Claude  正确的核对项不再输出日志, 结尾保留一行总结
+#   2026-09-12  Claude  补齐遗漏: 5 处旧式告警检查(is_st/指标空值/日线价量/
+#                       复权因子值/除权前收价)的 OK 分支也一并去掉逐项日志
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
       1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
@@ -304,7 +306,7 @@ def _check_is_st_null(conn: duckdb.DuckDBPyConnection,
     rows = conn.execute(sql, params).fetchall()
 
     if not rows:
-        logger.info(f"[{label}]    完整 OK")
+        # 正确的一律不输出日志: 不分核对项类别, OK 都不打印
         return 0
 
     csv_dir = Path(__file__).parent.parent / "csv"
@@ -405,8 +407,8 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
     rows = conn.execute(detail_sql, params).fetchall()
 
     if not rows:
-        if not pe_missing:
-            logger.info(f"[{label}]    完整 OK")
+        # 正确的一律不输出日志: 原来只在 pe 也未缺失时才打 OK, 现在两种子情形
+        # 都不打印(pe 缺失已在上面单独告警过); 返回值不变, 仍是 0
         return 0
 
     csv_dir = Path(__file__).parent.parent / "csv"
@@ -476,7 +478,7 @@ def _check_stock_daily_nulls(conn: duckdb.DuckDBPyConnection,
     rows = conn.execute(sql, params).fetchall()
 
     if not rows:
-        logger.info(f"[{label}]    完整 OK")
+        # 正确的一律不输出日志: 不分核对项类别, OK 都不打印
         return 0
 
     csv_dir = Path(__file__).parent.parent / "csv"
@@ -540,7 +542,7 @@ def _check_adj_factor_nulls(conn: duckdb.DuckDBPyConnection,
     rows = conn.execute(sql, params).fetchall()
 
     if not rows:
-        logger.info(f"[{label}]    完整 OK")
+        # 正确的一律不输出日志: 不分核对项类别, OK 都不打印
         return 0
 
     csv_dir = Path(__file__).parent.parent / "csv"
@@ -700,8 +702,8 @@ def _check_xdr_preclose(conn: duckdb.DuckDBPyConnection,
     rows = _query_xdr_preclose_mismatches(conn, begin_date, end_date,
                                           ex_filter, code_filter, code_params)
     if not rows:
-        if not uncomputable:
-            logger.info(f"[{label}]    完整 OK")
+        # 正确的一律不输出日志: 原来只在 uncomputable 也为 0 时才打 OK, 现在两种
+        # 子情形都不打印(uncomputable 已在上面单独告警过); 返回值不变, 仍是 0
         return 0
 
     csv_dir = Path(__file__).parent.parent / "csv"

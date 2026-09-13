@@ -57,3 +57,16 @@ def test_passing_core_check_emits_no_log(mem_db, caplog):
                               DATE, DATE, "", "", [], is_self_table=True)
     assert result["missing"] == 0
     assert "完整 OK" not in caplog.text
+
+
+def test_no_ok_line_remains_in_source(mem_db):
+    """反例(守规则): 源码里不得再有「完整 OK」的逐项日志
+
+    需求是「不管哪一类核对项, 正确的一律不输出日志」。
+    结尾总结行里的「核心日线数据完整 OK」是唯一例外, 它由 build_summary 产出。
+    """
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[2] / "tools" / "check_daily.py"
+    text = src.read_text(encoding="utf-8")
+    # 逐项日志的特征是 [{label}] 前缀; 结尾总结行没有这个前缀
+    assert 'logger.info(f"[{label}]    完整 OK")' not in text

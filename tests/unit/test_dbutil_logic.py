@@ -130,6 +130,47 @@ def test_get_candidate_data_skip_null_list_date(mem_db):
     assert "000001" in symbols
 
 
+def test_get_candidate_data_delist_excluded_from_daily_run(mem_db):
+    """正例(运行安全): adjust.py 自 2026-09-13 起固定传 is_delist=True，日常跑批
+    (-b/-e 都是当天)必须仍然不带上退市股——靠的是窗口裁剪：eff_begin 取当天、
+    eff_end 取 delist_date，已退市个股 eff_begin > eff_end 自然落选。
+    这条断言若失效，每天的增量跑会平白多算几百只早已摘牌的股票。"""
+    insert_stock_info(mem_db, "600001", "SH", "MAIN", "2000-01-01",
+                      delist_date="2023-06-30", list_status="D")
+    insert_stock_info(mem_db, "000001", "SZ", "MAIN", "2000-01-01")
+
+    with patch("util.dbutil.get_connection", return_value=_wrap_mem_db(mem_db)):
+        result = get_candidate_data("2023-12-01", "2023-12-01",
+                                    [], [], True, SQL_STOCK)
+    symbols = [r[0] for r in result]
+    assert symbols == ["000001"]
+
+
+def test_get_candidate_data_delist_included_in_history_run(mem_db):
+    """正例: 历史区间跑批要带上退市股，且窗口上界截到 delist_date——
+    这是把 232 只退市股补进复权因子表的入口"""
+    insert_stock_info(mem_db, "600001", "SH", "MAIN", "2000-01-01",
+                      delist_date="2023-06-30", list_status="D")
+
+    with patch("util.dbutil.get_connection", return_value=_wrap_mem_db(mem_db)):
+        result = get_candidate_data("2023-01-01", "2023-12-31",
+                                    [], [], True, SQL_STOCK)
+    assert len(result) == 1
+    assert result[0][0] == "600001"
+    assert result[0][3] == "2023-06-30"     # eff_end 截到退市日
+
+
+def test_get_candidate_data_delist_excluded_when_flag_off(mem_db):
+    """反例: is_delist=False 时退市股仍被排除(其它调用方的行为不受本次改动影响)"""
+    insert_stock_info(mem_db, "600001", "SH", "MAIN", "2000-01-01",
+                      delist_date="2023-06-30", list_status="D")
+
+    with patch("util.dbutil.get_connection", return_value=_wrap_mem_db(mem_db)):
+        result = get_candidate_data("2023-01-01", "2023-12-31",
+                                    [], [], False, SQL_STOCK)
+    assert result == []
+
+
 def test_get_candidate_data_delist_no_date_skipped(mem_db):
     """退市股无 delist_date 时应跳过并 warning。"""
     insert_stock_info(mem_db, "000003", "SZ", "MAIN", "2000-01-01",

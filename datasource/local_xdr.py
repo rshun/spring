@@ -1,4 +1,10 @@
 # 修改记录:
+#   2026-09-13  Claude  除权参考价校正判据由「相对偏差>2%」改为「绝对偏差>0.005 元」，
+#                       并对纯分红事件放开跳空闸门。原判据过松，2011 年以来 44,574 个
+#                       事件只触发 19 次校正，2,799 条「名义比例≠交易所实际比例」漏网；
+#                       改后残留 3 条。股改对价(送股)不落入纯分红，保护意图不变
+#   2026-09-13  Claude  纳入退市股：此前 status=="D" 被整体跳过，232 只退市股零因子行、
+#                       1,237 个除权事件从未入账，回测用这些股票的复权价会系统性出错
 #   2026-09-12  Claude  复权因子漏采「转增股上市」/「未知新类别」类事件(破产重整等
 #                       场景的资本公积转增), 导致后复权价出现虚假跳空; 同时新增
 #                       除权参考价与交易所 pre_close 的偏差校正(gbbq 的转增比例
@@ -85,9 +91,20 @@ _EVENT_CATEGORIES = ("除权除息", "转增股上市", "未知新类别")
 # 价格跳空佐证「交易所确实做了除权」才采纳, 且跳变比例一律取交易所 pre_close。
 _RESERVE_TRANSFER_CATEGORIES = ("转增股上市", "未知新类别")
 
-# 除权参考价与交易所 pre_close 的相对偏差超过此值时, 判定 gbbq 的送转/分红数值不可信,
-# 改以 pre_close 为准(仅限当日价格确实跳空的事件, 见 compute_event_factors)。
-_XDR_PRICE_TOLERANCE = 0.02
+# 名义公式算出的除权参考价与交易所 pre_close 的**绝对**偏差超过此值时, 判定名义参数
+# 不可信, 改以 pre_close 为准(见 compute_event_factors)。
+# 取半分而非某个相对比例: pre_close 由交易所四舍五入到分, 相差半分以内属舍入可解释,
+# 超过就是真分歧——名义比例 != 交易所实际使用的比例(典型成因是回购专户库存股不参与
+# 分配, 实际每股扣减小于公告值)。
+# 2026-09-13 前此处是 2% 的相对阈值, 过松到形同虚设: 2011 年以来 44,574 个除权事件
+# 里只触发 19 次, 2,799 条真分歧全部漏网。
+_XDR_PRICE_ROUNDING = 0.005
+
+# 偏差「恰为半分」的平局(实测 3,081 条)采信交易所而非名义值: 那个两位小数就是当天
+# 涨跌幅/涨跌停的实际基准。平局两侧误差同为半分量级, 但统一倒向交易所能让
+# tools 侧的逐日恒等式核对保持灵敏(否则会常驻 458 条无法消除的告警)。
+# 用 EPS 而非 >= : 数学上的平局在浮点里可能落到阈值任意一侧, 必须让判定确定化。
+_XDR_PRICE_EPS = 1e-9
 
 # 判定「当日价格确实跳空」的相对阈值: A 股报价精度为分, 0.1% 足以区分舍入与真除权。
 _PRICE_GAP_THRESHOLD = 0.001
@@ -325,19 +342,35 @@ def compute_event_factors(events_df: pd.DataFrame,
         actual = pd.to_numeric(events["event_pre_close"], errors="coerce")
         price_gapped = (actual > 0) & (
             (actual - c).abs() / c > _PRICE_GAP_THRESHOLD)
+        # 微额分红放开跳空闸门: 每股派息小到名义参考价与前收相差不足半分时, 交易所
+        # 四舍五入后 pre_close == 前收, 当日跳空为 0(如 2.80 派 0.005 -> 2.795 -> 2.80),
+        # 交易所实际没做除权, 但名义公式照扣那几厘, 留下一个假跳变。
+        #
+        # 两个限定缺一不可, 否则会绕过闸门自己要保护的东西:
+        #   1) 纯分红——闸门是为 2005-06 股改对价而设, 对价形态是送股;
+        #   2) |x - c| <= 半分——只有被舍入抹平的那一档才算。没有这条上界时,
+        #      gbbq 把股改对价记成「现金分红」的个例(实测 600841.SH 2006-05-15:
+        #      前收 7.79, 名义扣减 1.60 元/股, 而交易所当日未除权)会被误判成微额
+        #      分红并把比例压成 1.0, 整链偏移可达 21%。
+        # 幅度超过半分却又无跳空的事件属于「因子跳了但交易所没跳」另一类问题,
+        # 需单独定口径, 不在本判据范围内。
+        pure_micro_cash = ((actual > 0)
+                           & (s.fillna(0) <= 0) & (n.fillna(0) <= 0)
+                           & ((x - c).abs() <= _XDR_PRICE_ROUNDING + _XDR_PRICE_EPS))
         # 转增类已过跳空闸门, 其 gbbq 比例实测 100% 与交易所不符, 一律取 pre_close;
-        # 常规除权只在偏差超阈值时才改用 pre_close。
-        deviating = (price_gapped & (x > 0)
+        # 常规除权只在偏差超出舍入可解释范围时才改用 pre_close。
+        deviating = ((price_gapped | pure_micro_cash) & (x > 0)
                      & (events["_is_reserve_transfer"]
-                        | ((x - actual).abs() / actual > _XDR_PRICE_TOLERANCE)))
+                        | ((x - actual).abs()
+                           > _XDR_PRICE_ROUNDING - _XDR_PRICE_EPS)))
         if deviating.any():
             sub_ev = events.loc[deviating]
             for code, grp in sub_ev.groupby("code"):
                 dates = grp["date"].dt.strftime("%Y-%m-%d").tolist()
                 logger.warning(
-                    f"{code} gbbq 除权参考价与交易所 pre_close 偏差超 "
-                    f"{_XDR_PRICE_TOLERANCE:.0%}，改以 pre_close 为准 "
-                    f"{len(grp)} 条: {dates}")
+                    f"{code} 名义除权参考价与交易所 pre_close 偏差超 "
+                    f"{_XDR_PRICE_ROUNDING} 元（超出舍入可解释范围），"
+                    f"改以 pre_close 为准 {len(grp)} 条: {dates}")
             if stats is not None:
                 stats["price_corrected"] = (stats.get("price_corrected", 0)
                                             + int(deviating.sum()))
@@ -455,7 +488,9 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
     for symbol, market, start_date, end_date, status in stock_list:
         symbol = str(symbol).strip()
         market = str(market).strip().upper()
-        if symbol.startswith("9") or status == "D":
+        # 退市股纳入计算：它们的事件链是历史的一部分，排除会让回测产生幸存者偏差。
+        # 9 开头(北交所)仍排除——STOCK_DAILY 里没有它们的日线，算不出基准价 C。
+        if symbol.startswith("9"):
             continue
         targets[f"{symbol}.{market}"] = (symbol, str(start_date), str(end_date))
 
@@ -492,7 +527,7 @@ def fetch_adjust_factors(stock_list: list[tuple]) -> pd.DataFrame:
 
         if stats.get("price_corrected", 0) > 0:
             logger.warning(f"本次有 {stats['price_corrected']} 条事件的除权参考价"
-                           f"改用交易所 pre_close（gbbq 送转数值不可信）")
+                           f"改用交易所 pre_close（名义比例与交易所实际比例不符）")
 
         if stats["skipped"] > 0:
             summary = (f"本次跳过 {stats['skipped']} 条事件，涉及 {len(stats['stocks'])} 只股票"

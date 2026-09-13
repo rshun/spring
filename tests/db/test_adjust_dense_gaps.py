@@ -117,20 +117,29 @@ def test_empty_stock_list_returns_empty(mem_db):
     assert check_dense_gaps(mem_db, []) == []
 
 
-def test_bj_and_delisted_are_not_checked(mem_db):
-    """正例(实库复现): 9 开头与退市股被两个源跳过、永远没有稠密行，
-    预检必须同样跳过它们，否则 344 只北交所会让每次日常跑都被 init 规则拦下"""
+def test_bj_is_not_checked(mem_db):
+    """反例(实库复现): 9 开头被两个源跳过、永远没有稠密行，预检必须同样跳过，
+    否则 344 只北交所会让每次日常跑都被 init 规则拦下"""
     _cal(mem_db)
     insert_stock_info(mem_db, "920001", "BJ", "BJ", DAYS[0])
-    insert_stock_info(mem_db, "600001", "SH", "MAIN", DAYS[0], list_status="D")
     insert_stock_info(mem_db, "000001", "SZ", "MAIN", DAYS[0])
     stocks = [
         ("920001", "BJ", DAYS[-1], DAYS[-1], "L"),   # 9 开头，无稠密行
-        ("600001", "SH", DAYS[-1], DAYS[-1], "D"),   # 退市，无稠密行
         ("000001", "SZ", DAYS[-1], DAYS[-1], "L"),   # 正常股，无稠密行 → 应报 init
     ]
     gaps = check_dense_gaps(mem_db, stocks)
     assert [g["code"] for g in gaps] == ["000001.SZ"]
+
+
+def test_delisted_is_checked(mem_db):
+    """正例: 退市股已纳入计算，预检必须一视同仁——首次纳入时它们没有稠密行，
+    历史区间跑批被 init 拦下并提示回填是预期行为，不得静默放过"""
+    _cal(mem_db)
+    insert_stock_info(mem_db, "600001", "SH", "MAIN", DAYS[0], list_status="D")
+    stocks = [("600001", "SH", DAYS[-1], DAYS[-1], "D")]
+    gaps = check_dense_gaps(mem_db, stocks)
+    assert [g["code"] for g in gaps] == ["600001.SH"]
+    assert gaps[0]["kind"] == "init"
 
 
 # ── main() 集成：有缺口 → 退出码 1 且不进入取数 ──────────────────────────────
@@ -174,6 +183,22 @@ def test_main_proceeds_when_no_gaps():
     assert rc == 0
     chk.assert_called_once()
     module.fetch_adjust_factors.assert_called_once()
+
+
+def test_main_requests_delisted_candidates():
+    """正例(载荷改动): main() 必须以 is_delist=True 取候选集。
+    232 只退市股全部零因子行、1,237 个除权事件从未入账，根因就是这里用了默认的
+    False——退市股连候选集都进不去，local_xdr 里那道 status=='D' 过滤只是第二道保险。
+    这条断言若失效，改动会静默回退且现有测试全绿。"""
+    args = adjust.build_parser().parse_args(["-s", "local", "-b", "20260908", "-e", "20260908"])
+    module = MagicMock()
+    module.fetch_adjust_factors.return_value = pd.DataFrame()
+    with patch.object(adjust, "parse_arguments", return_value=args),          patch.object(adjust, "check_parameters", return_value=True),          patch.object(adjust, "myutil") as util,          patch.object(adjust, "dbutil") as db,          patch.object(adjust, "check_dense_gaps", return_value=[]),          patch.object(adjust, "process_and_save_adjust_factors"):
+        util.trans_datestr_format.side_effect = ["2026-09-08", "2026-09-08"]
+        util.import_source_module.return_value = module
+        db.get_candidate_codes.return_value = _stocks()
+        adjust.main()
+    assert db.get_candidate_codes.call_args.kwargs["is_delist"] is True
 
 
 def test_main_skips_check_when_densify_off():

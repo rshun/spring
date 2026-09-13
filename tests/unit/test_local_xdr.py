@@ -457,21 +457,30 @@ def test_fetch_boundary_heartbeat_logs(caplog):
 
 # ── 候选过滤 ──────────────────────────────────────────────────────────────────
 
-def test_fetch_adjust_factors_skips_bj_and_delisted():
-    """反例: 9开头(北交所)与 status=='D' 的股票被忽略，与 bstock 行为一致"""
+def test_fetch_adjust_factors_skips_bj():
+    """反例: 9开头(北交所)被忽略——STOCK_DAILY 无其日线，算不出基准价 C"""
     conn = _seed_mem_conn()
     _insert_event(conn, "920096", "2026-08-03", dividend=1.0)
-    _insert_event(conn, "600001", "2026-08-03", dividend=1.0)
     _insert_close(conn, "920096.BJ", "2026-07-31", 10.0)
-    _insert_close(conn, "600001.SH", "2026-07-31", 10.0)
-    stock_list = [
-        ("920096", "BJ", "2026-01-01", "2026-12-31", "L"),
-        ("600001", "SH", "2026-01-01", "2026-12-31", "D"),
-    ]
+    stock_list = [("920096", "BJ", "2026-01-01", "2026-12-31", "L")]
 
     out = _fetch(conn, stock_list)
     conn.close()
     assert out.empty
+
+
+def test_fetch_adjust_factors_includes_delisted():
+    """正例: status=='D' 的退市股必须参与计算——它们的事件链是历史的一部分，
+    排除会让回测取到错误的复权价(幸存者偏差)。2026-09-13 前被整体跳过。"""
+    conn = _seed_mem_conn()
+    _insert_event(conn, "600001", "2026-08-03", dividend=1.0)
+    _insert_close(conn, "600001.SH", "2026-07-31", 10.0)
+    stock_list = [("600001", "SH", "2026-01-01", "2026-12-31", "D")]
+
+    out = _fetch(conn, stock_list)
+    conn.close()
+    assert not out.empty
+    assert set(out["code"]) == {"600001.SH"}
 
 
 def test_fetch_adjust_factors_empty_stock_list():
@@ -831,18 +840,105 @@ def test_fetch_keeps_gbbq_when_price_did_not_gap():
     assert out.iloc[0]["back_factor"] == pytest.approx(1.3)
 
 
-def test_fetch_keeps_gbbq_when_deviation_within_tolerance():
-    """反例: 偏差在阈值内(舍入级别)时保持 gbbq 口径, 不做校正"""
+def test_fetch_keeps_nominal_when_deviation_within_rounding():
+    """反例: 偏差 < 0.005 元(舍入可解释)时保持名义公式 —— 名义值是精确的, 而
+    pre_close 已被交易所四舍五入到分, 此时改用 pre_close 反而引入量化误差"""
     conn = _seed_mem_conn()
-    _insert_event(conn, "600000", "2026-03-11", dividend=5.0)
+    _insert_event(conn, "600000", "2026-03-11", dividend=5.0)      # 每股 0.5
     _insert_close(conn, "600000.SH", "2026-03-09", 10.0)
-    # gbbq: X = 10.0 - 0.5 = 9.5；交易所 9.51，偏差 0.1% < 2%
-    _insert_close(conn, "600000.SH", "2026-03-11", 9.8, pre_close=9.51)
+    # 名义 X = 10.0 - 0.5 = 9.500；交易所 9.504，偏差 0.004 < 0.005
+    _insert_close(conn, "600000.SH", "2026-03-11", 9.8, pre_close=9.504)
 
     out = _fetch(conn, [("600000", "SH", "2026-01-01", "2026-12-31", "L")])
     conn.close()
 
     assert out.iloc[0]["back_factor"] == pytest.approx(10.0 / 9.5)
+
+
+def test_fetch_corrects_when_deviation_exceeds_rounding():
+    """正例(2026-09-13 改动的核心): 偏差 0.01 元 > 半分, 舍入解释不了, 说明公告的
+    名义比例不是交易所实际使用的比例(典型成因: 回购专户库存股不参与分配, 每股实际
+    扣减小于公告值), 必须改用 pre_close。
+    改动前判据是「相对偏差 > 2%」, 这类全部漏网 —— 2011 年以来实测 2,799 条。"""
+    conn = _seed_mem_conn()
+    _insert_event(conn, "600000", "2026-03-11", dividend=5.0)      # 公告每股 0.5
+    _insert_close(conn, "600000.SH", "2026-03-09", 10.0)
+    # 名义 X = 9.50；交易所 9.51(实际只扣了 0.49, 有股份不参与分配)
+    _insert_close(conn, "600000.SH", "2026-03-11", 9.8, pre_close=9.51)
+
+    out = _fetch(conn, [("600000", "SH", "2026-01-01", "2026-12-31", "L")])
+    conn.close()
+
+    assert out.iloc[0]["back_factor"] == pytest.approx(10.0 / 9.51)
+
+
+def test_fetch_corrects_pure_cash_dividend_without_price_gap():
+    """正例(2026-09-13 改动的第二处): 微额分红被舍入抹平, 当日 pre_close == 前收,
+    交易所实际没做除权, 因子就不该跳。改动前跳空闸门挡住校正, 名义公式照扣那几厘,
+    留下一个假跳变。闸门仍对送转类生效, 见 test_fetch_keeps_gbbq_when_price_did_not_gap。"""
+    conn = _seed_mem_conn()
+    _insert_event(conn, "600000", "2026-03-11", dividend=0.05)     # 每股 0.005
+    _insert_close(conn, "600000.SH", "2026-03-09", 2.80)
+    # 2.80 - 0.005 = 2.795 -> 交易所四舍五入回 2.80, 当日无跳空
+    _insert_close(conn, "600000.SH", "2026-03-11", 2.82, pre_close=2.80)
+
+    out = _fetch(conn, [("600000", "SH", "2026-01-01", "2026-12-31", "L")])
+    conn.close()
+
+    # 采信交易所: 当天没除权 -> 不产生因子跳变
+    assert out.empty or out.iloc[0]["back_factor"] == pytest.approx(1.0)
+
+
+def test_fetch_corrects_on_exact_half_cent_tie():
+    """正例(边界确定化): 偏差恰为半分的平局采信交易所, 不得依赖浮点舍入方向。
+    实测 2011 年以来有 3,081 条这种平局, 倒向名义值会在逐日恒等式核对里留下
+    458 条无法消除的告警, 使核对工具失去灵敏度。"""
+    conn = _seed_mem_conn()
+    _insert_event(conn, "600000", "2026-03-11", dividend=0.5)      # 每股 0.05
+    _insert_close(conn, "600000.SH", "2026-03-09", 10.0)
+    # 名义 X = 10.0 - 0.05 = 9.950；交易所 9.955，偏差恰为 0.005
+    _insert_close(conn, "600000.SH", "2026-03-11", 9.9, pre_close=9.955)
+
+    out = _fetch(conn, [("600000", "SH", "2026-01-01", "2026-12-31", "L")])
+    conn.close()
+
+    assert out.iloc[0]["back_factor"] == pytest.approx(10.0 / 9.955)
+
+
+def test_fetch_keeps_gbbq_for_large_cash_without_price_gap():
+    """反例(2026-09-13 回归): 名义扣减远超半分、当日却无跳空的「现金分红」不得
+    按微额分红处理。实例 600841.SH 2006-05-15: 前收 7.79, gbbq 记每股派 1.60,
+    交易所当日 pre_close 仍是 7.79(股改对价被 gbbq 记成了现金分红)。
+    若放开, 该股整链前复权会偏移 21%。这类属「因子跳了但交易所没跳」, 另行定口径。"""
+    conn = _seed_mem_conn()
+    _insert_event(conn, "600841", "2006-05-15", dividend=16.0)     # 每股 1.60
+    _insert_close(conn, "600841.SH", "2006-05-12", 7.79)
+    _insert_close(conn, "600841.SH", "2006-05-15", 7.60, pre_close=7.79)  # 无跳空
+
+    out = _fetch(conn, [("600841", "SH", "2006-01-01", "2006-12-31", "L")])
+    conn.close()
+
+    # 保持名义口径: X = 7.79 - 1.60 = 6.19, ratio = 7.79/6.19
+    assert out.iloc[0]["back_factor"] == pytest.approx(7.79 / 6.19)
+
+
+def test_micro_gate_is_restricted_to_pure_cash():
+    """反例(契约): 微额闸门只对纯现金分红开放, 含送转/配股的事件即使幅度同样在半分
+    内、当日同样无跳空, 也不得借道该闸门 —— 闸门是为「派息小到被舍入抹平」这一种
+    现象设的, 送转/配股无跳空属于另一类(交易所当日不除权), 归股改保护管。
+    参数是合成的: 真实数据里落入该区间的只有 4 条配股价≈市价的配股, 幅度 ~0.0009,
+    无法区分两种实现, 故以合成用例钉住契约。"""
+    conn = _seed_mem_conn()
+    # 每 10 股送 0.005 股 -> X = 10/1.0005 = 9.995；交易所 9.99(相对差 0.1%, 未判跳空)
+    _insert_event(conn, "600000", "2026-03-11", bonus_share=0.005)
+    _insert_close(conn, "600000.SH", "2026-03-09", 10.0)
+    _insert_close(conn, "600000.SH", "2026-03-11", 9.99, pre_close=9.99)
+
+    out = _fetch(conn, [("600000", "SH", "2026-01-01", "2026-12-31", "L")])
+    conn.close()
+
+    # 保持名义口径, 不得被压成交易所的 10.0/9.99
+    assert out.iloc[0]["back_factor"] == pytest.approx(10.0 / (10.0 / 1.0005))
 
 
 def test_fetch_keeps_gbbq_when_preclose_missing():

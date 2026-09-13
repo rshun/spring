@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-13  Claude  纳入退市股：get_candidate_codes 传 is_delist=True，并同步解除
+#                       _save_local_snapshot / check_dense_gaps 两处 status=="D" 排除
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 #   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
 #   2026-08-19  Claude  写连接延后到下载完成之后，下载期间不持写锁，便于卡死时安全 kill
@@ -140,12 +142,13 @@ def _save_local_snapshot(frame, stock_list, conn, densify):
         for s, m, b, e, *_ in stock_list
         if f"{str(s).strip()}.{str(m).strip().upper()}" in bases
     ], columns=["code", "start_date", "end_date", "base_factor"]).drop_duplicates("code")
-    # 与 local_xdr.fetch_adjust_factors 同一套过滤：9 开头/退市股本就不在计算范围，
-    # 不能把它们当「基准无法验证」告警出来——全市场跑会列出 344 只北交所，淹没真告警
+    # 与 local_xdr.fetch_adjust_factors 同一套过滤：9 开头(北交所)本就不在计算范围，
+    # 不能把它们当「基准无法验证」告警出来——全市场跑会列出 344 只北交所，淹没真告警。
+    # 退市股已于 2026-09-13 纳入计算，此处不再排除。
     requested = {
         f"{str(s).strip()}.{str(m).strip().upper()}"
         for s, m, _b, _e, status, *_ in stock_list
-        if not str(s).strip().startswith("9") and status != "D"
+        if not str(s).strip().startswith("9")
     }
     if requested - set(bases):
         logger.warning("%s 无可信完整快照，跳过稠密化（不重置为 1.0）", sorted(requested - set(bases)))
@@ -262,11 +265,11 @@ def process_and_save_adjust_factors(
     if event_table == "ADJ_FACTOR_LOCAL" and adjust_df is not None and "local_snapshot_bases" in adjust_df.attrs:
         return _save_local_snapshot(adjust_df, stock_list, conn, densify)
 
-    # local_xdr 把候选全部过滤掉（9 开头/退市）时返回不带 attrs 的空帧：既无事件也无
+    # local_xdr 把候选全部过滤掉（9 开头）时返回不带 attrs 的空帧：既无事件也无
     # 已校验基准，不得退到 legacy 稠密化把这些股票静默写成 1.0（绕过快照路径的
     # 「无可信基准即跳过」原则）。非空的无 attrs 帧仍走 legacy（BUG-015 守卫在那里）。
     if event_table == "ADJ_FACTOR_LOCAL" and (adjust_df is None or adjust_df.empty):
-        logger.warning("local 源未返回任何事件且无已校验快照（候选可能全为 9 开头/退市股），"
+        logger.warning("local 源未返回任何事件且无已校验快照（候选可能全为 9 开头的北交所股），"
                        "本次不写 ADJ_FACTOR。")
         return
 
@@ -496,12 +499,14 @@ def check_dense_gaps(conn: duckdb.DuckDBPyConnection, stock_list: list[tuple]) -
       code / kind / last_dense(可空) / expected_from / start_date / first_missing / missing_days
     """
     # 只检查本次真的会被稠密化的股票：两个源（bstock.fetch_adjust_factors /
-    # local_xdr.fetch_adjust_factors）都跳过 9 开头与退市股，它们永远不会有稠密行，
-    # 不排除的话 344 只北交所会让每一次日常跑都被 init 规则拦下
+    # local_xdr.fetch_adjust_factors）都跳过 9 开头(北交所)，它们永远不会有稠密行，
+    # 不排除的话 344 只北交所会让每一次日常跑都被 init 规则拦下。
+    # 退市股已纳入计算，此处不再排除；首次纳入时它们尚无稠密行，历史区间跑批会被 init
+    # 规则拦下并提示回填命令，这是预期行为，全量重算一次即可消除。
     targets = pd.DataFrame(
         [(f"{str(s).strip()}.{str(m).strip().upper()}", str(b))
          for s, m, b, _e, status, *_ in stock_list
-         if not str(s).strip().startswith("9") and status != "D"],
+         if not str(s).strip().startswith("9")],
         columns=["code", "start_date"],
     ).drop_duplicates("code")
     if targets.empty:
@@ -605,7 +610,10 @@ def main() -> int:
         begindate     = begin_date,
         enddate       = end_date,
         exchanges_arg = args.exchanges,
-        codes_arg     = args.codes
+        codes_arg     = args.codes,
+        # 退市股纳入：日常跑批不受影响——get_candidate_data 用 delist_date 作窗口上界，
+        # 已退市个股在 -b/-e 取当天时 eff_begin > eff_end，自然落选；只有历史区间才命中
+        is_delist     = True
     )
 
     if not candidate_codes:

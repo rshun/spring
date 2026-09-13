@@ -501,14 +501,13 @@ def _snapshot_frame(bases):
     return frame
 
 
-def test_snapshot_requested_ignores_bj_and_delisted(mem_db, caplog):
-    """反例: stock_list 里的 9 开头/退市股本就被 local_xdr 过滤，不在 bases 里，
+def test_snapshot_requested_ignores_bj(mem_db, caplog):
+    """反例: stock_list 里的 9 开头股本就被 local_xdr 过滤，不在 bases 里，
     不得触发「无可信完整快照」告警——否则全市场跑 344 只北交所会淹没真告警"""
     _insert_trade_cals(mem_db, TRADE_DATES_JAN)
     stocks = [
         ("000681", "SZ", "2023-01-03", "2023-01-06", "L"),
         ("920001", "BJ", "2023-01-03", "2023-01-06", "L"),   # 9 开头
-        ("600001", "SH", "2023-01-03", "2023-01-06", "D"),   # 退市
     ]
     with caplog.at_level("WARNING", logger="etl.adjust"):
         process_and_save_adjust_factors(
@@ -518,6 +517,23 @@ def test_snapshot_requested_ignores_bj_and_delisted(mem_db, caplog):
     assert "无可信完整快照" not in caplog.text
     assert _table_count(mem_db, "ADJ_FACTOR", "000681.SZ") == 4
     assert _table_count(mem_db, "ADJ_FACTOR", "920001.BJ") == 0
+
+
+def test_snapshot_requested_warns_for_delisted(mem_db, caplog):
+    """正例: 退市股已纳入计算范围，缺可信基准时必须点名告警(与在市股同等对待)，
+    不能像 9 开头那样静默——否则退市股算错了没人知道"""
+    _insert_trade_cals(mem_db, TRADE_DATES_JAN)
+    stocks = [
+        ("000681", "SZ", "2023-01-03", "2023-01-06", "L"),
+        ("600001", "SH", "2023-01-03", "2023-01-06", "D"),   # 退市，无基准
+    ]
+    with caplog.at_level("WARNING", logger="etl.adjust"):
+        process_and_save_adjust_factors(
+            _snapshot_frame({"000681.SZ": 1.0}), stocks, mem_db,
+            event_table="ADJ_FACTOR_LOCAL", densify=True,
+        )
+    assert "无可信完整快照" in caplog.text
+    assert "600001.SH" in caplog.text
 
 
 def test_snapshot_requested_still_warns_for_real_unverified_stock(mem_db, caplog):

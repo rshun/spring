@@ -1,4 +1,8 @@
 # 修改记录:
+#   2026-09-13  Claude  新增「恒等式核对」项(tools/checks/adjust_invariant.py):
+#                       back_factor 逐日跳变 vs prev_close/pre_close。它不需要事件
+#                       清单, 因而是本文件唯一能查出「算法根本不知道有这个事件」的
+#                       一项——其余三项都先取事件表再验算, 漏事件对它们不可见
 #   2026-09-06  Claude  新增复权因子对账工具(复权因子自建方案 §6.1/§6.3, 只告警不阻断)
 #   2026-09-06  Claude  LOCAL vs RAW 数值比较改为相邻公共事件的区间跳变比:
 #                       两链基准不同(LOCAL 首个可计算事件起 1.0 累乘, RAW 为 baostock
@@ -20,6 +24,9 @@
      (back(t2)/back(t1)) 相对误差超 tolerance 的区间
   2) 腾讯三方对账: 窗口内每只股票的腾讯 fqkline 事件帧(datasource.txstock)
      vs LOCAL / RAW(事件有无、跳变比例) 及 vs gbbq CAPITAL_DETAIL(分红额)
+  3) 恒等式核对: back_factor[t]/back_factor[t-1] 与 prev_close[t]/pre_close[t]
+     逐日比对。纯 SQL, 不依赖事件清单也不依赖外部接口, 漏事件/多事件/比例错/
+     日期错四类缺陷一次查出(见 tools/checks/adjust_invariant.py)
 
 ADJ_FACTOR_LOCAL 可能尚不存在(并行开发中): 读取失败时降级为「仅 RAW vs 腾讯」。
 
@@ -39,6 +46,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from tools.checks import adjust_invariant
 from util import dbutil, myutil
 from util import validators as pv
 
@@ -471,7 +479,7 @@ def main() -> int:
         incomplete: list[str] = []  # 校验未完成项(BUG-005: 不得以零差异掩盖)
         if local_df is None:
             logger.warning("ADJ_FACTOR_LOCAL 不可用，降级为「仅 RAW vs 腾讯」对账")
-            incomplete.append("ADJ_FACTOR_LOCAL 不可用，已降级为仅 RAW 对账")
+            incomplete.append("ADJ_FACTOR_LOCAL 不可用，已降级为仅 RAW 对账，恒等式核对未执行")
 
         if raw_df is None:
             incomplete.append("ADJ_FACTOR_RAW 不可用，已跳过 RAW 相关对比")
@@ -483,6 +491,25 @@ def main() -> int:
             total += _report_diffs(
                 "LOCAL vs RAW", "local_vs_raw", args.begin, args.end,
                 diff_factor_frames(local_df, raw_df, args.tolerance))
+
+        # 恒等式核对: 纯 SQL, 不依赖事件清单与外部接口, 故放在腾讯拉取之前——
+        # 网络不可用时这一项仍然能给出结论。用 local_df 是否为 None 判定表可读性,
+        # 空帧(窗口内无事件)照常核对: 该有事件却没有, 正是本项要查的漏事件。
+        #
+        # 单项失败必须就地降级, 不能让异常冒到 main 的兜底 except —— 那会连带
+        # 跳过后面的腾讯对账, 与本文件「只告警不阻断」的契约相悖。降级后如实记入
+        # incomplete, 不得以零差异掩盖未执行(同 BUG-005)。
+        if local_df is not None:
+            try:
+                invariant_diff = adjust_invariant.check_invariant(
+                    conn, begin_date, end_date, symbols)
+            except Exception as e:
+                logger.warning(f"[{adjust_invariant.LABEL}]    执行失败({e})，本项未完成")
+                incomplete.append(f"恒等式核对未完成({e.__class__.__name__})")
+            else:
+                total += _report_diffs(
+                    adjust_invariant.LABEL, adjust_invariant.CSV_TAG,
+                    args.begin, args.end, invariant_diff)
 
         # 腾讯对账范围: LOCAL/RAW 窗口内出现过的股票并集(不含基准行,
         # 否则所有有历史事件的股票都会被拉腾讯行情)

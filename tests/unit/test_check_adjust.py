@@ -497,6 +497,43 @@ def test_main_skips_unavailable_sources(monkeypatch, caplog, local_ok, raw_ok):
 
 
 
+def test_invariant_failure_degrades_without_aborting_other_checks(monkeypatch, caplog):
+    """反例: 恒等式核对抛异常必须就地降级, 不得冒到 main 的兜底 except。
+
+    那个 except 会 return 0 并跳过其后的全部对账项(腾讯 vs LOCAL/RAW/gbbq), 整轮
+    对账静默少跑一半却仍然退出 0。这里断言三件事: 腾讯仍被调用、汇总不出现
+    「全部一致 OK」、未完成项如实记录。
+    """
+    import logging
+    from types import SimpleNamespace
+    from datasource import txstock
+    frame = _factorb([("000001.SZ", "2026-08-03", 3.9, 0)])
+    monkeypatch.setattr(ca, "parse_arguments", lambda: SimpleNamespace(
+        begin="20260803", end="20260803", codes=None, tolerance=0.001))
+    monkeypatch.setattr(ca, "check_parameters", lambda *a: True)
+    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda: None)
+    monkeypatch.setattr(ca.dbutil, "get_connection", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(ca, "_load_factor_events", lambda conn, table, *a: frame.copy())
+    monkeypatch.setattr(ca, "_load_gbbq_events", lambda *a: pd.DataFrame())
+    monkeypatch.setattr(ca.adjust_invariant, "check_invariant",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    calls = []
+
+    def fetch(codes, *args):
+        calls.append(codes)
+        return _tx([("000001.SZ", "2026-08-03", 1.0, 1.01)]), []
+
+    monkeypatch.setattr(txstock, "fetch_xdr_events", fetch)
+    monkeypatch.setattr(ca, "_report_diffs", lambda *a: 0)
+
+    with caplog.at_level(logging.INFO):
+        assert ca.main() == 0
+
+    assert calls, "恒等式核对失败后腾讯对账被跳过了"
+    assert "恒等式核对未完成" in caplog.text
+    assert "全部一致 OK" not in caplog.text
+
+
 @pytest.mark.parametrize("explicit", [True, False])
 def test_missing_both_factor_sources_still_queries_independent_codes(monkeypatch, explicit):
     from types import SimpleNamespace

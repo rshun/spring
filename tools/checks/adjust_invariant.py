@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-13  Claude  因子水位改按 ASOF 取(原为按日期精确 join): 停牌期间照样会
+#                       除权, 事件日落在非交易日上时精确 join 会在复牌日找不到因子行,
+#                       把完全正确的链误报成漏事件——实测虚报 917 条
 #   2026-09-13  Claude  新建复权因子逐日恒等式核对(不依赖事件清单, 不依赖外部网络)
 """复权因子逐日恒等式核对
 
@@ -46,26 +49,29 @@ _PRICE_ROUNDING = 0.005
 _SQL = f"""
 WITH px AS (
     SELECT d.code, d.date, d.pre_close,
-           LAG(d.close) OVER (PARTITION BY d.code ORDER BY d.date) AS prev_close
+           LAG(d.close) OVER (PARTITION BY d.code ORDER BY d.date) AS prev_close,
+           LAG(d.date)  OVER (PARTITION BY d.code ORDER BY d.date) AS prev_date
     FROM STOCK_DAILY d
     WHERE d.tradestatus = 1 AND d.pre_close > 0
       -- 指数不做复权, 其 pre_close 与前收的差异来自指数编制规则, 必须排除
       AND EXISTS (SELECT 1 FROM STOCK_INFO i
                    WHERE i.code = d.code AND i.board <> 'INDEX')
 ),
-fac AS (
-    -- 事件表是稀疏的(只在事件日落行), 首行之前的隐含水位为 1.0
-    SELECT code, trade_date AS date, back_factor,
-           COALESCE(LAG(back_factor) OVER (PARTITION BY code ORDER BY trade_date),
-                    1.0) AS prev_bf
-    FROM ADJ_FACTOR_LOCAL
-),
 j AS (
+    -- 因子水位按 ASOF 取「不晚于该日的最后一条事件」, 不能按日期精确 join:
+    -- 停牌期间照样会除权(事件日落在非交易日上), 精确 join 会在复牌日找不到因子行
+    -- 而把一条算得完全正确的链误报成漏事件。实测这一处曾虚报 917 条。
+    -- 比较区间 (上一交易日, 本交易日] 内的水位变化, 也自然覆盖「两个交易日之间
+    -- 有多个事件」的情形。
     SELECT px.code, px.date, px.prev_close, px.pre_close,
-           px.prev_close / px.pre_close            AS r_exch,
-           f.back_factor / NULLIF(f.prev_bf, 0)    AS r_fac
+           px.prev_close / px.pre_close                      AS r_exch,
+           COALESCE(fc.back_factor, 1.0)
+             / NULLIF(COALESCE(fp.back_factor, 1.0), 0)      AS r_fac
     FROM px
-    LEFT JOIN fac f ON f.code = px.code AND f.date = px.date
+    ASOF LEFT JOIN ADJ_FACTOR_LOCAL fc
+      ON fc.code = px.code AND fc.trade_date <= px.date
+    ASOF LEFT JOIN ADJ_FACTOR_LOCAL fp
+      ON fp.code = px.code AND fp.trade_date <= px.prev_date
     WHERE px.prev_close IS NOT NULL
       AND px.date BETWEEN ? AND ?
       {{code_filter}}
@@ -81,12 +87,11 @@ t AS (
 SELECT * FROM (
     SELECT code, date, prev_close, pre_close, r_exch, r_fac,
            CASE
-             WHEN r_fac IS NULL AND abs(r_exch - 1) > tol
+             WHEN abs(r_exch - 1) > tol AND abs(r_fac - 1) <= 1e-9
                   THEN '{ISSUE_EVENT_MISSING}'
-             WHEN r_fac IS NOT NULL AND abs(r_exch - 1) <= tol
-                  AND abs(r_fac - 1) > 1e-9
+             WHEN abs(r_exch - 1) <= tol AND abs(r_fac - 1) > 1e-9
                   THEN '{ISSUE_EVENT_SPURIOUS}'
-             WHEN r_fac IS NOT NULL AND abs(r_fac / r_exch - 1) > tol
+             WHEN abs(r_fac / r_exch - 1) > tol
                   THEN '{ISSUE_RATIO_WRONG}'
            END AS issue
     FROM t

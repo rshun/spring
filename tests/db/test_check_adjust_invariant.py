@@ -130,6 +130,40 @@ def test_prev_close_crosses_suspension_and_window_start(mem_db):
     assert _run(mem_db).empty
 
 
+def test_event_dated_inside_suspension_is_not_reported(mem_db):
+    """反例(回归): 停牌期间除权 —— 事件日落在非交易日上, 不得误报漏事件。
+
+    实例 600717.SH: 停牌 2026-06-09~06-22, 期间 06-18 每10股派 1.02 除权, 占位行
+    价格由 4.31 落到 4.21(4.31-0.102=4.208 四舍五入 4.21), 因子表在 06-18 有行,
+    整条链完全正确。若按「复牌日有没有因子行」精确 join 去找, 会在 06-23 找不到
+    而误报 —— 实测这一处虚报 917 条。因子水位必须按 ASOF 取, 比较区间
+    (上一交易日, 本交易日] 内的水位变化。
+    """
+    code = _stock(mem_db)
+    _bar(mem_db, code, "2026-03-02", 4.31, 4.30)                   # 停牌前最后交易日
+    _bar(mem_db, code, "2026-03-03", 4.31, 4.31, tradestatus=0)
+    _bar(mem_db, code, "2026-03-04", 4.21, 4.21, tradestatus=0)    # 停牌期间除权
+    _bar(mem_db, code, "2026-03-05", 4.21, 4.21, tradestatus=0)
+    _bar(mem_db, code, "2026-03-06", 4.37, 4.21)                   # 复牌
+    _factor(mem_db, code, "2026-03-04", 4.31 / 4.21)               # 事件落在停牌日
+    assert _run(mem_db).empty
+
+
+def test_multiple_events_between_two_trading_days_are_aggregated(mem_db):
+    """正例: 两个交易日之间有多笔事件时, 比较的是区间内水位的累计变化。
+
+    精确 join 只看得到其中一笔, 会把另一笔算成漏。
+    """
+    code = _stock(mem_db)
+    _bar(mem_db, code, "2026-03-02", 10.00, 9.90)
+    _bar(mem_db, code, "2026-03-03", 9.50, 9.50, tradestatus=0)
+    _bar(mem_db, code, "2026-03-04", 8.00, 8.00, tradestatus=0)
+    _bar(mem_db, code, "2026-03-05", 8.10, 8.00)                   # 复牌, 累计 10.00/8.00
+    _factor(mem_db, code, "2026-03-03", 10.00 / 9.50)
+    _factor(mem_db, code, "2026-03-04", 10.00 / 8.00)
+    assert _run(mem_db).empty
+
+
 def test_symbols_filter_limits_scope(mem_db):
     """正例: 指定代码时只核对该股, 其余股票的缺陷不进结果"""
     a = _stock(mem_db, "600000", "SH")

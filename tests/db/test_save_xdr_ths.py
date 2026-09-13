@@ -2,6 +2,8 @@
 #   2026-09-13  Claude  新增 save_xdr_event_ths_to_db 写库测试(seq 分配、先删后插、区间隔离)
 #   2026-09-13  Claude  补充半区间(begin/end 只给一侧)必须报错的测试：BETWEEN ? AND NULL
 #                       三值逻辑恒不匹配, 会让先删后插静默失效
+#   2026-09-13  Claude  新增 codes 参数收窄删除范围的测试：api 模式候选集来自 gbbq 日期、
+#                       删除按 THS 自己的 ex_date, 两套口径不一致时不收窄会误删候选集外的行
 """XDR_EVENT_THS 写库: seq 分配、先删后插、区间隔离。"""
 import datetime
 
@@ -139,3 +141,36 @@ def test_half_open_range_does_not_write_anything(mem_db):
             _df([("600519.SH", D1, 0.2, 0.0, 0.0, 0.0)]), mem_db, begin=D1, end=None)
     after = mem_db.execute("SELECT COUNT(*) FROM XDR_EVENT_THS").fetchone()[0]
     assert before == after == 1
+
+
+def test_range_mode_with_codes_only_deletes_those_codes(mem_db):
+    """反例(防误删): 传了 codes 时, 区间内不在 codes 里的行必须保留
+
+    api 模式的候选集来自 gbbq 日期, 与本表的 ex_date 是两套口径;
+    不收窄删除范围会把「ex_date 在窗口内但 gbbq 日期在窗口外」的股票记录
+    删掉且不重新插入, 而退出码仍是 0。
+    """
+    dbutil.save_xdr_event_ths_to_db(_df([
+        ("000001.SZ", D1, 0.1, 0.0, 0.0, 0.0),
+        ("600519.SH", D1, 0.2, 0.0, 0.0, 0.0),
+    ]), mem_db)
+    dbutil.save_xdr_event_ths_to_db(
+        _df([("000001.SZ", D1, 0.3, 0.0, 0.0, 0.0)]), mem_db,
+        begin=D1, end=D1, codes=["000001.SZ"])
+    rows = {r[0]: r[1] for r in mem_db.execute(
+        "SELECT code, dividend_per_share FROM XDR_EVENT_THS").fetchall()}
+    assert rows == {"000001.SZ": 0.3, "600519.SH": 0.2}   # 600519 未被误删
+
+
+def test_range_mode_with_codes_still_removes_ghost_rows(mem_db):
+    """正例: 候选集内的代码仍走先删后插, 防幽灵行的保护不能因此失效"""
+    dbutil.save_xdr_event_ths_to_db(_df([
+        ("000001.SZ", D1, 0.1, 0.0, 0.0, 0.0),
+        ("000001.SZ", D2, 0.2, 0.0, 0.0, 0.0),
+    ]), mem_db)
+    dbutil.save_xdr_event_ths_to_db(
+        _df([("000001.SZ", D1, 0.1, 0.0, 0.0, 0.0)]), mem_db,
+        begin=D1, end=D2, codes=["000001.SZ"])
+    dates = [str(r[0]) for r in mem_db.execute(
+        "SELECT ex_date FROM XDR_EVENT_THS ORDER BY ex_date").fetchall()]
+    assert dates == [str(D1)]      # D2 那条(本轮不再有)被清掉

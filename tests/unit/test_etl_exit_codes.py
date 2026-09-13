@@ -13,6 +13,9 @@
 #   2026-09-13  Claude  纳入 sync_xdr_ths(第 6 个 Task, 同花顺除权事件入库):
 #                       只接入通用退出码契约(main() -> int / sys.exit(main()))，
 #                       不新增专属分支测试(已在 test_sync_xdr_ths.py 覆盖参数面与纯函数)
+#   2026-09-13  Claude  审查发现: candidates 为空(gbbq 窗口内无除权事件)是多数交易日的
+#                       正常结果, 之前按"部分成功"返回 3 会稀释该退出码的告警意义,
+#                       改为返回 0; 补 sync_xdr_ths 专属分支测试守住这个区分
 """
 ETL 退出码契约测试
 
@@ -823,3 +826,79 @@ def test_sync_margin_detail_source_missing_method_returns_1():
         dbutil.get_trade_dates.return_value = ["20260817"]
         myutil.import_source_module.return_value = _source("fetch_margin_summary", pd.DataFrame())
         assert sync_margin.main() == 1
+
+
+# ── sync_xdr_ths ──────────────────────────────────────────────────────────────
+
+def _xdr_args(**kw):
+    base = {"begin": "20260901", "end": "20260901", "codes": None,
+           "exchanges": ["all"], "source": "api", "parquet": None,
+           "forcerun": True}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_sync_xdr_ths_api_empty_candidates_returns_0():
+    """正例(本次修复): gbbq 候选集为空是多数交易日的正常结果, 不该算部分成功
+
+    候选集为空只说明窗口内没有除权事件, 不代表数据源可疑；是否该怀疑 gbbq
+    过期是 sync_capital 的职责, 不该由本 ETL 借退出码 3 来表达——天天返回 3
+    会稀释该退出码作为告警信号的意义。
+    """
+    with patch.object(sync_xdr_ths, "myutil") as myutil, \
+         patch.object(sync_xdr_ths, "dbutil") as dbutil, \
+         patch.object(sync_xdr_ths, "parse_arguments", return_value=_xdr_args()), \
+         patch.object(sync_xdr_ths, "check_parameters", return_value=True), \
+         patch.object(sync_xdr_ths, "_candidate_codes", return_value=[]):
+        myutil.trans_datestr_format.side_effect = lambda s: s
+        dbutil.get_connection.return_value = MagicMock()
+
+        assert sync_xdr_ths.main() == 0
+        dbutil.save_xdr_event_ths_to_db.assert_not_called()
+
+
+def test_sync_xdr_ths_api_success_passes_candidates_as_codes():
+    """正例(本次修复): 写库时必须把候选集透传为 codes, 收窄删除范围
+
+    候选集来自 CAPITAL_DETAIL(gbbq) 的事件日期, 写库删除用的是 THS 自己的
+    ex_date, 两套口径不一致时不收窄会误删候选集外、但 ex_date 落在窗口内的
+    股票记录, 且不会被重新入库(退出码却仍是 0)。
+    """
+    with patch.object(sync_xdr_ths, "myutil") as myutil, \
+         patch.object(sync_xdr_ths, "dbutil") as dbutil, \
+         patch.object(sync_xdr_ths, "ths") as ths_mock, \
+         patch.object(sync_xdr_ths, "parse_arguments", return_value=_xdr_args()), \
+         patch.object(sync_xdr_ths, "check_parameters", return_value=True), \
+         patch.object(sync_xdr_ths, "_candidate_codes",
+                      return_value=["600519.SH", "000001.SZ"]):
+        myutil.trans_datestr_format.side_effect = lambda s: s
+        dbutil.get_connection.return_value = MagicMock()
+        dbutil.save_xdr_event_ths_to_db.return_value = 2
+        ths_mock.XDR_COLUMNS = ["code", "ex_date", "dividend_per_share",
+                               "per_share_bonus", "allotment_ratio", "allotment_price"]
+        ths_mock._cfg.return_value = {"sleep_between_stocks": 0}
+        ths_mock.fetch_xdr_events.return_value = _df()
+
+        assert sync_xdr_ths.main() == 0
+        _, kwargs = dbutil.save_xdr_event_ths_to_db.call_args
+        assert kwargs["codes"] == ["600519.SH", "000001.SZ"]
+
+
+def test_sync_xdr_ths_api_partial_fetch_failure_returns_3():
+    """反例: 逐只请求部分失败 -> 3, 不得被吞成 0"""
+    with patch.object(sync_xdr_ths, "myutil") as myutil, \
+         patch.object(sync_xdr_ths, "dbutil") as dbutil, \
+         patch.object(sync_xdr_ths, "ths") as ths_mock, \
+         patch.object(sync_xdr_ths, "parse_arguments", return_value=_xdr_args()), \
+         patch.object(sync_xdr_ths, "check_parameters", return_value=True), \
+         patch.object(sync_xdr_ths, "_candidate_codes",
+                      return_value=["600519.SH", "000001.SZ"]):
+        myutil.trans_datestr_format.side_effect = lambda s: s
+        dbutil.get_connection.return_value = MagicMock()
+        dbutil.save_xdr_event_ths_to_db.return_value = 1
+        ths_mock.XDR_COLUMNS = ["code", "ex_date", "dividend_per_share",
+                               "per_share_bonus", "allotment_ratio", "allotment_price"]
+        ths_mock._cfg.return_value = {"sleep_between_stocks": 0}
+        ths_mock.fetch_xdr_events.side_effect = [_df(), ConnectionError("网络中断")]
+
+        assert sync_xdr_ths.main() == 3

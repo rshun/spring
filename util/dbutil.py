@@ -39,6 +39,11 @@
 #   2026-09-13  Claude  新增 save_xdr_event_ths_to_db：先删后插写入 XDR_EVENT_THS，
 #                       seq 按 (dividend, bonus, allotment_ratio, allotment_price) 排序
 #                       确定性分配，避免按输入顺序分配导致重跑 seq 不一致
+#   2026-09-13  Claude  save_xdr_event_ths_to_db 新增 codes 参数，区间删除收窄到候选代码：
+#                       api 模式候选集来自 CAPITAL_DETAIL(gbbq) 日期，删除用的是 THS 自己
+#                       的 ex_date，两套口径不一致(实测 163/57122 条, 0.285%)会导致候选集
+#                       外、但 ex_date 落在窗口内的股票记录被误删且不会被重新入库，退出码
+#                       却仍是 0
 import logging
 import duckdb
 import pandas as pd
@@ -1680,7 +1685,7 @@ def save_limit_pool_to_db(df: pd.DataFrame, trade_date: str, limit_type: str,
 def save_xdr_event_ths_to_db(df: pd.DataFrame,
                              conn: duckdb.DuckDBPyConnection,
                              source: str = "parquet",
-                             begin=None, end=None) -> int:
+                             begin=None, end=None, codes=None) -> int:
     """写入 XDR_EVENT_THS：先删后插，返回入库行数
 
     begin/end 必须同时给出或同时为 None，不接受半区间：
@@ -1689,6 +1694,16 @@ def save_xdr_event_ths_to_db(df: pd.DataFrame,
     只给一侧会让 SQL 的 `BETWEEN ? AND NULL` 在三值逻辑下恒不匹配，
     导致该删的行没删、直接插入，「先删后插」防幽灵行的设计静默失效，
     因此在删除之前显式校验并报错，不允许悄悄跳过。
+
+    codes（可选，仅在给了 begin/end 的区间模式下生效）：把删除范围进一步收窄到
+    这些代码。**为什么需要它**：api 模式的候选集来自 CAPITAL_DETAIL(gbbq) 的
+    事件日期，而本表删除用的是 THS 自己的 ex_date——这是两套不同口径的日期
+    （实测 57,122 个可配对事件里 163 条、约 0.285% 不一致）。如果不收窄，
+    「THS ex_date 落在窗口内、但 gbbq 日期落在窗口外」的股票会被：区间删除
+    命中(它的旧记录被删)，但因为不在候选集里不会被重新请求——记录静默丢失，
+    而调用方看到的却是「没有失败」的成功退出码。传入本轮实际候选的 codes 后，
+    候选集内的代码仍然先删后插（防幽灵行的保护保留），候选集外的代码则一行
+    不碰（不可能被误删）。不传 codes 时行为与之前完全一致（整个区间全删）。
 
     不用 INSERT OR REPLACE：事件集合会因数据源修订而变化，
     它只覆盖同主键行、不删多余旧行，重跑会留下幽灵行。
@@ -1703,6 +1718,12 @@ def save_xdr_event_ths_to_db(df: pd.DataFrame,
     try:
         if begin is None and end is None:
             conn.execute("DELETE FROM XDR_EVENT_THS")
+        elif codes:
+            ph = ", ".join(["?"] * len(codes))
+            conn.execute(
+                f"DELETE FROM XDR_EVENT_THS WHERE ex_date BETWEEN ? AND ? "
+                f"AND code IN ({ph})",
+                [begin, end, *codes])
         else:
             conn.execute(
                 "DELETE FROM XDR_EVENT_THS WHERE ex_date BETWEEN ? AND ?", [begin, end])

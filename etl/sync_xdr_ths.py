@@ -3,6 +3,12 @@
 #   2026-09-13  Claude  修复: -s parquet(全表替换)与 -c/-x 子集过滤同用会先清空整表
 #                       再只插入过滤后的行, 导致其余股票历史事件被永久删除且退出码仍是 0；
 #                       parse_arguments() 里检测到这种组合直接 parser.error() 拦截(退出码 2)
+#   2026-09-13  Claude  审查发现 2 处必修: (1) api 模式候选集来自 gbbq 日期、删除按
+#                       THS 自己的 ex_date, 两套口径不一致(实测 163/57122, 0.285%)会
+#                       误删候选集外的记录且不重新入库, save_xdr_event_ths_to_db 调用
+#                       改传 codes=candidates 收窄删除范围; (2) 候选集为空是多数交易日
+#                       的正常结果, 不该算"部分成功", 改为返回 0 而非 3；顺带把 -x 的
+#                       报错文案从"同上原因"改成写全, 单独触发时也能看到完整解释
 """同花顺除权事件入库工具
 
 两种模式:
@@ -94,8 +100,9 @@ def parse_arguments() -> argparse.Namespace:
                 "想按代码取数请用 -s api -c，或直接调 ths.load_xdr_events() 查看 dump。")
         if requested_exchanges(args.exchanges) != {"SH", "SZ", "BJ"}:
             parser.error(
-                "-s parquet 是全表替换模式，不能与 -x 子集同用（同上原因）。"
-                "全量灌库请用 -x all 或不传 -x。")
+                "-s parquet 是全表替换模式，不能与 -x 子集同用："
+                "它会先清空整表再只插入过滤后的行，导致其余交易所的历史事件被永久删除。"
+                "全量灌库请用 -x all 或不传 -x；想按交易所取数请用 -s api -x。")
     return args
 
 
@@ -232,8 +239,11 @@ def main() -> int:
             candidates = [c for c in candidates if c.split(".")[0] in set(codes)]
         candidates = [c for c in candidates if c.split(".")[-1].upper() in wanted]
         if not candidates:
-            logger.warning(f"{begin_date} ~ {end_date} 区间内 gbbq 无除权事件，无候选股票。")
-            return 3
+            # gbbq 在窗口内没有除权事件是完全正常的结果(多数交易日全市场都没有)，
+            # 不是"部分成功"——是否过期是 sync_capital 的职责，不该由本 ETL 借
+            # 退出码 3 来表达，否则 3 天天出现会稀释它作为告警信号的意义。
+            logger.info(f"{begin_date} ~ {end_date} 区间内 gbbq 无除权事件，无候选股票。")
+            return 0
 
         logger.info(f"候选股票 {len(candidates)} 只，开始逐只请求...")
         sleep_s = float(ths._cfg().get("sleep_between_stocks", 0.2))
@@ -255,8 +265,11 @@ def main() -> int:
 
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=ths.XDR_COLUMNS)
         df = filter_by_exchange(df, wanted)
+        # codes=candidates 收窄删除范围：候选集来自 gbbq 日期、这里删除用的是 THS
+        # 自己的 ex_date，两套口径不一致时，不收窄会把候选集外、但 ex_date 落在
+        # 窗口内的股票记录误删且不重新插入(退出码却仍是 0)，详见 dbutil 侧 docstring。
         written = dbutil.save_xdr_event_ths_to_db(
-            df, conn, source="api", begin=begin_date, end=end_date)
+            df, conn, source="api", begin=begin_date, end=end_date, codes=candidates)
 
         if failed:
             logger.warning(f"部分成功: {len(failed)}/{len(candidates)} 只取数失败 {failed}")

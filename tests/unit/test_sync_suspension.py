@@ -1,4 +1,6 @@
 """sync_suspension 的参数面与纯函数逻辑(不触网、不连库)。"""
+import logging
+
 import pandas as pd
 
 from etl import sync_suspension
@@ -122,6 +124,33 @@ def test_filter_suspended_on_empty_df_stays_empty():
 def test_filter_suspended_on_none_passthrough():
     """边界: df 为 None 时原样返回, 不抛错"""
     assert sync_suspension.filter_suspended_on(None, "2026-09-11") is None
+
+
+def test_filter_suspended_on_excludes_nat_suspend_time_with_warning(caplog):
+    """反例(NaT 静默丢弃, BUG-011 同类): suspend_time 缺失/无法解析 -> 排除，
+    且必须打 WARNING 说明条数，不能像 BUG-011 那样无声丢弃数据
+
+    直接把 caplog.handler 挂到目标 logger 上而不是靠 caplog.at_level 依赖向 root
+    传播: 全量 pytest 跑起来后, etl.sync_finance 的 run_sync() 会真调一次
+    myutil.configure_etl_logging()，把祖先 "etl" logger 的 propagate 永久置 False
+    (进程内只配置一次)，届时任何依赖传播到 root 的 caplog 用例都会静默失效——这里
+    直接挂 handler 可以绕开这个已知的跨用例日志污染。
+    """
+    target_logger = logging.getLogger("etl.sync_suspension")
+    target_logger.addHandler(caplog.handler)
+    orig_level = target_logger.level
+    target_logger.setLevel(logging.WARNING)
+    try:
+        df = _suspension_df(["600000", "600001"],
+                            [None, "2026-09-01"],
+                            [None, None])
+        out = sync_suspension.filter_suspended_on(df, "2026-09-11")
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(orig_level)
+    assert out["symbol"].tolist() == ["600001"]
+    assert "1 条记录" in caplog.text
+    assert "suspend_time" in caplog.text
 
 
 def test_classify_write_result_written_positive_is_ok():

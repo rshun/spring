@@ -33,6 +33,9 @@
 #                       可能吸附到未来才出现的大流通盘, 造成 float_shares > total_shares
 #                       (2011-2025 回补实测净增 1305 行违反); 闸门取的是窗口内的候选,
 #                       窗口跨越总股本减少的时点时同样会溢出, 故在闸门出口再封一次顶
+#   2026-09-13  Claude  save_suspension_to_db 新增 filtered_empty 参数：区分"接口取数就是
+#                       空帧"(WARNING，语义不变)与"过滤后为空"(INFO)，避免调用方按
+#                       filter_suspended_on 过滤出的正常空结果与本函数固有 WARNING 打架
 import logging
 import duckdb
 import pandas as pd
@@ -1566,16 +1569,25 @@ def _to_std_codes(df: pd.DataFrame, what: str) -> pd.DataFrame:
 
 def save_suspension_to_db(df: pd.DataFrame, trade_date: str,
                           conn: duckdb.DuckDBPyConnection,
-                          source: str = "akstock") -> int:
+                          source: str = "akstock",
+                          filtered_empty: bool = False) -> int:
     """写入 SUSPENSION_DAILY：先删当日、再整批插入，返回入库行数
 
     不用 INSERT OR REPLACE：停牌名单是每日全量快照，成员会变，
     INSERT OR REPLACE 只覆盖同主键行、不删多余旧行，重跑会留下幽灵行。
+
+    filtered_empty: 调用方明确本次空帧是"过滤后为空"(如接口有数据，但按
+        filter_suspended_on 过滤出的当日无处于停牌状态股票)，此时打 INFO
+        而非 WARNING。默认 False，维持原有 WARNING 行为，不影响其他调用方。
     """
     try:
         conn.execute("DELETE FROM SUSPENSION_DAILY WHERE trade_date = ?", [trade_date])
         if df is None or df.empty:
-            logger.warning(f"[SUSPENSION_DAILY] {trade_date} 无停牌数据，已清空当日")
+            if filtered_empty:
+                logger.info(f"[SUSPENSION_DAILY] {trade_date} 过滤后无处于停牌状态的股票，"
+                           f"已清空当日")
+            else:
+                logger.warning(f"[SUSPENSION_DAILY] {trade_date} 无停牌数据，已清空当日")
             return 0
 
         rows = _to_std_codes(df, "SUSPENSION_DAILY")

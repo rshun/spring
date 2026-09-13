@@ -6,6 +6,12 @@
 #                       (含未来才停牌/当日已复牌的行), 不是"当日处于停牌状态"名单;
 #                       入库前新增 filter_suspended_on 过滤, 并区分"接口空帧"与
 #                       "过滤后为空"两种退出码语义
+#   2026-09-13  Claude  复核意见修复: filter_suspended_on 里 suspend_time 缺失/无法
+#                       解析(NaT)的行不再静默排除, 改为先打 WARNING 点明条数(同类
+#                       静默丢弃已在 BUG-011 吃过亏); save_suspension_to_db 新增
+#                       filtered_empty 参数区分"接口空帧"(WARNING)与"过滤后为空"
+#                       (INFO), 消除此前 WARNING+INFO 语义打架; 顺手对齐一处 f-string
+#                       续行缩进
 """停牌名单入库工具 (支持指定日期区间)
 
 退出码: 0=成功 / 1=失败 / 2=argparse 用法错 / 3=部分成功
@@ -136,12 +142,23 @@ def filter_suspended_on(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
     suspend_time / resume_deadline 是 TIMESTAMP，可能带盘中时刻(如 10:30:00)，
     比较前必须只取日期部分(.dt.normalize())，否则当天盘中停牌的会被误判成
     "还没停"而被排除。resume_deadline 为 NaT 表示没有复牌截止日，视为仍在停牌。
+
+    suspend_time 缺失或无法解析(NaT)的行会被本函数排除(它既不满足"确实停牌"，
+    也无从判断)，但这不该是静默的：NaT 通常意味着源站字段格式异常，是值得人工
+    核查的数据源信号，因此会先打一条 WARNING 说明有几条记录因此被排除。
     """
     if df is None or df.empty:
         return df
     target = pd.Timestamp(trade_date).normalize()
     suspend_date = pd.to_datetime(df["suspend_time"], errors="coerce").dt.normalize()
     resume_date = pd.to_datetime(df["resume_deadline"], errors="coerce").dt.normalize()
+
+    unparseable = int(suspend_date.isna().sum())
+    if unparseable:
+        logger.warning(f"[filter_suspended_on] {trade_date} 有 {unparseable} 条记录的 "
+                       f"suspend_time 缺失或无法解析，已按'排除'处理(不计入当日停牌名单)，"
+                       f"这通常意味着数据源字段格式异常，建议人工核查")
+
     keep = (suspend_date <= target) & (resume_date.isna() | (resume_date >= target))
     return df[keep]
 
@@ -231,15 +248,17 @@ def main() -> int:
             api_empty = df is None or df.empty
             df = _filter_by_exchange(filter_by_codes(df, codes), wanted)
             df = filter_suspended_on(df, date_str)
+            filtered_empty = (not api_empty) and (df is None or df.empty)
             written = dbutil.save_suspension_to_db(df, date_str, conn,
-                                                   source=args.source)
+                                                   source=args.source,
+                                                   filtered_empty=filtered_empty)
             result = classify_write_result(api_empty, written)
             if result == "api_empty":
                 logger.warning(f"[{date_str}] 停牌名单接口返回空帧，取数可疑")
                 empty.append(date_str)
-            elif result == "filtered_empty":
-                logger.info(f"[{date_str}] 当日无处于停牌状态的股票(接口有数据，"
-                           f"过滤后为空)")
+            # filtered_empty: 当日确实无处于停牌状态的股票，正常情况，不计入
+            # empty；save_suspension_to_db 已按 filtered_empty=True 打过 INFO，
+            # 这里不重复记录，避免同一件事出现两条日志
 
         if failed and len(failed) == len(trade_dates):
             logger.error(f"全部 {len(trade_dates)} 个交易日取数失败，任务失败。")

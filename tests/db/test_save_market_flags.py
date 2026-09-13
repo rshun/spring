@@ -113,3 +113,23 @@ def test_save_limit_pool_empty_frame_still_clears_the_day(mem_db):
     assert mem_db.execute(
         "SELECT COUNT(*) FROM LIMIT_POOL_DAILY WHERE limit_type = 'U'"
     ).fetchone()[0] == 0
+
+
+def test_save_suspension_empty_frame_defaults_to_warning(mem_db, caplog):
+    """正例: 不传 filtered_empty(默认 False) -> 空帧仍打 WARNING, 维持原有行为"""
+    with caplog.at_level("WARNING", logger="etl.util.dbutil"):
+        n = dbutil.save_suspension_to_db(_susp_df([]), "2026-09-11", mem_db)
+    assert n == 0
+    assert "无停牌数据，已清空当日" in caplog.text
+    assert not any(r.levelname == "INFO" and "过滤后" in r.message
+                  for r in caplog.records)
+
+
+def test_save_suspension_filtered_empty_logs_info_not_warning(mem_db, caplog):
+    """反例(打架修复): filtered_empty=True 时空帧打 INFO, 不再产生自相矛盾的 WARNING"""
+    with caplog.at_level("INFO", logger="etl.util.dbutil"):
+        n = dbutil.save_suspension_to_db(_susp_df([]), "2026-09-11", mem_db,
+                                         filtered_empty=True)
+    assert n == 0
+    assert "过滤后无处于停牌状态的股票" in caplog.text
+    assert not any(r.levelname == "WARNING" for r in caplog.records)

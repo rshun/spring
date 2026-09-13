@@ -225,6 +225,27 @@ COMMENT ON COLUMN LIMIT_POOL_DAILY.down_days IS '连续跌停天数, 仅跌停�
 COMMENT ON COLUMN LIMIT_POOL_DAILY.open_times IS '开板次数, 仅跌停池';
 COMMENT ON COLUMN LIMIT_POOL_DAILY.source IS '数据源(akstock)';
 
+-- 同花顺除权事件参数（CAPITAL_DETAIL 的独立外部对照，不参与复权因子计算）
+CREATE TABLE IF NOT EXISTS XDR_EVENT_THS (
+  code               VARCHAR(20),
+  ex_date            DATE,
+  seq                INTEGER,
+  dividend_per_share DOUBLE,
+  per_share_bonus    DOUBLE,
+  allotment_ratio    DOUBLE,
+  allotment_price    DOUBLE,
+  source             VARCHAR(20),
+  PRIMARY KEY (code, ex_date, seq)
+);
+COMMENT ON COLUMN XDR_EVENT_THS.code IS '股票代码(标准代码 600519.SH)';
+COMMENT ON COLUMN XDR_EVENT_THS.ex_date IS '除权日(取数层已按 Asia/Shanghai 转换, 含1991年夏令时)';
+COMMENT ON COLUMN XDR_EVENT_THS.seq IS '同股同日多笔分录的序号(从0起); 源数据存在同日两行且语义不明, 保留原始行不合并';
+COMMENT ON COLUMN XDR_EVENT_THS.dividend_per_share IS '每股现金分红(税前, 元) —— 注意是每股, gbbq 的 dividend 是每10股';
+COMMENT ON COLUMN XDR_EVENT_THS.per_share_bonus IS '每股送转比例, 0.4 表示10送转4 —— 注意是每股, gbbq 的 bonus_share 是每10股';
+COMMENT ON COLUMN XDR_EVENT_THS.allotment_ratio IS '每股配股比例';
+COMMENT ON COLUMN XDR_EVENT_THS.allotment_price IS '配股价(元)';
+COMMENT ON COLUMN XDR_EVENT_THS.source IS '数据来源(parquet: 本地dump / api: 在线接口)';
+
 -- 申万行业定义（一/二/三级，按版本区分）
 CREATE TABLE IF NOT EXISTS SW_INDUSTRY (
     sw_version    VARCHAR(10),

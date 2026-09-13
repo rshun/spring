@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-09-13  Claude  新建同花顺 API 取数测试(全 mock, 不触网、不使用真实 key)
+#   2026-09-13  Claude  补充网络异常路径的密钥不泄漏断言(异常文本+日志两条出口)
 """同花顺 API 取数。全部 mock, 不触网、不使用真实 key。"""
 import datetime
 
@@ -96,7 +97,12 @@ def test_date_range_passed_through(monkeypatch):
 
 
 def test_network_failure_retries_then_raises(monkeypatch):
-    """反例: 网络失败重试耗尽后抛 ThsError, 不返回空帧"""
+    """反例: 网络失败重试耗尽后抛 ThsError, 不返回空帧
+
+    并锁住密钥安全: 异常链里转述了 str(e), 而 headers 含 key ——
+    依赖「requests 不把 headers 塞进异常文本」这个隐式假设,
+    用断言把它固化, 将来换 HTTP 库或加自定义异常时会红。
+    """
     calls = {"n": 0}
 
     def _boom(*a, **k):
@@ -105,6 +111,23 @@ def test_network_failure_retries_then_raises(monkeypatch):
 
     monkeypatch.setattr(ths.requests, "get", _boom)
     monkeypatch.setattr(ths.time, "sleep", lambda s: None)
-    with pytest.raises(ths.ThsError):
+    with pytest.raises(ths.ThsError) as ei:
         ths.fetch_xdr_events("600519.SH")
     assert calls["n"] >= 2
+    assert "test-key-not-real" not in str(ei.value)
+
+
+def test_network_failure_log_does_not_leak_key(monkeypatch, caplog):
+    """反例: 重试告警日志里也不得出现 key
+
+    日志与异常文本是两条独立出口, 分别断言。
+    """
+    def _boom(*a, **k):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(ths.requests, "get", _boom)
+    monkeypatch.setattr(ths.time, "sleep", lambda s: None)
+    with caplog.at_level("WARNING", logger="etl.datasource.ths"):
+        with pytest.raises(ths.ThsError):
+            ths.fetch_xdr_events("600519.SH")
+    assert "test-key-not-real" not in caplog.text

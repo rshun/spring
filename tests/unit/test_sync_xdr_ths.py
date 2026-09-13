@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-09-13  Claude  新建 sync_xdr_ths 的参数面与纯函数逻辑测试
+#   2026-09-13  Claude  补测试: parquet(全表替换)与 -c/-x 子集过滤同用会静默清空整表
+#                       只插入过滤后的行, 现由 parse_arguments() 拦截(退出码 2)
 """sync_xdr_ths 的参数面与纯函数逻辑(不触网、不连库)。"""
 import datetime
 
@@ -88,3 +90,43 @@ def test_filter_by_codes_no_match_returns_empty():
     """反例: 指定代码全不在帧内 -> 空帧而非全量"""
     df = pd.DataFrame({"code": ["600519.SH"], "ex_date": [datetime.date(2026, 9, 1)]})
     assert sync_xdr_ths.filter_by_codes(df, ["999999"]).empty
+
+
+def test_parquet_mode_rejects_codes_filter(monkeypatch, capsys):
+    """反例(防毁表): -s parquet + -c 会清空整表只插过滤行, 必须被拦
+
+    parquet 模式是全表替换; 加 -c 等于「清空全表 -> 只插入这一只」,
+    其余股票的历史事件被永久删除, 而退出码仍是 0。
+    """
+    monkeypatch.setattr("sys.argv",
+                        ["sync_xdr_ths", "-s", "parquet", "-c", "600519"])
+    with pytest.raises(SystemExit) as ei:
+        sync_xdr_ths.parse_arguments()
+    assert ei.value.code == 2
+
+
+def test_parquet_mode_rejects_exchange_subset(monkeypatch):
+    """反例(防毁表): -s parquet + -x 子集同理"""
+    monkeypatch.setattr("sys.argv",
+                        ["sync_xdr_ths", "-s", "parquet", "-x", "sh"])
+    with pytest.raises(SystemExit) as ei:
+        sync_xdr_ths.parse_arguments()
+    assert ei.value.code == 2
+
+
+def test_parquet_mode_allows_all_exchanges(monkeypatch):
+    """正例: -x all 与不传 -x 都是全量, 应放行"""
+    for argv in (["sync_xdr_ths", "-s", "parquet"],
+                 ["sync_xdr_ths", "-s", "parquet", "-x", "all"]):
+        monkeypatch.setattr("sys.argv", argv)
+        args = sync_xdr_ths.parse_arguments()
+        assert args.source == "parquet"
+
+
+def test_api_mode_allows_codes_filter(monkeypatch):
+    """正例: api 模式是区间增量, -c 不会毁表, 应放行"""
+    monkeypatch.setattr("sys.argv",
+                        ["sync_xdr_ths", "-s", "api", "-c", "600519",
+                         "-b", "20260901", "-e", "20260901"])
+    args = sync_xdr_ths.parse_arguments()
+    assert args.codes == ["600519"]

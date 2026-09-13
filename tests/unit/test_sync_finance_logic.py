@@ -1,5 +1,8 @@
 # 修改记录:
 #   2026-05-29  Claude  新增 sync_finance 编排与 iter_cw_reports 的正反测试
+#   2026-09-13  Claude  _patch_conn 顺带 mock 掉 myutil.configure_etl_logging：
+#                       run_sync() 真调用它会把 "etl" logger 的 propagate 永久
+#                       置 False，污染全量 pytest 里后续依赖 caplog 传播的用例
 """sync_finance 编排逻辑 + tdx_offline.iter_cw_reports 纯逻辑测试(无数据库/网络)"""
 import types
 
@@ -57,11 +60,13 @@ def test_iter_cw_reports_empty_dir(tmp_path, monkeypatch):
 # ── run_sync 编排 ────────────────────────────────────────
 
 def _patch_conn(monkeypatch):
-    """get_connection 返回带 close() 的哑对象(save 已被打桩，连接不会真正使用)"""
+    """get_connection 返回带 close() 的哑对象(save 已被打桩，连接不会真正使用)；
+    顺带挡掉 run_sync() 里真实的 configure_etl_logging()，避免污染全局 logger 状态"""
     monkeypatch.setattr(
         dbutil, "get_connection",
         lambda is_read_only=False: types.SimpleNamespace(close=lambda: None),
     )
+    monkeypatch.setattr(sync_finance.myutil, "configure_etl_logging", lambda: None)
 
 
 def test_run_sync_transforms_and_saves(monkeypatch):

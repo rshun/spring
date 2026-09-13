@@ -36,6 +36,9 @@
 #   2026-09-13  Claude  save_suspension_to_db 新增 filtered_empty 参数：区分"接口取数就是
 #                       空帧"(WARNING，语义不变)与"过滤后为空"(INFO)，避免调用方按
 #                       filter_suspended_on 过滤出的正常空结果与本函数固有 WARNING 打架
+#   2026-09-13  Claude  新增 save_xdr_event_ths_to_db：先删后插写入 XDR_EVENT_THS，
+#                       seq 按 (dividend, bonus, allotment_ratio, allotment_price) 排序
+#                       确定性分配，避免按输入顺序分配导致重跑 seq 不一致
 import logging
 import duckdb
 import pandas as pd
@@ -1670,5 +1673,65 @@ def save_limit_pool_to_db(df: pd.DataFrame, trade_date: str, limit_type: str,
     finally:
         try:
             conn.unregister("temp_limit_pool")
+        except Exception:
+            pass
+
+
+def save_xdr_event_ths_to_db(df: pd.DataFrame,
+                             conn: duckdb.DuckDBPyConnection,
+                             source: str = "parquet",
+                             begin=None, end=None) -> int:
+    """写入 XDR_EVENT_THS：先删后插，返回入库行数
+
+    begin/end 均为 None -> 清空整表（全量替换，用于 parquet 灌库）；
+    否则只删 [begin, end] 区间（用于 api 增量）。
+
+    不用 INSERT OR REPLACE：事件集合会因数据源修订而变化，
+    它只覆盖同主键行、不删多余旧行，重跑会留下幽灵行。
+
+    seq 按 (dividend, bonus, allotment_ratio, allotment_price) 排序后分配，
+    而非按输入顺序——保证同一份输入多次运行得到相同的 seq。
+    """
+    try:
+        if begin is None and end is None:
+            conn.execute("DELETE FROM XDR_EVENT_THS")
+        else:
+            conn.execute(
+                "DELETE FROM XDR_EVENT_THS WHERE ex_date BETWEEN ? AND ?", [begin, end])
+
+        if df is None or df.empty:
+            logger.warning(f"[XDR_EVENT_THS] 无数据写入(source={source})，已清空目标范围")
+            return 0
+
+        rows = df.copy()
+        rows = rows.sort_values(
+            ["code", "ex_date", "dividend_per_share", "per_share_bonus",
+             "allotment_ratio", "allotment_price"],
+            na_position="first", kind="mergesort")
+        rows["seq"] = rows.groupby(["code", "ex_date"]).cumcount()
+        rows["source"] = source
+
+        conn.register("temp_xdr_ths", rows)
+        conn.execute("""
+            INSERT INTO XDR_EVENT_THS
+                (code, ex_date, seq, dividend_per_share, per_share_bonus,
+                 allotment_ratio, allotment_price, source)
+            SELECT code, CAST(ex_date AS DATE), CAST(seq AS INTEGER),
+                   CAST(dividend_per_share AS DOUBLE),
+                   CAST(per_share_bonus    AS DOUBLE),
+                   CAST(allotment_ratio    AS DOUBLE),
+                   CAST(allotment_price    AS DOUBLE),
+                   source
+            FROM temp_xdr_ths
+        """)
+        logger.info(f"[入库] XDR_EVENT_THS 写入 {len(rows)} 条(source={source})")
+        return len(rows)
+    except Exception as e:
+        # 记录后必须重抛：CLI 靠异常返回退出码，吞掉就是「写库失败退出 0」（契约 C1）
+        logger.error(f"写入 XDR_EVENT_THS 表失败: {e}")
+        raise
+    finally:
+        try:
+            conn.unregister("temp_xdr_ths")
         except Exception:
             pass

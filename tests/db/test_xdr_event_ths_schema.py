@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-09-13  Claude  XDR_EVENT_THS 表建表与约束(主键含 seq、ex_date 为 DATE 类型)的测试覆盖
 """XDR_EVENT_THS 建表与约束"""
 import duckdb
 import pytest

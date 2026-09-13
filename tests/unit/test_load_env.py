@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-09-13  Claude  load_env() 函数的 .env 解析、转义、优先级、容错的单元测试覆盖
 """load_env: 解析 .env 到 os.environ。不引入 python-dotenv(依赖红线)。"""
 import os
 

@@ -2,14 +2,22 @@
 #   2026-09-12  Claude  新建停牌名单入库 ETL(第三方独立事实源, 供 check_daily 交叉核对)
 #   2026-09-13  Claude  -c / -x 缩小范围运行前追加警告: 写库按日期整体删除后重插,
 #                       未被本次范围覆盖的股票会从当日快照消失, 导致核对侧整片误报
+#   2026-09-13  Claude  修复语义 bug: stock_tfp_em 返回的是围绕查询日的停复牌公告
+#                       (含未来才停牌/当日已复牌的行), 不是"当日处于停牌状态"名单;
+#                       入库前新增 filter_suspended_on 过滤, 并区分"接口空帧"与
+#                       "过滤后为空"两种退出码语义
 """停牌名单入库工具 (支持指定日期区间)
 
 退出码: 0=成功 / 1=失败 / 2=argparse 用法错 / 3=部分成功
   区间内全部日期成功 -> 0；全部失败 -> 1；
   部分日期失败, 或某日接口返回空帧 -> 3。
 
-空帧单独归为「部分成功」而非失败: 某天确实无停牌股在现实中是可能的,
-但它同样值得传出信号, 由人判断。
+接口 (stock_tfp_em) 返回的是围绕查询日的停复牌公告，混有未来才停牌、
+当日已复牌等与查询日无关的行，入库前会用 filter_suspended_on 过滤成
+"D 日确实处于停牌状态"的行，使 trade_date 列名副其实。
+
+接口空帧(取数可能有问题)与过滤后为空(当日确实无停牌股，属正常情况)是两回事:
+只有前者才归为「部分成功」计入退出码 3；后者视为正常，退出码按其余日期计算。
 """
 import argparse
 import logging
@@ -114,6 +122,48 @@ def _filter_by_exchange(df: pd.DataFrame, wanted: set[str]) -> pd.DataFrame:
     return df[keep]
 
 
+def filter_suspended_on(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
+    """过滤成"trade_date(D)当天确实处于停牌状态"的行
+
+    stock_tfp_em(date=D) 返回的其实是围绕 D 的停复牌公告，混有未来才停牌
+    (suspend_time > D)、当日已复牌(resume_deadline < D) 的行，这些行在 D
+    当天股票是正常交易的，不该出现在 SUSPENSION_DAILY 里。
+
+    保留条件:
+        suspend_time 的日期部分 <= D
+        且 (resume_deadline 为空 或 resume_deadline 的日期部分 >= D)
+
+    suspend_time / resume_deadline 是 TIMESTAMP，可能带盘中时刻(如 10:30:00)，
+    比较前必须只取日期部分(.dt.normalize())，否则当天盘中停牌的会被误判成
+    "还没停"而被排除。resume_deadline 为 NaT 表示没有复牌截止日，视为仍在停牌。
+    """
+    if df is None or df.empty:
+        return df
+    target = pd.Timestamp(trade_date).normalize()
+    suspend_date = pd.to_datetime(df["suspend_time"], errors="coerce").dt.normalize()
+    resume_date = pd.to_datetime(df["resume_deadline"], errors="coerce").dt.normalize()
+    keep = (suspend_date <= target) & (resume_date.isna() | (resume_date >= target))
+    return df[keep]
+
+
+def classify_write_result(api_empty: bool, written: int) -> str:
+    """区分"写入 0 行"的两种含义，供退出码/日志分支判断使用
+
+    写入 0 行可能来自两种完全不同的情况，语义不能混为一谈:
+        - 接口本身就返回空帧: 取数可能有问题，值得作为"空"计入部分成功(退出码 3)
+        - 接口有数据，但按 filter_suspended_on 过滤后为 0:
+          当日确实没有处于停牌状态的股票，是正常情况，不该污染取数成功信号
+
+    返回值:
+        "ok"              written > 0
+        "api_empty"       接口返回空帧(过滤前就是空)
+        "filtered_empty"  接口有数据，过滤后为空
+    """
+    if written > 0:
+        return "ok"
+    return "api_empty" if api_empty else "filtered_empty"
+
+
 def main() -> int:
     myutil.configure_etl_logging()
     args = parse_arguments()
@@ -178,11 +228,18 @@ def main() -> int:
                 failed.append(date_str)
                 continue
 
+            api_empty = df is None or df.empty
             df = _filter_by_exchange(filter_by_codes(df, codes), wanted)
+            df = filter_suspended_on(df, date_str)
             written = dbutil.save_suspension_to_db(df, date_str, conn,
                                                    source=args.source)
-            if written == 0:
+            result = classify_write_result(api_empty, written)
+            if result == "api_empty":
+                logger.warning(f"[{date_str}] 停牌名单接口返回空帧，取数可疑")
                 empty.append(date_str)
+            elif result == "filtered_empty":
+                logger.info(f"[{date_str}] 当日无处于停牌状态的股票(接口有数据，"
+                           f"过滤后为空)")
 
         if failed and len(failed) == len(trade_dates):
             logger.error(f"全部 {len(trade_dates)} 个交易日取数失败，任务失败。")

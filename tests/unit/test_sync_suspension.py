@@ -64,3 +64,78 @@ def test_filter_by_codes_no_match_returns_empty():
     """反例: 指定代码全不在帧内 -> 空帧而非全量"""
     df = pd.DataFrame({"symbol": ["600001", "000002"], "name": ["A", "B"]})
     assert sync_suspension.filter_by_codes(df, ["999999"]).empty
+
+
+def _suspension_df(symbols, suspend_times, resume_deadlines):
+    """构造停牌帧: 列全用等长数组, 不混标量, 避免整套 pytest 跑时只剩第一列"""
+    return pd.DataFrame({
+        "symbol": symbols,
+        "suspend_time": pd.to_datetime(suspend_times),
+        "resume_deadline": pd.to_datetime(resume_deadlines),
+    })
+
+
+def test_filter_suspended_on_keeps_open_ended_suspension():
+    """正例: suspend_time <= D 且 resume_deadline 为空(无截止日) -> 保留"""
+    df = _suspension_df(["600000"], ["2026-09-10"], [None])
+    out = sync_suspension.filter_suspended_on(df, "2026-09-11")
+    assert out["symbol"].tolist() == ["600000"]
+
+
+def test_filter_suspended_on_keeps_deadline_on_or_after_d():
+    """正例: suspend_time <= D 且 resume_deadline >= D(含 == D 边界) -> 保留"""
+    df = _suspension_df(["600000", "600001"],
+                        ["2026-09-10", "2026-09-10"],
+                        ["2026-09-11", "2026-09-12"])
+    out = sync_suspension.filter_suspended_on(df, "2026-09-11")
+    assert out["symbol"].tolist() == ["600000", "600001"]
+
+
+def test_filter_suspended_on_excludes_future_suspension():
+    """反例(未来才停牌): suspend_time > D -> 排除。真实案例: 600301 09-14 停牌, 查询日 09-11"""
+    df = _suspension_df(["600301"], ["2026-09-14"], [None])
+    out = sync_suspension.filter_suspended_on(df, "2026-09-11")
+    assert out.empty
+
+
+def test_filter_suspended_on_excludes_already_resumed():
+    """反例(已复牌): resume_deadline < D -> 排除。真实案例: 002998 截止 09-10, 查询日 09-11"""
+    df = _suspension_df(["002998"], ["2026-09-01"], ["2026-09-10"])
+    out = sync_suspension.filter_suspended_on(df, "2026-09-11")
+    assert out.empty
+
+
+def test_filter_suspended_on_keeps_intraday_suspend_time():
+    """反例防护(盘中时刻): suspend_time 是 D 当天 10:30:00 -> 日期部分等于 D, 必须保留"""
+    df = _suspension_df(["600000"], ["2026-09-11 10:30:00"], [None])
+    out = sync_suspension.filter_suspended_on(df, "2026-09-11")
+    assert out["symbol"].tolist() == ["600000"]
+
+
+def test_filter_suspended_on_empty_df_stays_empty():
+    """边界: 空帧进、空帧出, 不抛错"""
+    df = _suspension_df([], [], [])
+    out = sync_suspension.filter_suspended_on(df, "2026-09-11")
+    assert out.empty
+
+
+def test_filter_suspended_on_none_passthrough():
+    """边界: df 为 None 时原样返回, 不抛错"""
+    assert sync_suspension.filter_suspended_on(None, "2026-09-11") is None
+
+
+def test_classify_write_result_written_positive_is_ok():
+    """正例: 写入 > 0 -> ok"""
+    assert sync_suspension.classify_write_result(api_empty=False, written=5) == "ok"
+    assert sync_suspension.classify_write_result(api_empty=True, written=5) == "ok"
+
+
+def test_classify_write_result_api_empty():
+    """反例(接口空帧): 过滤前接口就没数据 -> api_empty, 应计入部分成功"""
+    assert sync_suspension.classify_write_result(api_empty=True, written=0) == "api_empty"
+
+
+def test_classify_write_result_filtered_empty():
+    """反例(过滤后为空): 接口有数据、按 filter_suspended_on 过滤后为 0
+    -> filtered_empty, 不该计入部分成功"""
+    assert sync_suspension.classify_write_result(api_empty=False, written=0) == "filtered_empty"

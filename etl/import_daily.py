@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-13  Claude  取候选传 is_delist=True: 此前用默认 False, 退市股连候选集都进
+#                       不去, 本地已有 .day 文件的退市股(如 600387/000594)永远补不进来
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
 #   2026-08-19  Claude  拆出 build_parser()，供 tools/describe_cli.py 自省参数
 #   2026-09-07  Claude  只传起止日期时改走 bstock 按交易日接口；新增 --by-date 开关，
@@ -141,7 +143,13 @@ def main() -> int:
         begindate     = begin_date,
         enddate       = end_date,
         exchanges_arg = args.exchanges,
-        codes_arg     = args.codes
+        codes_arg     = args.codes,
+        # 退市股纳入取价: 与 etl/adjust.py 对齐。两边不对称本身就是缺陷——adjust 已把
+        # 退市股纳入因子计算, import_daily 却不给它们取价, 会留下「数据链完整」的错觉。
+        # 日常跑批不受影响: get_candidate_data 用 delist_date 作窗口上界, 已退市个股
+        # 在 -b/-e 取当天时 eff_begin > eff_end, 自然落选(见 test_dbutil_logic.py
+        # ::test_get_candidate_data_delist_excluded_from_daily_run)。
+        is_delist     = True
     )
 
     if not candidate_codes:

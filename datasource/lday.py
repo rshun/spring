@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-13  Claude  不再排除退市股: 本地 .day 文件有它们的历史, 排除会让
+#                       600387/000594 这类永远补不进库; 缺文件的仍走 failed 分支
 #   2026-09-12  Claude  B046: fetch_batch_data 补「交易日历为空」守卫——该失败发生在逐股
 #                       循环之前，下面的全批失败判定(failed 为空)根本不触发，会静默返回空表
 #   2026-09-11  Claude  fetch_batch_data 新增「全批失败」判定：逐只失败仍只跳过，但所有
@@ -126,7 +128,12 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     count = 0
     failed: list[str] = []
 
-    active = [(b, e) for _, _, b, e, st in stock_list if st != 'D']
+    # 退市股不再排除: 本地 .day 文件里就有它们的历史(实测 600387.SH 4,324 条 /
+    # 000594.SZ 1,728 条), 排除会让这些数据永远补不进库, 而 etl/adjust.py 已把退市股
+    # 纳入因子计算 —— 两边不对称会造成「数据链完整」的错觉。
+    # 缺 .day 文件的退市股走下面的 failed 分支, 逐只跳过不中止整批(既有行为)。
+    # 注意: bstock / tdx / akstock 仍各自排除退市股, 那三个源走网络, 退市股本就取不到。
+    active = [(b, e) for _, _, b, e, _st in stock_list]
     if not active:
         logger.warning("未获取到任何有效数据")
         return pd.DataFrame(), pd.DataFrame()
@@ -142,9 +149,7 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
             "若该区间本应有交易日，请先运行 python -m etl.trade_cal 补齐日历")
 
     logger.info(f"[本地] 开始获取数据，共计 {total} 只股票...")
-    for symbol, market, begindate, enddate, status in stock_list:
-        if status == "D":
-            continue
+    for symbol, market, begindate, enddate, _status in stock_list:
         count += 1
         code_file: Path | None = None
         try:

@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-13  Claude  跳空闸门由「相对 0.1%」改为「绝对 0.005 元」: 高价股小额分红
+#                       跳空不足 0.1% 被挡在校正之外, 实测 2011 年以来 103 条比例错
+#                       卡在这里(改后残留 4)。股改期跳空恰为 0, 保护不受影响
 #   2026-09-13  Claude  除权参考价校正判据由「相对偏差>2%」改为「绝对偏差>0.005 元」，
 #                       并对纯分红事件放开跳空闸门。原判据过松，2011 年以来 44,574 个
 #                       事件只触发 19 次校正，2,799 条「名义比例≠交易所实际比例」漏网；
@@ -106,8 +109,13 @@ _XDR_PRICE_ROUNDING = 0.005
 # 用 EPS 而非 >= : 数学上的平局在浮点里可能落到阈值任意一侧, 必须让判定确定化。
 _XDR_PRICE_EPS = 1e-9
 
-# 判定「当日价格确实跳空」的相对阈值: A 股报价精度为分, 0.1% 足以区分舍入与真除权。
-_PRICE_GAP_THRESHOLD = 0.001
+# 判定「当日价格确实跳空」的**绝对**阈值(元)。A 股报价量化到分, 任何真实跳空都不小于
+# 0.01 元, 所以「差满半分」实质等价于「pre_close 与前收有任何差异」; 而 2005-06 股改
+# 对价送股当日交易所不做除权处理, pre_close 与前收恰好相等(跳空为 0), 仍落在闸门之外,
+# 那份保护分毫不变(实测股改期残留数 885 -> 885)。
+# 2026-09-13 前是 0.1% 的相对阈值: 高价股的小额分红跳空达不到 0.1%(如 25.74 -> 25.72
+# 仅 0.078%), 校正没资格触发, 实测 2011 年以来 103 条比例错卡在这道闸门上。
+_PRICE_GAP_THRESHOLD = 0.005
 _EVENT_VALUE_COLS = ["dividend", "bonus_share", "allotment_share"]
 RESULT_COLUMNS = ["code", "date", "fore_factor", "back_factor", "adjust_factor"]
 
@@ -341,7 +349,7 @@ def compute_event_factors(events_df: pd.DataFrame,
     if "event_pre_close" in events.columns:
         actual = pd.to_numeric(events["event_pre_close"], errors="coerce")
         price_gapped = (actual > 0) & (
-            (actual - c).abs() / c > _PRICE_GAP_THRESHOLD)
+            (actual - c).abs() > _PRICE_GAP_THRESHOLD)
         # 微额分红放开跳空闸门: 每股派息小到名义参考价与前收相差不足半分时, 交易所
         # 四舍五入后 pre_close == 前收, 当日跳空为 0(如 2.80 派 0.005 -> 2.795 -> 2.80),
         # 交易所实际没做除权, 但名义公式照扣那几厘, 留下一个假跳变。

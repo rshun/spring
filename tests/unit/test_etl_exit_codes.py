@@ -82,6 +82,24 @@ def test_main_exit_code_propagated(module):
 
 # ── import_daily ──────────────────────────────────────────────────────────────
 
+def test_import_daily_requests_delisted_candidates():
+    """正例(载荷改动): 取候选必须传 is_delist=True。
+
+    此前用默认 False, 退市股连候选集都进不去 —— 本地明明有 .day 文件的退市股
+    (实测 600387.SH 4,324 条 / 000594.SZ 1,728 条)永远补不进库, 而 etl/adjust.py
+    已把退市股纳入因子计算, 两边不对称会造成「数据链完整」的错觉。
+    这条断言若失效, 改动会静默回退且现有测试全绿。
+    """
+    with patch.object(import_daily, "myutil") as myutil,          patch.object(import_daily, "dbutil") as dbutil,          patch.object(import_daily, "parse_arguments",
+                      return_value=_args(source="bstock", print_only=False)),          patch.object(import_daily, "check_parameters", return_value=True):
+        dbutil.get_candidate_codes.return_value = [("600519", "SH")]
+        myutil.import_source_module.return_value = _source("fetch_batch_data", (_df(), _df()))
+
+        import_daily.main()
+
+    assert dbutil.get_candidate_codes.call_args.kwargs["is_delist"] is True
+
+
 def test_import_daily_success_returns_0():
     """正例: 正常下载并写库 → 0"""
     with patch.object(import_daily, "myutil") as myutil, \

@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-14  Claude  新增 -j/--json: 退出码恒为 0 无法表达结论, 调用方需要结构化
+#                       出口。status 四态(consistent/diffs_found/incomplete/error),
+#                       逐项给出差异数与 CSV 路径; 退出码契约保持不变
 #   2026-09-13  Claude  新增「恒等式核对」项(tools/checks/adjust_invariant.py):
 #                       back_factor 逐日跳变 vs prev_close/pre_close。它不需要事件
 #                       清单, 因而是本文件唯一能查出「算法根本不知道有这个事件」的
@@ -41,7 +44,9 @@ ADJ_FACTOR_LOCAL 可能尚不存在(并行开发中): 读取失败时降级为�
   python -m tools.check_adjust -b 20260801 -e 20260906 -c 000681 --tolerance 0.001
 """
 import argparse
+import json
 import logging
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -54,6 +59,12 @@ from util import validators as pv
 logger = logging.getLogger("etl.tools.check_adjust")
 
 DEFAULT_TOLERANCE = 1e-3
+
+# --json 的 status 取值。退出码仍恒为 0(见模块 docstring), 调用方应以 status 为准。
+STATUS_CONSISTENT = "consistent"    # 全部对比项一致, 且无未完成项
+STATUS_DIFFS_FOUND = "diffs_found"  # 有差异
+STATUS_INCOMPLETE = "incomplete"    # 无差异但有对比项未完成(如腾讯取数失败)
+STATUS_ERROR = "error"              # 对账过程本身出错
 
 # 对比输出帧的列
 # 集合差行: from_date = 事件日, to_date = None;
@@ -78,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f'相对误差容忍度 (默认 {DEFAULT_TOLERANCE})')
     parser.add_argument('-c', '--codes', nargs='+',
                         help='指定股票代码列表 (例如: 600519,000681)，不传则处理窗口内有事件的全部股票')
+    parser.add_argument('-j', '--json', action='store_true',
+                        help='把对账结果以 JSON 输出到 stdout(日志改走 stderr)，供程序调用。'
+                             '退出码恒为 0，程序调用方请以 JSON 里的 status 字段为准')
     return parser
 
 
@@ -411,10 +425,15 @@ def _parse_codes_arg(codes: list[str] | None) -> list[str]:
     return out
 
 
+def _csv_path(tag: str, begin: str, end: str) -> Path:
+    """差异 CSV 的落盘路径(不创建目录, 供 --json 输出引用)"""
+    return (Path(__file__).parent.parent / "csv"
+            / f"check_adjust_{tag}_{begin}_{end}.csv")
+
+
 def _write_diff_csv(tag: str, begin: str, end: str, df: pd.DataFrame) -> Path | None:
-    csv_dir = Path(__file__).parent.parent / "csv"
-    csv_dir.mkdir(parents=True, exist_ok=True)
-    csv_file = csv_dir / f"check_adjust_{tag}_{begin}_{end}.csv"
+    csv_file = _csv_path(tag, begin, end)
+    csv_file.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(csv_file, index=False, encoding="utf-8-sig")
     return csv_file
 
@@ -428,6 +447,11 @@ def _report_diffs(label: str, tag: str, begin: str, end: str,
     csv_file = _write_diff_csv(tag, begin, end, diff)
     logger.warning(f"[{label}]    发现 {len(diff)} 条差异，明细已写入: {csv_file}")
     return len(diff)
+
+
+def _emit_json(payload: dict) -> None:
+    """JSON 只写 stdout；日志已在 main() 里改走 stderr，两者不会混。"""
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 def _build_summary(total: int, incomplete: list[str]) -> tuple[str, bool]:
@@ -451,7 +475,20 @@ def _build_summary(total: int, incomplete: list[str]) -> tuple[str, bool]:
 def main() -> int:
     """只告警不阻断: 无论是否有差异均返回 0"""
     args = parse_arguments()
-    myutil.configure_etl_logging()
+    # --json 时 stdout 必须只有 JSON, 日志得改走 stderr(与 tools/check_daily.py 一致)
+    myutil.configure_etl_logging(console_stream=sys.stderr if args.json else None)
+
+    # 逐项记录对比结果, 供 --json 出口使用。包一层而不改 _report_diffs 的签名:
+    # 测试用 monkeypatch 替换该函数, 改签名会一并改坏那些用例。
+    checks: list[dict] = []
+
+    def record(label: str, tag: str, diff) -> int:
+        n = _report_diffs(label, tag, args.begin, args.end, diff)
+        checks.append({
+            "label": label, "tag": tag, "count": n,
+            "csv_path": str(_csv_path(tag, args.begin, args.end)) if n else None,
+        })
+        return n
 
     if not check_parameters(args.begin, args.end):
         return 0
@@ -488,8 +525,8 @@ def main() -> int:
         local_df = _filter_by_codes(local_df, "code", symbols)
 
         if local_df is not None and raw_df is not None:
-            total += _report_diffs(
-                "LOCAL vs RAW", "local_vs_raw", args.begin, args.end,
+            total += record(
+                "LOCAL vs RAW", "local_vs_raw",
                 diff_factor_frames(local_df, raw_df, args.tolerance))
 
         # 恒等式核对: 纯 SQL, 不依赖事件清单与外部接口, 故放在腾讯拉取之前——
@@ -507,9 +544,8 @@ def main() -> int:
                 logger.warning(f"[{adjust_invariant.LABEL}]    执行失败({e})，本项未完成")
                 incomplete.append(f"恒等式核对未完成({e.__class__.__name__})")
             else:
-                total += _report_diffs(
-                    adjust_invariant.LABEL, adjust_invariant.CSV_TAG,
-                    args.begin, args.end, invariant_diff)
+                total += record(adjust_invariant.LABEL,
+                                adjust_invariant.CSV_TAG, invariant_diff)
 
         # 腾讯对账范围: LOCAL/RAW 窗口内出现过的股票并集(不含基准行,
         # 否则所有有历史事件的股票都会被拉腾讯行情)
@@ -560,15 +596,15 @@ def main() -> int:
                 if tx_df.empty:
                     logger.info("[腾讯对账  ]    成功取数但窗口内无事件元数据")
                 if local_df is not None:
-                    total += _report_diffs(
-                        "腾讯 vs LOCAL", "tx_vs_local", args.begin, args.end,
+                    total += record(
+                        "腾讯 vs LOCAL", "tx_vs_local",
                         # LOCAL 经水位缩放，首行无真实前值时不能假定 1.0
                         diff_tx_vs_factor(tx_df, local_df, "local", args.tolerance,
                                           unit_baseline_ok=False,
                                           tx_fetched_codes=fetched_codes))
                 if raw_df is not None:
-                    total += _report_diffs(
-                        "腾讯 vs RAW", "tx_vs_raw", args.begin, args.end,
+                    total += record(
+                        "腾讯 vs RAW", "tx_vs_raw",
                         # RAW 为 baostock 绝对水位, 无前值时不得用 1.0 基准
                         diff_tx_vs_factor(tx_df, raw_df, "raw", args.tolerance,
                                           unit_baseline_ok=False,
@@ -576,17 +612,47 @@ def main() -> int:
                 if gbbq_df is None:
                     incomplete.append("gbbq 读取失败，分红额对账未完成")
                 else:
-                    total += _report_diffs(
-                        "腾讯 vs gbbq", "tx_vs_gbbq", args.begin, args.end,
+                    total += record(
+                        "腾讯 vs gbbq", "tx_vs_gbbq",
                         diff_tx_vs_gbbq(tx_df, gbbq_df, args.tolerance,
                                         tx_fetched_codes=fetched_codes))
 
         logger.info("-" * 60)
         message, is_warning = _build_summary(total, incomplete)
         (logger.warning if is_warning else logger.info)(message)
+
+        if args.json:
+            _emit_json({
+                "tool": "check_adjust",
+                "status": (STATUS_DIFFS_FOUND if total
+                           else STATUS_INCOMPLETE if incomplete
+                           else STATUS_CONSISTENT),
+                "exit_code": 0,
+                "summary": message,
+                "params": {"begin": begin_date, "end": end_date,
+                           "tolerance": args.tolerance, "codes": args.codes},
+                "diff_total": total,
+                "checks": checks,
+                "incomplete": incomplete,
+                "note": "退出码恒为 0(只告警不阻断), 请以 status 判断结论",
+                "error": None,
+            })
         return 0
     except Exception as e:
         logger.error(f"对账过程中发生错误: {e}")
+        if args.json:
+            _emit_json({
+                "tool": "check_adjust",
+                "status": STATUS_ERROR,
+                "exit_code": 0,
+                "params": {"begin": args.begin, "end": args.end,
+                           "tolerance": args.tolerance, "codes": args.codes},
+                "diff_total": total if "total" in dir() else None,
+                "checks": checks,
+                "incomplete": incomplete if "incomplete" in dir() else [],
+                "note": "退出码恒为 0(只告警不阻断), 请以 status 判断结论",
+                "error": str(e),
+            })
         return 0
     finally:
         if conn is not None:

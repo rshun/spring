@@ -18,6 +18,17 @@ def _setup(conn):
         insert_stock_info(conn, sym, ex, "MAIN", "2010-01-01")
 
 
+def _st_stock(conn, symbol="600009", exchange="SH", name="*ST测试"):
+    """插入一只名称带 ST 前缀的股票(is_st 字段留空, 验证名称兜底)"""
+    code = f"{symbol}.{exchange}"
+    conn.execute(
+        "INSERT INTO STOCK_INFO (code, symbol, name, exchange, board, "
+        "list_date, list_status, created_at, last_updated_at) "
+        "VALUES (?, ?, ?, ?, 'MAIN', '2010-01-01', 'L', now(), now())",
+        [code, symbol, name, exchange])
+    return code
+
+
 def _pool(conn, code, limit_type, close=11.0, turnover_rate=3.5,
           float_mv=5.0e9, total_mv=8.0e9):
     conn.execute(
@@ -40,6 +51,61 @@ def _basic(conn, code, is_up=0, is_down=0, limit_up=11.0, limit_down=9.0,
 def _run(conn, limit_type="U"):
     return check_limit_pool(conn, [DATE], "2026-09-11", "2026-09-11",
                             limit_type, "", "", [])
+
+
+def test_st_extra_flag_not_counted_as_diff(mem_db):
+    """正例: ST 股库内已标涨停而外部池未收 -> 不计入差异, 但仍写进 CSV。
+
+    akshare 涨跌停池(东财口径)不收 ST 股, 两侧股票池范围不同, 不是数据错。
+    实测 2026-09-14 池内 55 涨/16 跌与库内非 ST 的 55/16 完全相等, 而库内另有
+    4 只 ST 池内一只不收 —— 每个交易日都会出现, 若计入差异会天天刷假告警。
+    """
+    _setup(mem_db)
+    st = _st_stock(mem_db)
+    _pool(mem_db, "600001.SH", "U")
+    _basic(mem_db, "600001.SH", is_up=1)
+    _basic(mem_db, st, is_up=1)                 # ST 标了涨停, 池内没有
+    result = _run(mem_db)
+    assert result.count == 0, "ST 多标不得计入差异"
+    assert result.status == checker.STATUS_OK
+
+
+def test_non_st_extra_flag_still_counted(mem_db):
+    """反例: 非 ST 股的「库内多标」照旧计入差异 —— 不能连它一起放过"""
+    _setup(mem_db)
+    _pool(mem_db, "600001.SH", "U")
+    _basic(mem_db, "600001.SH", is_up=1)
+    _basic(mem_db, "600002.SH", is_up=1)        # 非 ST 多标
+    result = _run(mem_db)
+    assert result.count == 1
+    assert "库内多标涨停" == result.rows[0]["issue"]
+
+
+def test_st_missing_flag_still_counted(mem_db):
+    """反例(防盲区): 池内有 ST 而库内未标 -> 仍须计入差异。
+
+    只放过「多标」一侧。若池子口径将来变了收了 ST, 漏标必须还能查出来 ——
+    这正是不把 ST 整体排除出比对的原因。
+    """
+    _setup(mem_db)
+    st = _st_stock(mem_db)
+    _pool(mem_db, st, "U")                      # 池内收了这只 ST
+    _basic(mem_db, st, is_up=0)                 # 库内没标
+    result = _run(mem_db)
+    assert result.count == 1
+    assert "库内漏标涨停" == result.rows[0]["issue"]
+
+
+def test_st_detected_by_is_st_field(mem_db):
+    """正例: is_st=1 但名称不含 ST 的也算 ST(字段与名称互为兜底)"""
+    _setup(mem_db)
+    mem_db.execute(
+        "INSERT INTO DAILY_BASIC (code, trade_date, is_limit_up, is_st) "
+        "VALUES ('600002.SH', ?, 1, 1)", [DATE])
+    _pool(mem_db, "600001.SH", "U")
+    _basic(mem_db, "600001.SH", is_up=1)
+    assert _run(mem_db).count == 0
+
 
 
 def test_consistent_produces_no_output(mem_db):

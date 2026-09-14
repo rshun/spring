@@ -7,6 +7,9 @@
 #   2026-09-06  Claude  BUG-004/BUG-005 回归: unit_baseline_ok 区分 LOCAL/RAW 语义、
 #                       tx_fetched_codes 判定基准、_build_summary 如实汇总
 """tools.check_adjust 纯对比逻辑单元测试(DataFrame 注入, 不触库不触网)"""
+import json
+import sys
+
 import pandas as pd
 import pytest
 
@@ -461,6 +464,103 @@ def test_summary_diffs_and_incomplete_both_shown():
     assert warn is True
 
 
+# ── --json 出口 ───────────────────────────────────────────────────────────────
+#
+# 退出码恒为 0(只告警不阻断), 所以它无法表达结论 —— 有差异返回 0, 对账崩了也返回 0。
+# 程序调用方只能靠 JSON 的 status。以下用例守住这条契约。
+
+def _json_harness(monkeypatch, *, diffs=0, incomplete_item=None, boom=False):
+    """跑一次 main(--json), 返回 (exit_code, 解析后的 JSON)"""
+    from types import SimpleNamespace
+    from datasource import txstock
+    frame = _factorb([("000001.SZ", "2026-08-03", 3.9, 0)])
+    monkeypatch.setattr(ca, "parse_arguments", lambda: SimpleNamespace(
+        begin="20260803", end="20260803", codes=None, tolerance=0.001, json=True))
+    monkeypatch.setattr(ca, "check_parameters", lambda *a: True)
+    log_kw = {}
+    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda **kw: log_kw.update(kw))
+    if boom:
+        monkeypatch.setattr(ca.dbutil, "get_connection",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    else:
+        monkeypatch.setattr(ca.dbutil, "get_connection",
+                            lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(ca, "_load_factor_events",
+                        lambda conn, table, *a: None if incomplete_item else frame.copy())
+    monkeypatch.setattr(ca, "_load_gbbq_events", lambda *a: pd.DataFrame())
+    monkeypatch.setattr(txstock, "fetch_xdr_events",
+                        lambda *a: (_tx([("000001.SZ", "2026-08-03", 1.0, 1.01)]), []))
+    monkeypatch.setattr(ca, "_report_diffs", lambda *a: diffs)
+    # 桩掉恒等式核对: 它要真连库, 桩连接没有 execute 会让本项降级成「未完成」,
+    # 那样 status 永远到不了 consistent, 测不出想测的那一态。
+    monkeypatch.setattr(ca.adjust_invariant, "check_invariant",
+                        lambda *a, **k: pd.DataFrame())
+    return ca.main(), log_kw
+
+
+def test_json_status_consistent(monkeypatch, capsys):
+    """正例: 零差异且无未完成项 -> status=consistent, 退出码仍为 0"""
+    rc, _ = _json_harness(monkeypatch, diffs=0)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["status"] == ca.STATUS_CONSISTENT
+    assert payload["diff_total"] == 0
+    assert payload["exit_code"] == 0
+
+
+def test_json_status_diffs_found(monkeypatch, capsys):
+    """反例: 有差异 -> status=diffs_found, 但退出码依旧 0(契约不变)"""
+    rc, _ = _json_harness(monkeypatch, diffs=3)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, "退出码契约必须保持恒 0"
+    assert payload["status"] == ca.STATUS_DIFFS_FOUND
+    assert payload["diff_total"] > 0
+
+
+def test_json_status_incomplete(monkeypatch, capsys):
+    """反例: 零差异但有对比项未完成 -> status=incomplete, 不得报成 consistent。
+
+    「无差异」与「没查」是两回事 —— 这正是 BUG-005 当年的教训, JSON 出口必须区分。
+    """
+    rc, _ = _json_harness(monkeypatch, diffs=0, incomplete_item=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["status"] == ca.STATUS_INCOMPLETE
+    assert payload["diff_total"] == 0
+    assert payload["incomplete"], "未完成项必须如实列出"
+
+
+def test_json_status_error_on_exception(monkeypatch, capsys):
+    """反例: 对账过程抛异常 -> status=error。退出码仍为 0, 这正是需要 JSON 的原因"""
+    rc, _ = _json_harness(monkeypatch, boom=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["status"] == ca.STATUS_ERROR
+    assert "boom" in payload["error"]
+
+
+def test_json_checks_carry_count_and_csv_path(monkeypatch, capsys):
+    """正例: checks 逐项给出 label/count/csv_path, 无差异时 csv_path 为 None"""
+    _json_harness(monkeypatch, diffs=0)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["checks"], "checks 不应为空"
+    for item in payload["checks"]:
+        assert set(item) == {"label", "tag", "count", "csv_path"}
+        assert item["csv_path"] is None      # count 为 0 时不产出 CSV
+
+
+def test_json_redirects_logging_to_stderr(monkeypatch, capsys):
+    """反例: --json 时日志必须改走 stderr, 否则会混进 stdout 让调用方解析失败。
+
+    只断言 stdout 能解析是不够的 —— 本用例把 configure_etl_logging 桩成空函数,
+    真实日志配置根本没跑, stdout 自然干净, 那样测不出这条契约。
+    故直接断言传给它的 console_stream。
+    """
+    _, log_kw = _json_harness(monkeypatch, diffs=0)
+    assert log_kw.get("console_stream") is sys.stderr
+    json.loads(capsys.readouterr().out)       # 顺带确认 stdout 可整体解析
+
+
 @pytest.mark.parametrize("local_ok,raw_ok", [(True, True), (False, True), (True, False), (False, False)])
 def test_main_skips_unavailable_sources(monkeypatch, caplog, local_ok, raw_ok):
     import logging
@@ -468,9 +568,9 @@ def test_main_skips_unavailable_sources(monkeypatch, caplog, local_ok, raw_ok):
     from datasource import txstock
     frame = _factorb([("000001.SZ", "2026-08-03", 3.9, 0)])
     monkeypatch.setattr(ca, "parse_arguments", lambda: SimpleNamespace(
-        begin="20260803", end="20260803", codes=None, tolerance=0.001))
+        begin="20260803", end="20260803", codes=None, tolerance=0.001, json=False))
     monkeypatch.setattr(ca, "check_parameters", lambda *a: True)
-    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda: None)
+    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda **kw: None)
     monkeypatch.setattr(ca.dbutil, "get_connection", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(ca, "_load_factor_events", lambda conn, table, *a:
                         frame.copy() if (local_ok if table == "ADJ_FACTOR_LOCAL" else raw_ok) else None)
@@ -509,9 +609,9 @@ def test_invariant_failure_degrades_without_aborting_other_checks(monkeypatch, c
     from datasource import txstock
     frame = _factorb([("000001.SZ", "2026-08-03", 3.9, 0)])
     monkeypatch.setattr(ca, "parse_arguments", lambda: SimpleNamespace(
-        begin="20260803", end="20260803", codes=None, tolerance=0.001))
+        begin="20260803", end="20260803", codes=None, tolerance=0.001, json=False))
     monkeypatch.setattr(ca, "check_parameters", lambda *a: True)
-    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda: None)
+    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda **kw: None)
     monkeypatch.setattr(ca.dbutil, "get_connection", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(ca, "_load_factor_events", lambda conn, table, *a: frame.copy())
     monkeypatch.setattr(ca, "_load_gbbq_events", lambda *a: pd.DataFrame())
@@ -540,9 +640,9 @@ def test_missing_both_factor_sources_still_queries_independent_codes(monkeypatch
     from datasource import txstock
     empty = _factorb([])
     monkeypatch.setattr(ca, "parse_arguments", lambda: SimpleNamespace(
-        begin="20260803", end="20260803", codes=["000001"] if explicit else None, tolerance=0.001))
+        begin="20260803", end="20260803", codes=["000001"] if explicit else None, tolerance=0.001, json=False))
     monkeypatch.setattr(ca, "check_parameters", lambda *a: True)
-    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda: None)
+    monkeypatch.setattr(ca.myutil, "configure_etl_logging", lambda **kw: None)
     monkeypatch.setattr(ca.dbutil, "get_connection", lambda: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(ca, "_load_factor_events", lambda *a: empty)
     monkeypatch.setattr(ca, "_load_gbbq_events", lambda *a: pd.DataFrame(

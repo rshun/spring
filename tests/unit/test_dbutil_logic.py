@@ -138,6 +138,47 @@ def test_normalize_close_anomaly_does_not_touch_other_dates():
     assert _normalize_daily_df(other)["close"].iloc[0] == 16.71
 
 
+def _amt_df(amount=6256618071.1, code="300999.SZ", date="2020-11-09", volume=110605581):
+    """300999.SZ 金龙鱼 2020-11-09 的真实错值行。
+
+    baostock 记成交额 62.57 亿, 而 62.57e8 / 110,605,581 股 = 均价 56.57 元,
+    低于当日最低价 58.58 —— 按定义不可能(所有成交都在 [low, high] 内)。
+    通达信 .day 记 67.65 亿, 均价 61.16 落在区间中间。2026-09-14 由用户用两个
+    独立数据源复核确认为 67.65 亿。
+    注: 该错值与前一交易日 11-06 的 amount 完全相同, 是源侧串行而非随机误差。
+    """
+    return pd.DataFrame({"code": [code], "date": [date],
+                         "open": [61.00], "high": [64.64], "low": [58.58],
+                         "close": [61.66], "pre_close": [60.90],
+                         "volume": [volume], "amount": [amount],
+                         "tradestatus": [1]})
+
+
+def test_normalize_fixes_known_amount_anomaly():
+    """正例: 已核实的成交额错值被修正, 修正后均价落回 [low, high]"""
+    got = _normalize_daily_df(_amt_df())
+    assert got["amount"].iloc[0] == 6764569088.0
+    vwap = got["amount"].iloc[0] / got["volume"].iloc[0]
+    assert 58.58 <= vwap <= 64.64
+
+
+@pytest.mark.parametrize("field,value", [
+    ("amount", 6.3e9),        # 上游改了成交额本身 —— 最要紧的一项
+    ("volume", 110605580),
+])
+def test_normalize_amount_anomaly_requires_full_signature(field, value):
+    """反例: 签名任一字段不符即不得覆盖(上游修复或改值时规则自动失效)"""
+    changed = _amt_df()
+    changed.loc[0, field] = value
+    got = _normalize_daily_df(changed)["amount"].iloc[0]
+    assert got == (value if field == "amount" else 6256618071.1)
+
+
+def test_normalize_amount_anomaly_does_not_touch_other_dates():
+    """反例: 同一股票的其它交易日不受影响"""
+    assert _normalize_daily_df(_amt_df(date="2020-11-10"))["amount"].iloc[0] == 6256618071.1
+
+
 # ── get_connection 异常 ───────────────────────────────────────────────────────
 
 def test_get_connection_readonly_missing_file_raises(tmp_path):

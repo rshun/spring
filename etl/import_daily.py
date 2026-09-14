@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-14  Claude  -p 由打屏改为按股票导出 CSV 到 csv/ 目录, 屏幕不再输出数据;
+#                       并强制要求同时指定 -c(否则全市场会产出五千多对文件)
 #   2026-09-13  Claude  取候选传 is_delist=True: 此前用默认 False, 退市股连候选集都进
 #                       不去, 本地已有 .day 文件的退市股(如 600387/000594)永远补不进来
 #   2026-08-19  Claude  main() 返回退出码(0成功/1失败)并由 sys.exit 传出，供外部判定成败
@@ -23,6 +25,8 @@ import argparse
 import duckdb
 import logging
 import sys
+from pathlib import Path
+
 from util import dbutil, myutil
 from util import validators as pv
 
@@ -73,10 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '-p', '--print-only',
         action='store_true',
-        help='仅将获取结果（含列名）输出到屏幕，不写入数据库'
+        help='仅把获取结果按股票导出为 CSV 到 csv/ 目录，不写入数据库；'
+             '必须同时指定 -c。文件名 <code>_daily_<begin>_<end>.csv 与 '
+             '<code>_basic_<begin>_<end>.csv，该股无数据则不产出对应文件'
     )
 
     return parser
+
+
+# 导出目录: 与 check_daily / check_adjust 的差异明细同目录, 已在 .gitignore 中
+CSV_DIR = Path(__file__).resolve().parents[1] / "csv"
 
 
 def resolve_by_date(source: str = 'bstock') -> bool:
@@ -104,9 +114,47 @@ def resolve_by_date(source: str = 'bstock') -> bool:
 
 
 def parse_arguments() -> argparse.Namespace:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    # -p 强制要求 -c: 不带 -c 时候选是全市场, 会一次生成五千多对文件。
+    # 拦在 parse_arguments 而非 build_parser —— 后者必须保持无副作用,
+    # tools/describe_cli.py 靠它自省参数(契约 C4)。
+    if args.print_only and not args.codes:
+        parser.error("-p/--print-only 必须同时指定 -c/--codes，"
+                     "否则会对全市场每只股票各产出一对 CSV")
     args.date_range_only = resolve_by_date(args.source)
     return args
+
+
+def _export_csv(stock_data, basic_df, begin: str, end: str) -> int:
+    """按股票导出 CSV, 返回产出的文件数。屏幕不输出数据。
+
+    begin/end 用命令行原样的 YYYYMMDD, 不用转换后的 YYYY-MM-DD —— 文件名里
+    不带分隔符更省事, 也与约定的命名一致。
+    """
+    CSV_DIR.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for tag, df in (("daily", stock_data), ("basic", basic_df)):
+        if df is None or df.empty or "code" not in df.columns:
+            # basic 缺失是常态(部分数据源不提供), 不产出空文件也不报错
+            logger.info(f"无 {tag} 数据，跳过导出")
+            continue
+        seen: dict[str, str] = {}
+        for code, sub in df.groupby("code", sort=True):
+            # 文件名取 6 位裸代码, 不带 .SH/.SZ 后缀
+            symbol = str(code).split(".")[0]
+            if symbol in seen:
+                # 同一裸代码撞名会静默覆盖前一只。A 股 6 位代码按前缀区分市场,
+                # 正常不会撞; 真撞上必须报出来, 不能让用户拿到少一半的结果。
+                logger.error(f"裸代码 {symbol} 同时对应 {seen[symbol]} 与 {code}，"
+                             f"文件名冲突，已跳过 {code}")
+                continue
+            seen[symbol] = str(code)
+            path = CSV_DIR / f"{symbol}_{tag}_{begin}_{end}.csv"
+            sub.to_csv(path, index=False, encoding="utf-8-sig")
+            logger.info(f"已导出 {path}（{len(sub)} 行）")
+            written += 1
+    return written
 
 
 def check_parameters(begin: str, end: str) -> bool:
@@ -176,10 +224,11 @@ def main() -> int:
             stock_data, basic_df = module.fetch_batch_data(candidate_codes)
 
         if args.print_only:
-            print("stock_data:")
-            print(stock_data.to_string(index=False) if stock_data is not None else "None")
-            print("\nbasic_df:")
-            print(basic_df.to_string(index=False) if basic_df is not None else "None")
+            written = _export_csv(stock_data, basic_df, args.begin, args.end)
+            if not written:
+                logger.warning("未获取到任何数据，未产出文件")
+                return 1
+            logger.info(f"导出完成，共 {written} 个文件，目录: {CSV_DIR}")
             return 0
 
         conn = dbutil.get_connection(is_read_only=False)

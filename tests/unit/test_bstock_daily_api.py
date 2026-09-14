@@ -158,7 +158,13 @@ def test_missing_interface_reports_environment_error():
 
 
 def test_print_only_retains_old_route():
-    with patch("sys.argv", ["etl", "-b", "20260901", "-e", "20260904", "-p"]):
+    """-p 让路由退回逐股接口。
+
+    2026-09-14 起 -p 必须同时带 -c(否则全市场会产出五千多对 CSV), 故夹具补上 -c;
+    被测的仍是「带 -p 就不走按日接口」这条路由规则。
+    """
+    with patch("sys.argv", ["etl", "-b", "20260901", "-e", "20260904",
+                            "-p", "-c", "600519"]):
         assert import_daily.parse_arguments().date_range_only is False
 
 

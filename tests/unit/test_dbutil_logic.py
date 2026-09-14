@@ -94,6 +94,50 @@ def test_normalize_does_not_promote_unknown_status():
     assert _normalize_daily_df(df)["tradestatus"].iloc[0] == -1
 
 
+def _anomaly_df(close=16.71, code="600822.SH", date="2016-12-01"):
+    """600822.SH 2016-12-01 的真实错值行: 只有 close 错, OHL 与独立源完全一致"""
+    return pd.DataFrame({"code": [code], "date": [date],
+                         "open": [16.66], "high": [16.95], "low": [16.50],
+                         "close": [close], "pre_close": [16.68],
+                         "volume": [7540113], "amount": [126000000.0],
+                         "tradestatus": [1]})
+
+
+def test_normalize_fixes_known_close_anomaly():
+    """正例: 已核实的单点收盘价错值被修正。
+
+    600822.SH 2016-12-01: baostock 记 16.71, 而同花顺 dump、通达信本地 .day 文件
+    与 baostock 自己次日的 pre_close 三方一致为 16.70 —— 三比一, 且 open/high/low
+    完全正确, 只有 close 一个字段错。
+    """
+    assert _normalize_daily_df(_anomaly_df())["close"].iloc[0] == 16.70
+
+
+@pytest.mark.parametrize("field,value", [
+    ("close", 16.72),   # 上游改了收盘价本身 —— 最要紧的一项:
+                        # 不校验它就会把任意收盘价都覆盖成 16.70
+    ("low",   16.40),
+    ("high",  17.00),
+    ("open",  16.60),
+])
+def test_normalize_close_anomaly_requires_full_signature(field, value):
+    """反例: 整条记录签名匹配, 任一字段与已核实的错误记录不符即不得覆盖。
+
+    与 gbbq 定点修正同一原则 —— 上游若修复或改值, 规则自动不再命中,
+    绝不拿一条陈旧的硬编码去盖真实数据。
+    """
+    changed = _anomaly_df()
+    changed.loc[0, field] = value
+    got = _normalize_daily_df(changed)["close"].iloc[0]
+    assert got == (value if field == "close" else 16.71)
+
+
+def test_normalize_close_anomaly_does_not_touch_other_dates():
+    """反例: 同一股票的其它交易日不受影响"""
+    other = _anomaly_df(date="2016-12-02")
+    assert _normalize_daily_df(other)["close"].iloc[0] == 16.71
+
+
 # ── get_connection 异常 ───────────────────────────────────────────────────────
 
 def test_get_connection_readonly_missing_file_raises(tmp_path):

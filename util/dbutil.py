@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-14  Claude  新增 _KNOWN_DAILY_CLOSE_ANOMALIES: 定点修正 baostock 已核实
+#                       的 4 处单点收盘价错值(2016-12-01 四只沪市), 三方独立源一致
 #   2026-09-13  Claude  _normalize_daily_df 纠正「有成交却标非交易日」的 tradestatus
 #                       (volume>0 且 amount>0), 实测全库 4 行; 只看 volume 会误伤
 #                       停牌占位行——它结转 volume 但不结转 amount
@@ -245,6 +247,23 @@ def get_connection(is_read_only: bool = True) -> duckdb.DuckDBPyConnection:
     return duckdb.connect(str(db_path), read_only=is_read_only)
 
 
+# baostock 已核实的单点收盘价错值。
+# 判据: 该日 close 与次一交易日的 pre_close 对不上, 而独立源(同花顺 dump、通达信本地
+# .day 文件)与 baostock 自己的次日 pre_close 三方一致 —— 三比一, 且同源的
+# open/high/low 完全正确, 只有 close 一个字段错。
+# 与 datasource/tdx_offline.py 的 gbbq 定点修正同样按整条记录签名匹配: 上游若修复
+# 或改值, 本规则自动不再命中, 不会覆盖真实数据。
+# 不做通用规则的原因: 「close[t] == pre_close[t+1]」要到次日才能判定, 入库时拿不到;
+# 且该判据无法区分「收盘价错」与「漏了一个除权事件」, 必须逐条外部仲裁后才能定点。
+_KNOWN_DAILY_CLOSE_ANOMALIES = (
+    # code, date, open, high, low, 错误的 close, 已核实的 close
+    ("600822.SH", "20161201", 16.66, 16.95, 16.50, 16.71, 16.70),
+    ("603101.SH", "20161201", 27.80, 28.43, 27.51, 28.22, 28.21),
+    ("603117.SH", "20161201", 17.59, 17.65, 17.46, 17.59, 17.58),
+    ("603737.SH", "20161201", 82.60, 82.88, 82.00, 82.55, 82.51),
+)
+
+
 def _normalize_daily_df(df: pd.DataFrame) -> pd.DataFrame:
     """统一补齐 pre_close / tradestatus 缺失字段，原地修改并返回"""
     if "pre_close" not in df.columns:
@@ -274,7 +293,28 @@ def _normalize_daily_df(df: pd.DataFrame) -> pd.DataFrame:
         traded = (pd.to_numeric(df["volume"], errors="coerce").fillna(0) > 0) &                  (pd.to_numeric(df["amount"], errors="coerce").fillna(0) > 0)
         df.loc[traded & (df["tradestatus"] == 0), "tradestatus"] = 1
 
+    _fix_known_close_anomalies(df)
     return df
+
+
+def _fix_known_close_anomalies(df: pd.DataFrame) -> None:
+    """就地修正 _KNOWN_DAILY_CLOSE_ANOMALIES 中已核实的单点收盘价错值"""
+    if not {"code", "date", "open", "high", "low", "close"}.issubset(df.columns):
+        return
+    codes = df["code"].astype(str)
+    dates = (df["date"].astype(str)
+             .str.replace("-", "", regex=False).str.slice(0, 8))
+    num = {c: pd.to_numeric(df[c], errors="coerce")
+           for c in ("open", "high", "low", "close")}
+    for code, date, o, h, low, bad, good in _KNOWN_DAILY_CLOSE_ANOMALIES:
+        sig = ((codes == code) & (dates == date)
+               & num["open"].eq(o) & num["high"].eq(h)
+               & num["low"].eq(low) & num["close"].eq(bad))
+        n = int(sig.sum())
+        if n:
+            df.loc[sig, "close"] = good
+            logger.warning("已修正已核实的收盘价错值: %s/%s close %s -> %s（%d 条）",
+                           code, date, bad, good, n)
 
 
 def save_base_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> None:

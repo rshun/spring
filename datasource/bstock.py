@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-14  Claude  fetch_batch_data 删除「status==D 即跳过」: 上游 is_delist=True
+#                       已放行退市股, 数据源层再否决一次导致退市股永远取不到
+#                       (实测 baostock 对 002898/600193/000004 均有数据)
 #   2026-06-18  Claude  日线下载校验 turn：正常交易日(tradestatus=1)若 turn 为空，
 #                       视为数据源偶发抽风，重新登录重试，重试耗尽则停止下载
 #   2026-08-19  Claude  3 处批量采集的进度日志改「条数或时间」双条件触发(契约 C1b)，
@@ -499,13 +502,16 @@ def fetch_batch_data(stock_list: list[tuple]) -> tuple[pd.DataFrame, pd.DataFram
     try:
         logger.info(f"[baostock插件] 开始获取交易明细数据，共计 {total} 只股票...")
 
-        for symbol, market, begindate, enddate, status in stock_list:
+        # 不再按 status 跳过退市股: 「要哪些股票」由 get_candidate_codes 决定,
+        # 数据源只负责把给定的这批取回来。此处二次否决是错位的, 且它静默生效
+        # (不计 processed、不进 failed、不打日志), 表现为「成功获取 0 条记录」。
+        # 日常跑批不会因此误拉退市股: 候选集以 delist_date 为窗口上界, -b/-e 取
+        # 当天时退市股 eff_begin > eff_end, 自然落选。
+        for symbol, market, begindate, enddate, _status in stock_list:
             symbol = str(symbol)
             market = str(market)
 
             if symbol.startswith("9"):
-                continue
-            if status == "D":
                 continue
 
             processed += 1

@@ -1,4 +1,5 @@
 # 修改记录:
+#   2026-09-17  Claude  新增盘中临停的正反例: 该类当天照常成交, 预期 tradestatus=1
 #   2026-09-13  Claude  _run 传给 begin/end 的日期改成 "YYYY-MM-DD"(此前用
 #                       "20240426" 紧凑格式), 与实际调用约定(check_daily.py
 #                       run_warn_checks 传 YYYY-MM-DD)对齐，防止测试守着错误约定
@@ -25,10 +26,11 @@ def _daily(conn, code, tradestatus):
         "VALUES (?, ?, 10.0, ?)", [code, DATE, tradestatus])
 
 
-def _susp(conn, code):
+def _susp(conn, code, period=None):
+    """period=None 模拟上游未给停牌类别, 应按全天停牌处理(见 suspension.py docstring)"""
     conn.execute(
-        "INSERT INTO SUSPENSION_DAILY (code, trade_date, name, source) "
-        "VALUES (?, ?, '测试', 'akstock')", [code, DATE])
+        "INSERT INTO SUSPENSION_DAILY (code, trade_date, name, suspend_period, source) "
+        "VALUES (?, ?, '测试', ?, 'akstock')", [code, DATE, period])
 
 
 def _run(conn):
@@ -161,3 +163,61 @@ def test_code_filter_with_multiple_placeholders(mem_db):
                               "", "AND i.symbol IN (?, ?)", ["600001", "000003"])
     codes = {r["code"] for r in result.rows}
     assert codes == {"600001.SH", "000003.SZ"}
+
+
+# ── 盘中临停: 预期方向与全天停牌相反 ──────────────────────────────────────────
+
+def test_intraday_suspension_with_trading_is_consistent(mem_db):
+    """正例(本次修复的回归点): 盘中临停 + tradestatus=1 -> 一致, 不得输出。
+
+    临停当天照常成交, 只是盘中暂停几分钟。实测 601091.SH 沈鼓集团 2026-09-17
+    新股首日涨幅触发临停, 当天成交 1.68 亿股, 旧逻辑把它报成
+    「外部停牌但库内标为正常交易」—— 新股首日与 ST 异动都会触发临停,
+    不区分则持续误报。
+    """
+    _setup(mem_db)
+    _susp(mem_db, "600001.SH", "盘中停牌")
+    _daily(mem_db, "600001.SH", 1)
+    result = _run(mem_db)
+    assert result.status == checker.STATUS_OK
+    assert result.count == 0, f"盘中临停不该报差异, 实际: {result.rows}"
+
+
+def test_intraday_suspension_but_no_trading_is_reported(mem_db):
+    """反例: 盘中临停却标成全天停牌(tradestatus=0) -> 必须报出。
+
+    这是修复后新增的监控方向: 不是把盘中临停排除出核对, 而是给它相反的预期,
+    该类若真的全天没交易, 说明两边有一方错了。
+    """
+    _setup(mem_db)
+    _susp(mem_db, "600001.SH", "盘中停牌")
+    _daily(mem_db, "600001.SH", 0)
+    result = _run(mem_db)
+    assert result.count == 1
+    assert result.rows[0]["issue"] == "盘中临停但库内标为全天停牌(tradestatus=0)"
+
+
+def test_fullday_period_still_expects_no_trading(mem_db):
+    """反例: 明确的全天停牌类别 + tradestatus=1 -> 仍按原判据报出"""
+    _setup(mem_db)
+    _susp(mem_db, "600001.SH", "连续停牌")
+    _daily(mem_db, "600001.SH", 1)
+    result = _run(mem_db)
+    assert result.count == 1
+    assert result.rows[0]["issue"] == "外部停牌但库内标为正常交易(tradestatus=1)"
+
+
+def test_unknown_period_falls_back_to_fullday_and_warns(mem_db, caplog):
+    """反例(边界): 未识别的停牌类别按全天停牌处理, 并额外告警。
+
+    宁可误报也不放过新类别 —— 与本模块「未知不能当一致」的既有设计一致。
+    """
+    import logging
+    _setup(mem_db)
+    _susp(mem_db, "600001.SH", "某种新类别")
+    _daily(mem_db, "600001.SH", 1)
+    with caplog.at_level(logging.WARNING, logger=checker.logger.name):
+        result = _run(mem_db)
+    assert result.count == 1
+    assert result.rows[0]["issue"] == "外部停牌但库内标为正常交易(tradestatus=1)"
+    assert "未识别的停牌类别" in caplog.text

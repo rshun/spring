@@ -1,4 +1,5 @@
 # 修改记录:
+#   2026-09-18  Claude  新增裸代码撞名的反例: 指数不得进入吸附候选集
 #   2026-09-10  Claude  新增反例：库层失败必须重抛（此前 fill_daily_basic_shares / _mv 吞异常）
 #   2026-09-12  Claude  新增正反测试：float_shares 改以 turnover_rate 反推的
 #                       市场隐含流通盘为准、gbbq 降为 fallback
@@ -355,3 +356,38 @@ def test_fill_shares_ignores_candidates_above_that_day_total(mem_db):
     assert float_shares <= total_shares
     # 2亿候选被排除后, 剩余候选与 implied 差距超出容差 -> 回退 gbbq 的 5000万
     assert float_shares == 50000000
+
+
+def test_colliding_index_symbol_does_not_enter_candidates(mem_db):
+    """反例: 裸代码同时对应沪市指数与深市股票时, 指数不得进入股本事件集。
+
+    symbol 在 STOCK_INFO 里不唯一(全库 134 组撞名, 如 000001.SH 上证指数 vs
+    000001.SZ 平安银行)。raw_capital_events 若不排除指数, 会把股票的股本事件
+    复制一份挂到同名指数上。
+
+    本例守的是**不变量**而非某一行代码: 指数不得拿到 total_shares, 撞名的股票
+    则必须照常填上。上游(raw_capital_events)与下游(gbbq_matched / implied 的
+    board IN (...))各有一道过滤, 实测单独拆掉任一道本例都仍然绿, 两道都拆才变红
+    —— 这正是纵深防御该有的样子。下游那个 board IN (...) 在 dbutil.py 里出现 8 处,
+    被改动的概率不低, 上游这道是它的兜底。
+    """
+    insert_stock_info(mem_db, "000963", "SH", "INDEX", "2010-01-01")
+    insert_stock_info(mem_db, "000963", "SZ", "MAIN", "2000-01-01")
+    for d in ("2026-09-17", "2026-09-18"):
+        _insert_daily_basic(mem_db, "000963.SZ", d, turnover_rate=1.0)
+        _insert_daily_basic(mem_db, "000963.SH", d, turnover_rate=1.0)
+        _insert_stock_daily(mem_db, "000963.SZ", d, volume=1_000_000)
+        _insert_stock_daily(mem_db, "000963.SH", d, volume=1_000_000)
+    _insert_capital_detail(mem_db, "000963", "2026-06-30", "股本变化",
+                           1.0, 2.0, 10.0, 20.0)
+
+    fill_daily_basic_shares("2026-09-17", "2026-09-18", None, None, conn=mem_db)
+
+    idx = mem_db.execute(
+        "SELECT COUNT(*) FROM DAILY_BASIC "
+        "WHERE code = '000963.SH' AND total_shares IS NOT NULL").fetchone()[0]
+    stk = mem_db.execute(
+        "SELECT COUNT(*) FROM DAILY_BASIC "
+        "WHERE code = '000963.SZ' AND total_shares IS NOT NULL").fetchone()[0]
+    assert idx == 0, "指数不该拿到股本数据"
+    assert stk == 2, "撞名的深市股票必须照常填上股本"

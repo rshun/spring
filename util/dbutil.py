@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-18  Claude  fill_daily_basic_shares 的 raw_capital_events 排除指数:
+#                       symbol 不唯一(沪指数 vs 深股票撞裸代码 134 组), 此前靠下游
+#                       board 过滤兜底, 现在不再依赖该隐性前提
 #   2026-09-14  Claude  新增 _KNOWN_DAILY_AMOUNT_ANOMALIES: 定点修正 baostock 58 处
 #                       已核实的成交额错值(均价越出当日 [low,high], 正确值取自通达信)
 #   2026-09-14  Claude  新增 _KNOWN_DAILY_CLOSE_ANOMALIES: 定点修正 baostock 已核实
@@ -1340,7 +1343,13 @@ def fill_daily_basic_shares(start_date: str, end_date: str,
                 cd.bonus_share     AS float_shares_wan,
                 cd.allotment_share AS total_shares_wan
             FROM CAPITAL_DETAIL cd
-            JOIN STOCK_INFO i ON cd.code = i.symbol
+            -- symbol 在 STOCK_INFO 里不唯一: 沪市指数与深市股票撞同一 6 位裸代码
+            -- (实测 134 组, 如 000001.SH 上证指数 vs 000001.SZ 平安银行)。不排除指数
+            -- 会把股票的股本事件复制一份挂到同名指数上。下游 gbbq_matched / implied
+            -- 已有 board IN (...) 过滤兜底, 最终 UPDATE 够不到指数, 结果本就正确 ——
+            -- 这里加过滤是为了不再依赖「下游记得过滤」这条隐性前提, 顺带省掉
+            -- 吸附候选集里那批用不上的指数行。
+            JOIN STOCK_INFO i ON cd.code = i.symbol AND i.board <> 'INDEX'
             WHERE cd.category IN ({share_category_placeholders})
               AND cd.bonus_share > 0
               AND cd.allotment_share > 0

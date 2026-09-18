@@ -1,4 +1,7 @@
 # 修改记录:
+#   2026-09-18  Claude  _load_gbbq_events 排除指数: symbol 在 STOCK_INFO 不唯一,
+#                       沪市指数与深市股票撞裸代码(134 组), 导致股票的除权事件被
+#                       复制到同名指数上误报(实测 000963.SZ 华东医药 -> 000963.SH)
 #   2026-09-14  Claude  新增 -j/--json: 退出码恒为 0 无法表达结论, 调用方需要结构化
 #                       出口。status 四态(consistent/diffs_found/incomplete/error),
 #                       逐项给出差异数与 CSV 路径; 退出码契约保持不变
@@ -393,13 +396,25 @@ def _load_factor_events(conn, table: str, begin_date: str, end_date: str) -> pd.
 
 
 def _load_gbbq_events(conn, begin_date: str, end_date: str) -> pd.DataFrame | None:
-    """读取 gbbq 除权除息事件(标准 code / date / dividend, dividend 为每10股)"""
+    """读取 gbbq 除权除息事件(标准 code / date / dividend, dividend 为每10股)
+
+    必须排除指数: CAPITAL_DETAIL 存的是 6 位裸代码, 而 symbol 在 STOCK_INFO 里并不
+    唯一 —— 沪市指数与深市股票会撞同一裸代码(实测 134 组, 如 000001.SH 上证指数
+    vs 000001.SZ 平安银行)。不排除则一条深市股票的除权事件会被复制到同名指数上,
+    报成该指数「腾讯缺事件」。实测 2026-09-18: 华东医药(000963.SZ)的分红事件被
+    挂到中证下游消费与服务产业指数(000963.SH)上, 而真正的 000963.SZ 反而没进比对。
+    全历史共 2,414 条事件会这样落到指数上。
+
+    另有约 9,440 条事件因 symbol 不在 STOCK_INFO 而被 INNER JOIN 丢弃 —— 那些是
+    B股(200/900)、基金(16x)、REITs(508x), 本就不在 A 股复权对账范围, 属预期行为。
+    """
     try:
         return conn.execute(
             "SELECT i.code AS code, CAST(c.date AS VARCHAR) AS date, c.dividend "
             "FROM CAPITAL_DETAIL c "
             "INNER JOIN STOCK_INFO i ON i.symbol = c.code "
-            "WHERE c.category = '除权除息' AND c.date BETWEEN ? AND ?",
+            "WHERE c.category = '除权除息' AND c.date BETWEEN ? AND ? "
+            "  AND i.board <> 'INDEX'",
             [begin_date, end_date],
         ).df()
     except Exception as e:

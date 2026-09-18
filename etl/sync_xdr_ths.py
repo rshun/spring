@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-09-18  Claude  _candidate_codes 排除指数: symbol 不唯一, 沪指数与深股票
+#                       撞裸代码, 候选集会混进指数并发注定失败的接口请求
 #   2026-09-13  Claude  新建同花顺除权事件入库 ETL(CAPITAL_DETAIL 的独立外部对照)
 #   2026-09-13  Claude  修复: -s parquet(全表替换)与 -c/-x 子集过滤同用会先清空整表
 #                       再只插入过滤后的行, 导致其余股票历史事件被永久删除且退出码仍是 0；
@@ -182,11 +184,17 @@ def _candidate_codes(conn, begin_date: str, end_date: str) -> list[str]:
     接口 thscode 不支持批量, 全市场逐只请求不可行(5900 次/天);
     只查 gbbq 说有事件的那几十只, 增量才成立。
     """
+    # 必须排除指数: symbol 在 STOCK_INFO 里不唯一 —— 沪市指数与深市股票撞同一
+    # 6 位裸代码(实测 134 组, 如 000001.SH 上证指数 vs 000001.SZ 平安银行)。
+    # 不排除则候选集里会混进指数, 对它们发注定失败的接口请求; 目前
+    # XDR_EVENT_THS 没有指数行, 靠的是同花顺接口对指数返回不了除权数据 ——
+    # 那是外部行为, 不该当成我们的保障。
     rows = conn.execute("""
         SELECT DISTINCT i.code
         FROM CAPITAL_DETAIL c
         INNER JOIN STOCK_INFO i ON i.symbol = c.code
         WHERE c.category = '除权除息' AND c.date BETWEEN ? AND ?
+          AND i.board <> 'INDEX'
         ORDER BY i.code
     """, [begin_date, end_date]).fetchall()
     return [r[0] for r in rows]

@@ -129,6 +129,12 @@ python -m pip install --upgrade baostock -i https://pypi.org/simple
 ```bash
 python -m tools.check_daily
 ```
+用 `-t` 只核对指定类别，可多选（`daily` 日线 / `adj` 复权因子 / `index` 指数 /
+`basic` 基础数据 / `limit` 涨跌停 / `volratio` 量比 / `capital` 股本资料 / `industry` 行业 / `margin` 融资融券）；
+不传则核对除 `index` 外的全部类别：
+```bash
+python -m tools.check_daily -t daily adj
+```
 
 **跨机器搬运某个程序的产出数据**
 

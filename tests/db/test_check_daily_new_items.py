@@ -1,3 +1,7 @@
+# 修改记录:
+#   2026-10-02  Claude  check_daily 新增 -t/--targets 与 3 个告警项: 计数类断言限定类别,
+#                       默认集合的核对项总数 8 -> 11
+#   2026-10-02  Claude  新增 limit/volratio 类别(涨跌停池核对改归 limit): 类别列表补齐, 总数 11 -> 13
 """三个新核对项接入 check_daily 后的汇总与 JSON 结构"""
 import json
 
@@ -40,8 +44,12 @@ def test_source_missing_does_not_count_as_warning(mem_db):
     """反例: source_missing 的 count 为 0, 不得被算进告警总数"""
     from tools import check_daily
     _setup(mem_db)
+    # 不含 margin: 两融表当日 0 行本身就是缺口(记差异而非 source_missing),
+    # 其语义另见 test_check_daily_targets.py
     results = check_daily.run_warn_checks(mem_db, [DATE], "20240426", "20240426",
-                                          "", "", [])
+                                          "", "", [],
+                                          targets=["daily", "adj", "basic", "limit",
+                                                   "volratio", "capital", "industry"])
     assert sum(r.count for r in results) == 0
 
 
@@ -85,4 +93,4 @@ def test_empty_trade_dates_does_not_crash_legacy_checks(mem_db):
     _setup(mem_db)
     results = check_daily.run_warn_checks(mem_db, [], "2024-04-26", "2024-04-26",
                                           "", "", [])
-    assert len(results) == 8  # 5 既有 + 3 新增
+    assert len(results) == 13  # 5 既有 + 停牌/涨停/跌停 + 涨跌停价/量比 + 股本/行业/两融

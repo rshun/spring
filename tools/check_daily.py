@@ -18,19 +18,36 @@
 #   2026-09-13  Claude  build_summary 总结行「N 项告警」改成「N 条告警」:
 #                       该数是差异行数之和而非核对项个数, 用「项」与下文
 #                       「N 项未核对」的量词冲突, 让人误以为告警只有 N 个核对项
+#   2026-10-02  Claude  新增 -t/--targets 按 ETL 类别选择核对项(可多选, 不传=原有全部);
+#                       新增股本资料覆盖 / 行业覆盖 / 融资融券三个告警核对项;
+#                       核心检查拆出 run_core_checks, JSON params 增加 targets
+#   2026-10-02  Claude  -t 新增 limit(涨跌停) / volratio(量比) 两类: 涨跌停价空值从
+#                       「指标空值」拆到新核对项「涨跌停价」(并加区间/标志一致性),
+#                       涨停/跌停核对由 basic 改归 limit; 新增「量比空值」核对项
 """
-功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 数据完整性
+功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 等数据完整性
       1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
          停牌股票(tradestatus=0)不计入缺失
       2) 字段空值: 针对下游 strategy 程序实际读取的关键字段做空值/异常值校验
          (STOCK_DAILY 价量、DAILY_BASIC 指标、ADJ_FACTOR 复权因子;均仅告警写 CSV)
+      3) 股本资料 / 行业 / 融资融券覆盖核对(仅告警写 CSV)
 
 输入参数:
   -b, --begin         起始日期 (格式: YYYYMMDD)，默认为当天
   -e, --end           结束日期 (格式: YYYYMMDD)，默认为当天
   -x, --exchanges     交易所范围: sh / sz / bj / all (默认 all)
   -c, --codes         指定股票代码 (可选)
-  -i, --include-index 同时校验指数日线数据 (默认不校验)
+  -t, --targets       核对类别，可多选(空格分隔)，不传则核对除 index 外的全部类别:
+                        daily    日线       STOCK_DAILY 缺记录(核心) + 价量空值 + 停牌核对
+                        adj      复权因子   ADJ_FACTOR 缺记录(核心) + 复权因子空值
+                        index    指数       指数日线缺记录(核心)
+                        basic    基础数据   DAILY_BASIC 缺记录(核心) + is_st/指标空值
+                        limit    涨跌停     涨跌停价(空值/区间/标志) + 涨停/跌停池核对
+                        volratio 量比       量比空值
+                        capital  股本资料   除权前收价 + CAPITAL_DETAIL 覆盖
+                        industry 行业       申万行业覆盖
+                        margin   融资融券   两融汇总/明细逐日完整性
+  -i, --include-index 在所选类别之外再加上 index (保留原用法，等价于在 -t 里加 index)
   -f, --forcerun      强制运行，即使当前日期不是交易日
   -j, --json          结果以 JSON 输出到 stdout，日志改走 stderr
 
@@ -39,6 +56,8 @@
   python -m tools.check_daily -b 20260301 -e 20260325
   python -m tools.check_daily -b 20260325 -x sh sz
   python -m tools.check_daily -b 20260325 -i
+  python -m tools.check_daily -b 20260325 -t daily            # 只核对日线
+  python -m tools.check_daily -b 20260325 -t daily adj        # 核对日线 + 复权因子
   python -m tools.check_daily -b 20260328 -f
   python -m tools.check_daily -b 20260325 --json      # 供程序调用
 
@@ -57,8 +76,13 @@ from pathlib import Path
 
 import duckdb
 
+from tools.checks.capital import check_capital
+from tools.checks.industry import check_industry
 from tools.checks.limit_pool import check_limit_pool
+from tools.checks.limit_price import check_limit_price
+from tools.checks.margin import check_margin
 from tools.checks.suspension import check_suspension
+from tools.checks.volume_ratio import check_volume_ratio
 from util import checker
 from util import dbutil, myutil
 from util import validators as pv
@@ -75,6 +99,30 @@ DEFAULT_JSON_MAX_DETAIL = 200
 STATUS_COMPLETE = "complete"      # 核心日线完整
 STATUS_GAPS_FOUND = "gaps_found"  # 核心日线有缺失
 STATUS_ERROR = "error"            # 检查本身出错
+
+# -t/--targets 的核对类别, 与 ETL 程序一一对应; 字典顺序即执行与输出顺序
+TARGET_CHOICES = {
+    "daily":    "日线",       # etl.import_daily
+    "adj":      "复权因子",   # etl.adjust
+    "index":    "指数",       # etl.fetch_index
+    "basic":    "基础数据",   # etl.sync_basic 等(DAILY_BASIC)
+    "limit":    "涨跌停",     # etl.update_limit
+    "volratio": "量比",       # etl.fill_volratio
+    "capital":  "股本资料",   # etl.sync_capital
+    "industry": "行业",       # etl.sync_industry
+    "margin":   "融资融券",   # etl.sync_margin
+}
+# 不传 -t 时的默认集合。指数沿用原约定: 仍要 -i 或 -t index 显式开启,
+# 否则既有调用方(如 etl-quant-mcp)的退出码会因指数缺口而改变
+DEFAULT_TARGETS = tuple(t for t in TARGET_CHOICES if t != "index")
+
+
+def resolve_targets(targets: list[str] | None, include_index: bool) -> list[str]:
+    """-t 与 -i 合并成最终核对类别, 按 TARGET_CHOICES 的固定顺序返回、去重"""
+    chosen = set(targets) if targets else set(DEFAULT_TARGETS)
+    if include_index:
+        chosen.add("index")
+    return [t for t in TARGET_CHOICES if t in chosen]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -114,6 +162,16 @@ def build_parser() -> argparse.ArgumentParser:
         '-i', '--include-index',
         action='store_true',
         help='同时校验指数日线数据 (默认不校验)'
+    )
+
+    parser.add_argument(
+        '-t', '--targets', nargs='+',
+        default=None,
+        type=str.lower,
+        choices=list(TARGET_CHOICES),
+        help='核对类别, 可多选(空格分隔): '
+             + ', '.join(f'{k}({v})' for k, v in TARGET_CHOICES.items())
+             + '; 不传则核对除 index 外的全部类别'
     )
 
     parser.add_argument(
@@ -350,8 +408,7 @@ _DAILY_BASIC_NULL_CTE = """
     nonsusp AS (
         SELECT b.trade_date, s.code, s.name, b.pb, b.pe,
                b.total_shares, b.float_shares,
-               b.turnover_rate, b.total_mv, b.float_mv,
-               b.limit_up, b.limit_down
+               b.turnover_rate, b.total_mv, b.float_mv
         FROM DAILY_BASIC b
         INNER JOIN active_stocks s ON b.code = s.code
         INNER JOIN trading_days t ON b.trade_date = t.cal_date
@@ -368,12 +425,14 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
     """检查 DAILY_BASIC 关键字段是否缺失,停牌股票不计入。
     缺失口径 = NULL 或 = 0(baostock 这份数据极少返回 NULL,无值/脏数据多以 0 出现);
     负值视为有值(亏损股 pe<0、负净资产 pb<0 均正常),不报。
-    - pb/total_shares/float_shares/turnover_rate/total_mv/float_mv 缺失(NULL或0)、
-      limit_up/limit_down 缺失(NULL或≤0) -> 异常(写 CSV 并计入 total_missing)
+    - pb/total_shares/float_shares/turnover_rate/total_mv/float_mv 缺失(NULL或0)
+      -> 异常(写 CSV 并计入 total_missing)
     - pe 缺失(亏损股很多,且 pe=0 性质同缺失)-> 仅单独告警,不计入异常
 
     注: volume_ratio(新股首日/ST 极低流动性会正常缺失)、
-        is_limit_up/is_limit_down(0=未涨跌停是正常值)不在此校验。"""
+        is_limit_up/is_limit_down(0=未涨跌停是正常值)不在此校验。
+        limit_up/limit_down 已拆到 tools/checks/limit_price.py(-t limit),
+        这里不再校验, 避免 -t basic 与 -t limit 重复报同一问题。"""
     label = "指标空值    "
     params = [begin_date, end_date, *code_params, begin_date, end_date]
 
@@ -397,9 +456,7 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
                CASE WHEN float_shares  IS NULL OR float_shares  = 0 THEN 'float_shares'  END,
                CASE WHEN turnover_rate IS NULL OR turnover_rate = 0 THEN 'turnover_rate' END,
                CASE WHEN total_mv      IS NULL OR total_mv      = 0 THEN 'total_mv'      END,
-               CASE WHEN float_mv      IS NULL OR float_mv      = 0 THEN 'float_mv'      END,
-               CASE WHEN limit_up      IS NULL OR limit_up     <= 0 THEN 'limit_up'      END,
-               CASE WHEN limit_down    IS NULL OR limit_down   <= 0 THEN 'limit_down'    END
+               CASE WHEN float_mv      IS NULL OR float_mv      = 0 THEN 'float_mv'      END
            ) AS missing
     FROM nonsusp
     WHERE pb            IS NULL OR pb            = 0
@@ -408,8 +465,6 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
        OR turnover_rate IS NULL OR turnover_rate = 0
        OR total_mv      IS NULL OR total_mv      = 0
        OR float_mv      IS NULL OR float_mv      = 0
-       OR limit_up      IS NULL OR limit_up     <= 0
-       OR limit_down    IS NULL OR limit_down   <= 0
     ORDER BY trade_date, code
     """
     rows = conn.execute(detail_sql, params).fetchall()
@@ -429,7 +484,7 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
             writer.writerow([str(trade_date), code, name, missing])
 
     logger.warning(f"[{label}]    发现 {len(rows)} 条指标字段"
-                    f"(pb/shares/turnover_rate/mv/涨跌停价)缺失，明细已写入: {csv_file}")
+                    f"(pb/shares/turnover_rate/mv)缺失，明细已写入: {csv_file}")
     return len(rows)
 
 
@@ -801,14 +856,24 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
 
 
 def build_summary(core_missing: int,
-                  warn_results: list[checker.CheckResult]) -> str:
-    """结尾总结行。正常项不打日志，这行是「跑过了」的唯一凭据。"""
+                  warn_results: list[checker.CheckResult],
+                  core_checked: bool = True) -> str:
+    """结尾总结行。正常项不打日志，这行是「跑过了」的唯一凭据。
+
+    core_checked=False 表示所选类别(-t)不含任何核心缺记录检查(如只选 industry),
+    此时不能说「核心日线数据完整」——没查过的东西不能报成 OK。
+    """
     warn_total = sum(r.count for r in warn_results)
     unchecked = sum(1 for r in warn_results
                     if r.status in (checker.STATUS_SOURCE_MISSING,
                                     checker.STATUS_PARTIAL))
-    head = ("检查完成: 核心日线数据完整 OK" if core_missing == 0
-            else f"检查完成: 核心日线发现 {core_missing} 条缺失记录")
+    if not core_checked:
+        head = ("检查完成" if (warn_total or unchecked)
+                else "检查完成: 所选核对项均正常 OK")
+    elif core_missing == 0:
+        head = "检查完成: 核心日线数据完整 OK"
+    else:
+        head = f"检查完成: 核心日线发现 {core_missing} 条缺失记录"
     parts = [head]
     if warn_total:
         parts.append(f"{warn_total} 条告警")
@@ -864,16 +929,57 @@ def end_date_of(trade_dates: list[str], fallback: str) -> str:
     return trade_dates[-1] if trade_dates else fallback
 
 
+def run_core_checks(conn: duckdb.DuckDBPyConnection,
+                    targets: list[str],
+                    begin_date: str, end_date: str,
+                    ex_filter: str, code_filter: str,
+                    code_params: list) -> list[dict]:
+    """按所选类别执行核心缺记录检查(阻断管道, 决定退出码)
+
+    只有 daily / adj / basic / index 四类有核心检查;
+    capital / industry / margin 只有告警类核对项, 见 run_warn_checks。
+    """
+    checks: list[dict] = []
+    if "daily" in targets:
+        checks.append(_check_table(conn, "日线数据    ", "STOCK_DAILY", "date",
+                                   begin_date, end_date, ex_filter, code_filter,
+                                   code_params, is_self_table=True))
+    if "adj" in targets:
+        checks.append(_check_table(conn, "复权因子数据", "ADJ_FACTOR", "trade_date",
+                                   begin_date, end_date, ex_filter, code_filter,
+                                   code_params))
+    if "basic" in targets:
+        checks.append(_check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
+                                   begin_date, end_date, ex_filter, code_filter,
+                                   code_params))
+    if "index" in targets:
+        checks.append(_check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
+                                   begin_date, end_date, ex_filter, code_filter,
+                                   code_params, is_self_table=True,
+                                   board_sql="board = 'INDEX'"))
+    return checks
+
+
 def run_warn_checks(conn: duckdb.DuckDBPyConnection,
                     trade_dates: list[str],
                     begin: str, end: str,
                     ex_filter: str, code_filter: str,
-                    code_params: list) -> list[checker.CheckResult]:
-    """执行全部告警类核对项，返回结构化结果列表
+                    code_params: list,
+                    targets: list[str] | None = None,
+                    exchanges: list[str] | None = None) -> list[checker.CheckResult]:
+    """按所选类别执行告警类核对项，返回结构化结果列表
 
     这些检查只写 CSV 与日志，不影响退出码。
     既有 5 项保持原判定逻辑不变，仅把返回的计数包装成 CheckResult；
-    新增 3 项来自 tools/checks/ 子包。
+    其余各项来自 tools/checks/ 子包。
+
+    targets:   核对类别(见 TARGET_CHOICES), None 表示 DEFAULT_TARGETS。归属:
+               daily -> 日线价量空值 / 停牌核对;  adj -> 复权因子空值;
+               basic -> is_st 空值 / 指标空值;
+               limit -> 涨停核对 / 跌停核对 / 涨跌停价;  volratio -> 量比空值;
+               capital -> 除权前收价 / 股本资料覆盖;  industry -> 行业覆盖;
+               margin -> 融资融券;  index 没有告警类核对项
+    exchanges: -x 参数原样传入, 仅融资融券使用(其余项用 ex_filter); None 视为 all
 
     前 4 项(_check_stock_daily_nulls / _check_adj_factor_nulls / _check_is_st_null /
     _check_daily_basic_nulls)内部都有 INNER JOIN trading_days(TRADE_CAL, is_open=1)，
@@ -886,34 +992,54 @@ def run_warn_checks(conn: duckdb.DuckDBPyConnection,
     会把落在 trade_dates 首尾之外(如区间开头的假期)的 XDR 事件静默丢掉，因此
     _check_xdr_preclose 必须继续使用原始的 [begin, end]，不能跟前 4 项一起收窄。
     """
+    chosen = set(DEFAULT_TARGETS if targets is None else targets)
     range_begin = begin_date_of(trade_dates, begin)
     range_end = end_date_of(trade_dates, end)
-    legacy = [
-        ("日线价量空值", _check_stock_daily_nulls(conn, range_begin, range_end,
-                                                  ex_filter, code_filter, code_params)),
-        ("复权因子空值", _check_adj_factor_nulls(conn, range_begin, range_end,
-                                                 ex_filter, code_filter, code_params)),
-        ("is_st 空值", _check_is_st_null(conn, range_begin, range_end,
-                                         ex_filter, code_filter, code_params)),
-        ("指标空值", _check_daily_basic_nulls(conn, range_begin, range_end,
-                                              ex_filter, code_filter, code_params)),
-        ("除权前收价", _check_xdr_preclose(conn, begin, end,
-                                           ex_filter, code_filter, code_params)),
-    ]
-    results = [
-        checker.CheckResult(
+    results: list[checker.CheckResult] = []
+
+    def _legacy(label: str, count: int) -> None:
+        results.append(checker.CheckResult(
             label=label,
             status=checker.STATUS_MISMATCH if count else checker.STATUS_OK,
-            count=count, blocking=False)
-        for label, count in legacy
-    ]
+            count=count, blocking=False))
 
-    results.append(check_suspension(conn, trade_dates, begin, end,
-                                    ex_filter, code_filter, code_params))
-    results.append(check_limit_pool(conn, trade_dates, begin, end, "U",
-                                    ex_filter, code_filter, code_params))
-    results.append(check_limit_pool(conn, trade_dates, begin, end, "D",
-                                    ex_filter, code_filter, code_params))
+    # 执行顺序与引入 -t 之前一致(全选时输出顺序不变), 新增项追加在末尾
+    if "daily" in chosen:
+        _legacy("日线价量空值", _check_stock_daily_nulls(conn, range_begin, range_end,
+                                                         ex_filter, code_filter, code_params))
+    if "adj" in chosen:
+        _legacy("复权因子空值", _check_adj_factor_nulls(conn, range_begin, range_end,
+                                                        ex_filter, code_filter, code_params))
+    if "basic" in chosen:
+        _legacy("is_st 空值", _check_is_st_null(conn, range_begin, range_end,
+                                                ex_filter, code_filter, code_params))
+        _legacy("指标空值", _check_daily_basic_nulls(conn, range_begin, range_end,
+                                                     ex_filter, code_filter, code_params))
+    if "capital" in chosen:
+        _legacy("除权前收价", _check_xdr_preclose(conn, begin, end,
+                                                  ex_filter, code_filter, code_params))
+    if "daily" in chosen:
+        results.append(check_suspension(conn, trade_dates, begin, end,
+                                        ex_filter, code_filter, code_params))
+    if "limit" in chosen:
+        results.append(check_limit_pool(conn, trade_dates, begin, end, "U",
+                                        ex_filter, code_filter, code_params))
+        results.append(check_limit_pool(conn, trade_dates, begin, end, "D",
+                                        ex_filter, code_filter, code_params))
+        # 与前 4 项同理: 内部有 trading_days 门, 区间收窄等价
+        results.append(check_limit_price(conn, range_begin, range_end,
+                                         ex_filter, code_filter, code_params))
+    if "volratio" in chosen:
+        results.append(check_volume_ratio(conn, range_begin, range_end,
+                                          ex_filter, code_filter, code_params))
+    if "capital" in chosen:
+        results.append(check_capital(conn, begin, end,
+                                     ex_filter, code_filter, code_params))
+    if "industry" in chosen:
+        results.append(check_industry(conn, begin, end,
+                                      ex_filter, code_filter, code_params))
+    if "margin" in chosen:
+        results.append(check_margin(conn, trade_dates, begin, end, exchanges))
     return results
 
 
@@ -926,6 +1052,7 @@ def main() -> int:
     # 先解析参数再配日志：--json 时 stdout 必须只有 JSON，日志得改走 stderr
     args = parse_arguments()
     myutil.configure_etl_logging(console_stream=sys.stderr if args.json else None)
+    targets = resolve_targets(args.targets, args.include_index)
 
     if not check_parameters(args.begin, args.end, args.forcerun):
         if args.json:
@@ -937,6 +1064,7 @@ def main() -> int:
                 "params": {"begin": args.begin, "end": args.end,
                            "exchanges": args.exchanges, "codes": args.codes,
                            "include_index": args.include_index,
+                           "targets": targets,
                            "forcerun": args.forcerun},
             })
         return 2
@@ -950,9 +1078,8 @@ def main() -> int:
     logger.info(f"     结束日期: {end_date}")
     logger.info(f"     交易所:   {args.exchanges}")
     logger.info(f"     指定代码: {args.codes if args.codes else '无 (检查全市场)'}")
-    logger.info(f"     校验指数: {'是' if args.include_index else '否'}")
+    logger.info(f"     核对类别: {', '.join(TARGET_CHOICES[t] for t in targets)}")
     logger.info(f"     强制运行: {'是' if args.forcerun else '否'}")
-    logger.info(f"     除权校验: 是 (除权日 pre_close 与理论除权价比对)")
     logger.info("=" * 60)
 
     ex_filter = _build_exchange_filter(args.exchanges)
@@ -963,20 +1090,8 @@ def main() -> int:
         conn = dbutil.get_connection()
 
         # 核心日线缺记录 -> 阻断管道(返回 1)
-        core_checks = [
-            _check_table(conn, "日线数据    ", "STOCK_DAILY", "date",
-                         begin_date, end_date, ex_filter, code_filter, code_params,
-                         is_self_table=True),
-            _check_table(conn, "复权因子数据", "ADJ_FACTOR", "trade_date",
-                         begin_date, end_date, ex_filter, code_filter, code_params),
-            _check_table(conn, "指标数据    ", "DAILY_BASIC", "trade_date",
-                         begin_date, end_date, ex_filter, code_filter, code_params),
-        ]
-        if args.include_index:
-            core_checks.append(
-                _check_table(conn, "指数日线数据", "STOCK_DAILY", "date",
-                             begin_date, end_date, ex_filter, code_filter, code_params,
-                             is_self_table=True, board_sql="board = 'INDEX'"))
+        core_checks = run_core_checks(conn, targets, begin_date, end_date,
+                                      ex_filter, code_filter, code_params)
         core_missing = sum(c["missing"] for c in core_checks)
 
         # 交易日列表: 新核对项按日逐天判定外部源可用性。
@@ -989,7 +1104,8 @@ def main() -> int:
         # begin/end 传 begin_date/end_date(YYYY-MM-DD)而非 args.begin/args.end
         # (YYYYMMDD)，使新增两项核对的 CSV 文件名与既有 csv/ 目录下的命名一致。
         warn_results = run_warn_checks(conn, trade_dates, begin_date, end_date,
-                                       ex_filter, code_filter, code_params)
+                                       ex_filter, code_filter, code_params,
+                                       targets=targets, exchanges=args.exchanges)
         warn_missing = sum(r.count for r in warn_results)
         unchecked = sum(1 for r in warn_results
                         if r.status in (checker.STATUS_SOURCE_MISSING,
@@ -997,7 +1113,8 @@ def main() -> int:
 
         logger.info("-" * 60)
         exit_code = 0 if core_missing == 0 else 1
-        summary = build_summary(core_missing, warn_results)
+        summary = build_summary(core_missing, warn_results,
+                                core_checked=bool(core_checks))
         (logger.info if core_missing == 0 else logger.warning)(summary)
 
         if args.json:
@@ -1009,6 +1126,7 @@ def main() -> int:
                 "params": {"begin": begin_date, "end": end_date,
                            "exchanges": args.exchanges, "codes": args.codes,
                            "include_index": args.include_index,
+                           "targets": targets,
                            "forcerun": args.forcerun},
                 "core": {
                     "missing_total": core_missing,
@@ -1037,6 +1155,7 @@ def main() -> int:
                 "params": {"begin": args.begin, "end": args.end,
                            "exchanges": args.exchanges, "codes": args.codes,
                            "include_index": args.include_index,
+                           "targets": targets,
                            "forcerun": args.forcerun},
             })
         return 2

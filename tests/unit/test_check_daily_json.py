@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：--json 出口的截断逻辑与 CLI 契约的正反例
+#   2026-10-02  Claude  _fake_args 补 targets 字段(check_daily 新增 -t/--targets)
 """check_daily --json 出口的正反例。
 
 这个出口是 etl-quant-mcp 的 check_data_gaps 的唯一数据来源，两条要害：
@@ -184,6 +185,6 @@ def _fake_args(json: bool):
     import argparse
     return argparse.Namespace(
         begin="20260817", end="20260817", codes=None, exchanges=["all"],
-        include_index=False, forcerun=False, json=json,
+        include_index=False, targets=None, forcerun=False, json=json,
         json_max_detail=DEFAULT_JSON_MAX_DETAIL,
     )

@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-10-02  Claude  涨跌停价空值拆出指标空值(-t limit): limit_up=0 用例改为不计入
 import pytest
 
 from tools.check_daily import (
@@ -471,17 +473,18 @@ def test_dbnull_float_mv_zero_counted(mem_db):
     assert n == 1
 
 
-def test_dbnull_limit_up_zero_counted(mem_db):
-    """limit_up ≤ 0(涨停价)视为缺失 → 异常,返回 1。"""
+def test_dbnull_limit_up_zero_not_counted_here(mem_db):
+    """反例: limit_up ≤ 0 已拆到「涨跌停价」核对(-t limit), 指标空值不再计入,
+    避免 -t basic 与 -t limit 重复报; 正例见 test_check_daily_targets.py。"""
     _seed_stock(mem_db)
     _ins_cal(mem_db, ["2024-01-05"])
     _ins_basic(mem_db, "600519.SH", "2024-01-05", limit_up=0)
     n = _check_daily_basic_nulls(mem_db, "2024-01-05", "2024-01-05", "", "", [])
-    assert n == 1
+    assert n == 0
 
 
 def test_dbnull_new_fields_all_present_ok(mem_db):
-    """turnover_rate/total_mv/float_mv/limit_up/limit_down 都有正常值 → 0。"""
+    """turnover_rate/total_mv/float_mv 都有正常值 → 0。"""
     _seed_stock(mem_db)
     _ins_cal(mem_db, ["2024-01-08"])
     _ins_basic(mem_db, "600519.SH", "2024-01-08")  # 默认全为正常值

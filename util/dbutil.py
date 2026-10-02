@@ -1,4 +1,8 @@
 # 修改记录:
+#   2026-10-02  Claude  update_price_limits_by_range: 2014-01-01 前的上市首日不设涨跌幅
+#                       (新股首日 44% 上限当日才生效), 合并上市名单(config.yaml
+#                       price_limit.no_limit_first_day_codes)首日同样不设限;
+#                       上市日早于 TRADE_CAL 起点的股票不再把日历首日误当上市首日
 #   2026-09-18  Claude  fill_daily_basic_shares 的 raw_capital_events 排除指数:
 #                       symbol 不唯一(沪指数 vs 深股票撞裸代码 134 组), 此前靠下游
 #                       board 过滤兜底, 现在不再依赖该隐性前提
@@ -58,6 +62,7 @@ import logging
 import duckdb
 import pandas as pd
 from . import myutil
+from .config import get_config
 from datetime import datetime, date
 from typing import List, Tuple, Optional
 
@@ -688,6 +693,15 @@ def load_stock_info_to_db(df: pd.DataFrame, conn: duckdb.DuckDBPyConnection) -> 
             pass
 
 
+def _no_limit_first_day_codes() -> list[str]:
+    """config.yaml price_limit.no_limit_first_day_codes: 首日不设涨跌幅的非 IPO 上市(合并上市等)
+
+    未配置时返回空列表(这些股票的首日退回按新股 44% 计算), 不报错。
+    """
+    section = get_config().get("price_limit") or {}
+    return [str(c) for c in (section.get("no_limit_first_day_codes") or [])]
+
+
 def update_price_limits_by_range(start_date: str, end_date: str,
                                  markets: list[str] | None = None,
                                  codes: list[str] | None = None):
@@ -717,6 +731,13 @@ def update_price_limits_by_range(start_date: str, end_date: str,
             code_filter = f"AND d.code IN ({placeholders})"
             code_params = list(codes)
 
+        # 首日不设涨跌幅的合并上市名单; 为空时用 FALSE, 避免拼出非法的 IN ()
+        listing_codes = _no_limit_first_day_codes()
+        if listing_codes:
+            listing_expr = f"d.code IN ({', '.join(['?'] * len(listing_codes))})"
+        else:
+            listing_expr = "FALSE"
+
         # 0.000001 是浮点加法补偿，确保恰好在临界值时 ROUND 向上进位
         calc_sql = f"""
             WITH early_trade_days AS (
@@ -736,6 +757,10 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                      AND c.cal_date <= i.list_date + INTERVAL 60 DAY
                     WHERE i.board IN ('MAIN', 'STAR', 'GEM', 'BJ')
                       AND i.list_date IS NOT NULL
+                      -- 上市日早于日历起点(TRADE_CAL 始于 2000-01-01)时数不出真实序号:
+                      -- 否则 1999 年末上市的股票会把日历首个交易日 2000-01-04 当成
+                      -- 「上市首日」。这类股票一律按老股(哨兵 99)处理
+                      AND i.list_date >= (SELECT MIN(cal_date) FROM TRADE_CAL)
                 ) WHERE tn <= 5
             ),
             base_data AS (
@@ -747,7 +772,8 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                     i.board,
                     COALESCE(b.is_st, 0) as is_st,
                     -- 99 = 已过前 5 个交易日的哨兵值，下游只判 <= 5 与 = 1
-                    COALESCE(e.tn, 99) as days_count
+                    COALESCE(e.tn, 99) as days_count,
+                    CASE WHEN {listing_expr} THEN 1 ELSE 0 END as is_merger_listing
                 FROM STOCK_DAILY d
                 JOIN STOCK_INFO i ON d.code = i.code
                 LEFT JOIN DAILY_BASIC b ON d.code = b.code AND d.date = b.trade_date
@@ -763,6 +789,11 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                 SELECT
                     *,
                     CASE
+                        -- 上市首日不设涨跌幅: 新股首日 44% 上限 2014-01-01 才生效(沪深同日),
+                        -- 此前首日无限制; 合并上市(换股吸收合并 / B 转 A)没有发行价, 任何时期
+                        -- 首日都不适用 44%。名单见 config.yaml price_limit
+                        WHEN days_count = 1
+                             AND (date < '2014-01-01' OR is_merger_listing = 1) THEN 0.0
                         WHEN board = 'STAR' THEN (CASE WHEN days_count <= 5 THEN 0.0 ELSE 0.2 END)
                         WHEN board = 'GEM' THEN (
                             CASE WHEN date >= '2020-08-24' THEN (CASE WHEN days_count <= 5 THEN 0.0 ELSE 0.2 END)
@@ -830,7 +861,8 @@ def update_price_limits_by_range(start_date: str, end_date: str,
               AND DAILY_BASIC.trade_date = t.date;
         """
 
-        params: list = [start_date, end_date, *market_params, *code_params]
+        # 顺序: base_data SELECT 中的合并上市名单 -> WHERE 的日期 -> 交易所 -> 代码
+        params: list = [*listing_codes, start_date, end_date, *market_params, *code_params]
         logger.info("正在执行批量更新 SQL (这可能需要几秒钟)...")
         con.execute(calc_sql, params)
         logger.info("批量更新完成。")

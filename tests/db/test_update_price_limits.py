@@ -2,6 +2,8 @@
 #   2026-06-24  Claude  新增沪深主板 ST 涨跌停 2026-07-06 由 5%->10% 的正反测试
 #   2026-09-11  Claude  新增新股无涨跌幅窗口「交易日 vs 自然日」口径的正反测试；
 #                       新增写库失败必须重抛的反例
+#   2026-10-02  Claude  新增上市首日规则正反例: 2014-01-01 前首日不设限、合并上市名单首日不设限
+#                       上市日早于日历起点的股票不得把日历首日当上市首日
 """update_price_limits_by_range 涨跌停比率计算测试 (聚焦沪深主板 ST 规则切换)。"""
 from unittest.mock import patch, MagicMock
 
@@ -154,3 +156,115 @@ def test_update_failure_reraises(mem_db):
         with pytest.raises(RuntimeError, match="SQL 执行失败"):
             update_price_limits_by_range("2026-07-06", "2026-07-06")
     broken.close.assert_called_once()
+
+
+# ── 上市首日: 2014-01-01 前不设限 / 合并上市不设限 ─────────────────────────────
+#
+# 新股首日 44% 上限 2014-01-01 才生效(沪深同日), 此前首日无涨跌幅限制。
+# 合并上市(换股吸收合并 / B 转 A)无发行价, 首日不适用 44%, 名单在 config.yaml。
+
+def _seed_listing(mem_db, symbol, exchange, board, trade_days, pre_close=10.0):
+    """种入一只以 trade_days[0] 为上市日的股票, 每个交易日一行日线"""
+    insert_stock_info(mem_db, symbol, exchange, board, list_date=trade_days[0])
+    code = f"{symbol}.{exchange}"
+    for d in trade_days:
+        insert_trade_cal(mem_db, d, 1)
+        mem_db.execute(
+            "INSERT INTO STOCK_DAILY (code, date, open, high, low, close, "
+            "pre_close, tradestatus, volume, amount) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1000, 1.0)",
+            [code, d, pre_close, pre_close, pre_close, pre_close, pre_close])
+        mem_db.execute(
+            "INSERT INTO DAILY_BASIC (code, trade_date, is_st) VALUES (?, ?, 0)",
+            [code, d])
+    return code
+
+
+def _run(mem_db, begin, end, merger_codes=()):
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)),          patch("util.dbutil._no_limit_first_day_codes", return_value=list(merger_codes)):
+        update_price_limits_by_range(begin, end)
+
+
+def _limits(mem_db, code, trade_date):
+    return mem_db.execute(
+        "SELECT limit_up, limit_down FROM DAILY_BASIC WHERE code = ? AND trade_date = ?",
+        [code, trade_date]).fetchone()
+
+
+def test_first_day_before_2014_has_no_limit(mem_db):
+    """正例: 2010 年上市首日(中航电测原型)不设涨跌幅 -> 哨兵值"""
+    code = _seed_listing(mem_db, "300114", "SZ", "GEM", ["2010-08-27", "2010-08-30"], 25.0)
+    _run(mem_db, "2010-08-27", "2010-08-30")
+    assert _limits(mem_db, code, "2010-08-27") == (999999.99, 0.01)
+
+
+def test_first_day_on_20131231_still_no_limit(mem_db):
+    """正例(边界): 切换日前一天上市的首日仍不设限"""
+    code = _seed_listing(mem_db, "600001", "SH", "MAIN", ["2013-12-31"])
+    _run(mem_db, "2013-12-31", "2013-12-31")
+    assert _limits(mem_db, code, "2013-12-31") == (999999.99, 0.01)
+
+
+def test_first_day_from_2014_uses_44pct(mem_db):
+    """反例(边界): 2014-01-02 起的新股首日恢复 +44% / -36%"""
+    code = _seed_listing(mem_db, "600001", "SH", "MAIN", ["2014-01-02"])
+    _run(mem_db, "2014-01-02", "2014-01-02")
+    assert _limits(mem_db, code, "2014-01-02") == (14.4, 6.4)
+
+
+def test_second_day_before_2014_keeps_10pct(mem_db):
+    """反例: 只放开首日, 2014 年前上市的第 2 个交易日仍按 10%"""
+    code = _seed_listing(mem_db, "300114", "SZ", "GEM", ["2010-08-27", "2010-08-30"], 25.0)
+    _run(mem_db, "2010-08-27", "2010-08-30")
+    assert _limits(mem_db, code, "2010-08-30") == (27.5, 22.5)
+
+
+def test_merger_listing_first_day_has_no_limit(mem_db):
+    """正例: 名单内的合并上市(申万宏源 2015-01-26)首日不设涨跌幅"""
+    code = _seed_listing(mem_db, "000166", "SZ", "MAIN", ["2015-01-26", "2015-01-27"], 4.86)
+    _run(mem_db, "2015-01-26", "2015-01-27", merger_codes=["000166.SZ"])
+    assert _limits(mem_db, code, "2015-01-26") == (999999.99, 0.01)
+
+
+def test_merger_listing_second_day_keeps_10pct(mem_db):
+    """反例: 合并上市只放开首日, 第 2 个交易日按 10%"""
+    code = _seed_listing(mem_db, "000166", "SZ", "MAIN", ["2015-01-26", "2015-01-27"], 10.0)
+    _run(mem_db, "2015-01-26", "2015-01-27", merger_codes=["000166.SZ"])
+    assert _limits(mem_db, code, "2015-01-27") == (11.0, 9.0)
+
+
+def test_ipo_not_in_merger_list_first_day_uses_44pct(mem_db):
+    """反例: 同期上市但不在名单里的普通新股, 首日仍按 44%; 空名单也不得报错"""
+    code = _seed_listing(mem_db, "000166", "SZ", "MAIN", ["2015-01-26"], 10.0)
+    _run(mem_db, "2015-01-26", "2015-01-26", merger_codes=["300498.SZ"])
+    assert _limits(mem_db, code, "2015-01-26") == (14.4, 6.4)
+    mem_db.execute("UPDATE DAILY_BASIC SET limit_up = NULL, limit_down = NULL")
+    _run(mem_db, "2015-01-26", "2015-01-26", merger_codes=[])
+    assert _limits(mem_db, code, "2015-01-26") == (14.4, 6.4)
+
+
+def test_merger_list_read_from_config():
+    """正例: 名单确实从 config.yaml 读取, 且包含已核实的 3 只"""
+    from util.dbutil import _no_limit_first_day_codes
+    assert {"000166.SZ", "300498.SZ", "601155.SH"} <= set(_no_limit_first_day_codes())
+
+
+def test_listed_before_calendar_start_not_treated_as_first_day(mem_db):
+    """反例(回归): 1999-11-10 上市的浦发银行, 日历从 2000 年才开始;
+    2000-01-04 不是它的上市首日, 必须按主板 10%, 不得不设限也不得按 44%"""
+    insert_stock_info(mem_db, "600000", "SH", "MAIN", list_date="1999-11-10")
+    insert_trade_cal(mem_db, "2000-01-04", 1)
+    mem_db.execute(
+        "INSERT INTO STOCK_DAILY (code, date, open, high, low, close, pre_close, "
+        "tradestatus, volume, amount) VALUES ('600000.SH', '2000-01-04', 10, 10, 10, 10, 10, 1, 1000, 1.0)")
+    mem_db.execute("INSERT INTO DAILY_BASIC (code, trade_date, is_st) "
+                   "VALUES ('600000.SH', '2000-01-04', 0)")
+    _run(mem_db, "2000-01-04", "2000-01-04")
+    assert _limits(mem_db, "600000.SH", "2000-01-04") == (11.0, 9.0)
+
+
+def test_listed_on_calendar_start_still_counts_first_day(mem_db):
+    """正例(边界): 上市日恰好等于日历起点时仍能正常识别首日(2000 年 -> 不设限)"""
+    code = _seed_listing(mem_db, "600001", "SH", "MAIN", ["2000-01-04"])
+    _run(mem_db, "2000-01-04", "2000-01-04")
+    assert _limits(mem_db, code, "2000-01-04") == (999999.99, 0.01)

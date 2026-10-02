@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-10-02  Claude  fetch_stock_info 创业板判定由 300/301 前缀改为「深市 30 开头」:
+#                       302 新号段(302132.SZ)被误归 MAIN, 涨跌停价按 10% 计算
 #   2026-09-14  Claude  fetch_batch_data 删除「status==D 即跳过」: 上游 is_delist=True
 #                       已放行退市股, 数据源层再否决一次导致退市股永远取不到
 #                       (实测 baostock 对 002898/600193/000004 均有数据)
@@ -215,7 +217,10 @@ def fetch_stock_info(exchanges: list) -> tuple[pd.DataFrame, pd.DataFrame | None
         df["board"] = "MAIN"
         df.loc[is_index, "board"] = "INDEX"
         df.loc[is_stock & s.str.startswith("9"), "board"] = "BJ"              # BJ：9开头
-        df.loc[is_stock & s.str.startswith(("300", "301")), "board"] = "GEM"
+        # GEM：深市 30 开头整段都是创业板。原先只列 300/301，新号段 302(如 302132
+        # 中航成飞)落进默认 MAIN，涨跌停价被按主板 10% 计算；按段判定，以后再开 303 也不漏
+        is_sz = df["exchange"] == "SZ"
+        df.loc[is_stock & is_sz & s.str.startswith("30"), "board"] = "GEM"
         df.loc[is_stock & s.str.startswith(("688", "689")), "board"] = "STAR"
 
         # 字段映射

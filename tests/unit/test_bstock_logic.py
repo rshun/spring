@@ -1,3 +1,5 @@
+# 修改记录:
+#   2026-10-02  Claude  board 分类补 302/303 号段正例与非 30 开头、沪市 30 开头反例
 import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock
@@ -101,10 +103,14 @@ def _make_query_basic_simple(rows: list[list]):
 @pytest.mark.parametrize("symbol,expected_board", [
     ("300001", "GEM"),
     ("301001", "GEM"),
+    ("302132", "GEM"),     # 正例: 创业板新号段 302(中航成飞), 曾被误归 MAIN
+    ("303001", "GEM"),     # 正例: 以后再开的 30x 号段同样归创业板
     ("688001", "STAR"),
     ("689001", "STAR"),
     ("600519", "MAIN"),
     ("000001", "MAIN"),
+    ("600302", "MAIN"),    # 反例: 只是代码里含 302, 不是 30 开头
+    ("000302", "MAIN"),    # 反例: 同上(深市主板)
 ])
 def test_fetch_stock_info_board_classification(symbol, expected_board):
     exchange = "sh" if symbol.startswith(("6", "9")) else "sz"
@@ -118,6 +124,17 @@ def test_fetch_stock_info_board_classification(symbol, expected_board):
     row_data = df[df["symbol"] == symbol]
     assert len(row_data) == 1
     assert row_data.iloc[0]["board"] == expected_board
+
+
+def test_fetch_stock_info_sh_30_prefix_not_gem():
+    """反例: 30 开头只在深市才是创业板; 沪市同前缀(当前不存在, 防御性)不得归 GEM"""
+    rs = _make_query_basic_simple([["sh.300001", "测试股票", "2010-01-01", "", "1", "1"]])
+    lg = _make_bs_login_ok()
+    with patch("datasource.bstock.bs.login", return_value=lg):
+        with patch("datasource.bstock.bs.query_stock_basic", return_value=rs):
+            with patch("datasource.bstock.bs.logout"):
+                df, _ = fetch_stock_info(["all"])
+    assert df.iloc[0]["board"] == "MAIN"
 
 
 def test_fetch_stock_info_index_board():

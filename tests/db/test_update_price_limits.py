@@ -4,6 +4,7 @@
 #                       新增写库失败必须重抛的反例
 #   2026-10-02  Claude  新增上市首日规则正反例: 2014-01-01 前首日不设限、合并上市名单首日不设限
 #                       上市日早于日历起点的股票不得把日历首日当上市首日
+#   2026-10-02  Claude  新增不设涨跌幅交易日名单(股改复牌首日)的正反例与名单文件契约测试
 """update_price_limits_by_range 涨跌停比率计算测试 (聚焦沪深主板 ST 规则切换)。"""
 from unittest.mock import patch, MagicMock
 
@@ -180,8 +181,8 @@ def _seed_listing(mem_db, symbol, exchange, board, trade_days, pre_close=10.0):
     return code
 
 
-def _run(mem_db, begin, end, merger_codes=()):
-    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)),          patch("util.dbutil._no_limit_first_day_codes", return_value=list(merger_codes)):
+def _run(mem_db, begin, end, merger_codes=(), no_limit_days=()):
+    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)),          patch("util.dbutil._no_limit_first_day_codes", return_value=list(merger_codes)),          patch("util.dbutil._load_no_limit_days", return_value=list(no_limit_days)):
         update_price_limits_by_range(begin, end)
 
 
@@ -268,3 +269,106 @@ def test_listed_on_calendar_start_still_counts_first_day(mem_db):
     code = _seed_listing(mem_db, "600001", "SH", "MAIN", ["2000-01-04"])
     _run(mem_db, "2000-01-04", "2000-01-04")
     assert _limits(mem_db, code, "2000-01-04") == (999999.99, 0.01)
+
+
+# ── 不设涨跌幅的特定交易日名单(股改复牌首日) ────────────────────────────────────
+
+import datetime as _dt
+
+_REFORM_DAYS = ["2006-02-24", "2006-02-27", "2006-02-28"]   # 停牌前一日 / 复牌首日 / 次日
+
+
+def test_no_limit_day_in_list_has_no_limit(mem_db):
+    """正例: 名单内的 (code, date) 不设涨跌幅 -> 哨兵值"""
+    code = _seed_listing(mem_db, "600036", "SH", "MAIN", ["2002-04-09"])
+    for d in _REFORM_DAYS:
+        _ins_day(mem_db, code, d)
+    _run(mem_db, "2006-02-24", "2006-02-28",
+         no_limit_days=[(code, _dt.date(2006, 2, 27))])
+    assert _limits(mem_db, code, "2006-02-27") == (999999.99, 0.01)
+
+
+def test_no_limit_day_only_affects_that_day_and_code(mem_db):
+    """反例: 名单只放开那一天那一只; 前后交易日、同日其他股票照常 10%"""
+    code = _seed_listing(mem_db, "600036", "SH", "MAIN", ["2002-04-09"])
+    other = _seed_listing(mem_db, "600000", "SH", "MAIN", ["2002-04-10"])
+    for d in _REFORM_DAYS:
+        _ins_day(mem_db, code, d)
+    _ins_day(mem_db, other, "2006-02-27")
+    _run(mem_db, "2006-02-24", "2006-02-28",
+         no_limit_days=[(code, _dt.date(2006, 2, 27))])
+    assert _limits(mem_db, code, "2006-02-24") == (11.0, 9.0)
+    assert _limits(mem_db, code, "2006-02-28") == (11.0, 9.0)
+    assert _limits(mem_db, other, "2006-02-27") == (11.0, 9.0)
+
+
+def test_empty_no_limit_days_keeps_10pct(mem_db):
+    """反例: 名单为空(未配置)时照常 10%, 不报错"""
+    code = _seed_listing(mem_db, "600036", "SH", "MAIN", ["2002-04-09"])
+    _ins_day(mem_db, code, "2006-02-27")
+    _run(mem_db, "2006-02-27", "2006-02-27", no_limit_days=[])
+    assert _limits(mem_db, code, "2006-02-27") == (11.0, 9.0)
+
+
+def _ins_day(mem_db, code, d, pre_close=10.0):
+    # 多只股票共用同一交易日, 日历只插一次
+    mem_db.execute("INSERT OR IGNORE INTO TRADE_CAL (cal_date, is_open) VALUES (?, 1)", [d])
+    mem_db.execute(
+        "INSERT INTO STOCK_DAILY (code, date, open, high, low, close, pre_close, "
+        "tradestatus, volume, amount) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1000, 1.0)",
+        [code, d, pre_close, pre_close, pre_close, pre_close, pre_close])
+    mem_db.execute("INSERT INTO DAILY_BASIC (code, trade_date, is_st) VALUES (?, ?, 0)",
+                   [code, d])
+
+
+# ── 名单加载 ──────────────────────────────────────────────────────────────────
+
+def _patch_days_file(value):
+    return patch("util.dbutil.get_config",
+                 return_value={"price_limit": {"no_limit_days_file": value}})
+
+
+def test_load_no_limit_days_parses_file(tmp_path):
+    """正例: 读 code/date 两列, 忽略其他列, 兼容 BOM"""
+    from util.dbutil import _load_no_limit_days
+    f = tmp_path / "days.csv"
+    f.write_text("code,date,tier\n600036.SH,2006-02-27,price_breach\n", encoding="utf-8-sig")
+    with _patch_days_file(str(f)):
+        assert _load_no_limit_days() == [("600036.SH", _dt.date(2006, 2, 27))]
+
+
+def test_load_no_limit_days_unconfigured_is_empty():
+    """反例: 未配置 / 置空 -> 空名单, 不报错"""
+    from util.dbutil import _load_no_limit_days
+    with _patch_days_file(""):
+        assert _load_no_limit_days() == []
+    with patch("util.dbutil.get_config", return_value={}):
+        assert _load_no_limit_days() == []
+
+
+def test_load_no_limit_days_missing_file_raises(tmp_path):
+    """反例(关键): 已配置但文件不存在必须报错, 不能静默退回 10%"""
+    from util.dbutil import _load_no_limit_days
+    with _patch_days_file(str(tmp_path / "nope.csv")):
+        with pytest.raises(FileNotFoundError):
+            _load_no_limit_days()
+
+
+def test_load_no_limit_days_missing_columns_raises(tmp_path):
+    """反例: 缺 code/date 列必须报错"""
+    from util.dbutil import _load_no_limit_days
+    f = tmp_path / "days.csv"
+    f.write_text("symbol,day\n600036,2006-02-27\n", encoding="utf-8")
+    with _patch_days_file(str(f)):
+        with pytest.raises(ValueError):
+            _load_no_limit_days()
+
+
+def test_repo_reform_list_is_well_formed():
+    """契约: 仓库内的股改复牌首日名单可读、无重复、日期都在 2005-2008、代码带交易所后缀"""
+    from util.dbutil import _load_no_limit_days
+    days = _load_no_limit_days()
+    assert len(days) > 1000
+    assert len(set(days)) == len(days)
+    assert all(_dt.date(2005, 1, 1) <= d <= _dt.date(2008, 12, 31) for _, d in days)
+    assert all(c.endswith((".SH", ".SZ")) for c, _ in days)

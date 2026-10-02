@@ -50,6 +50,9 @@ spring/
 │   ├── validators.py    # 数据校验逻辑
 │   └── checker.py       # 核对框架: 结果状态机与外部数据源可用性判定
 ├── config/              # 配置文件 (config.yaml: 数据库路径、数据源等)
+├── data/                # 基础输入数据 (随仓库分发)
+│   ├── SwClassCode_*.csv        # 申万行业层级定义 (sync_industry --input)
+│   └── reform_resume_days.csv   # 不设涨跌幅的股改复牌首日名单 (update_limit, 见下文)
 ├── tests/               # 测试 (unit / db / integration 三层)
 └── requirements.txt     # Python 依赖清单
 ```
@@ -248,6 +251,38 @@ python  -m etl.fill_shares -b 20260501 -e 20260515
 # 回填换手率(成交量/流通股本; 默认只补 baostock turn 为空的行, -o 覆盖重算; 须在 fill_shares 之后)
 python -m etl.fill_turnover
 ```
+
+**涨跌停的特殊交易日：`data/reform_resume_days.csv`**
+
+`update_limit` 按板块、ST、上市天数计算涨跌停价，但历史上有些交易日按规定**不设涨跌幅**，
+无法从行情数据推算出来，只能靠名单。名单内的 (code, date) 一律写入「无涨跌幅」哨兵值
+`limit_up = 999999.99` / `limit_down = 0.01`，两个涨跌停标志都为 0。
+
+目前收录的是 2005–2008 年**股权分置改革复牌首日**（含股改与重组同时进行的复牌，
+这类复牌首日同样不设涨跌幅）。路径由 `config/config.yaml` 的
+`price_limit.no_limit_days_file` 指定；配置了但文件缺失或缺列时 `update_limit` 直接报错，
+防止名单静默失效、退回按 10% 计算。
+
+| 列 | 含义 |
+|------|------|
+| `code` | 股票代码，带交易所后缀，对齐 `STOCK_INFO.code`（如 `600031.SH`） |
+| `date` | 复牌首日（`YYYY-MM-DD`），当天不设涨跌幅 |
+| `tier` | 收录依据：<br>`price_breach` — 收盘价超出按 10%（ST 为 5%）计算的涨跌停区间，在限价下不可能成交，确定为不设限日；<br>`no_exright` — 未越界，但当日复权因子发生变化、且前收价未除权（等于停牌前收盘），符合「非流通股东送股对价、交易所不除权」的股改特征 |
+| `gap_days` | 复牌前连续停牌的交易日数（股改第一批试点如三一重工只停 1 天） |
+| `last_close` | 停牌前最后一个交易日的收盘价 |
+| `pre_close` | 复牌首日的前收价（`STOCK_DAILY.pre_close`）；等于 `last_close` 表示交易所未做除权 |
+| `close` | 复牌首日的收盘价 |
+
+程序只读取 `code`、`date` 两列，其余列供人工审阅。名单是一次性生成的静态文件
+（2005–2008 年停牌 ≥5 个交易日后的复牌首日，按上面两种依据筛选，另手工补入第一批股改试点），
+维护时直接增删行即可；改动后需对受影响日期重跑涨跌停：
+
+```bash
+python -m etl.update_limit -b 20050101 -e 20081231
+```
+
+上市首日不设涨跌幅的「合并上市」（换股吸收合并、B 转 A）另有名单，在 `config/config.yaml`
+的 `price_limit.no_limit_first_day_codes`；2014-01-01 之前的新股上市首日由程序按规则统一处理，无需列入名单。
 
 #### 同步申万行业数据  
 ```bash

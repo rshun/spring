@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-10-02  Claude  update_price_limits_by_range: 读取 config.yaml price_limit.no_limit_days_file
+#                       (股改复牌首日名单), 命中的 (code, date) 不设涨跌幅
 #   2026-10-02  Claude  update_price_limits_by_range: 2014-01-01 前的上市首日不设涨跌幅
 #                       (新股首日 44% 上限当日才生效), 合并上市名单(config.yaml
 #                       price_limit.no_limit_first_day_codes)首日同样不设限;
@@ -58,7 +60,9 @@
 #                       的 ex_date，两套口径不一致(实测 163/57122 条, 0.285%)会导致候选集
 #                       外、但 ex_date 落在窗口内的股票记录被误删且不会被重新入库，退出码
 #                       却仍是 0
+import csv
 import logging
+from pathlib import Path
 import duckdb
 import pandas as pd
 from . import myutil
@@ -702,6 +706,37 @@ def _no_limit_first_day_codes() -> list[str]:
     return [str(c) for c in (section.get("no_limit_first_day_codes") or [])]
 
 
+# 项目根目录: price_limit.no_limit_days_file 的相对路径按它解析
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_no_limit_days() -> list[tuple[str, date]]:
+    """config.yaml price_limit.no_limit_days_file: 不设涨跌幅的 (code, date) 名单
+
+    目前收录 2005-2008 年股权分置改革复牌首日(data/reform_resume_days.csv)。
+    未配置或置空 -> 空列表; 已配置但文件不存在 / 缺 code、date 列 -> 抛错:
+    名单静默失效会把这些日子退回按 10% 算, 且不报错, 属静默回归。
+    """
+    section = get_config().get("price_limit") or {}
+    configured = str(section.get("no_limit_days_file") or "").strip()
+    if not configured:
+        return []
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    if not path.exists():
+        raise FileNotFoundError(f"price_limit.no_limit_days_file 指向的文件不存在: {path}")
+
+    days: list[tuple[str, date]] = []
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if not {"code", "date"} <= set(reader.fieldnames or []):
+            raise ValueError(f"{path} 缺少 code / date 列, 实际表头: {reader.fieldnames}")
+        for row in reader:
+            days.append((row["code"].strip(), date.fromisoformat(row["date"].strip())))
+    return days
+
+
 def update_price_limits_by_range(start_date: str, end_date: str,
                                  markets: list[str] | None = None,
                                  codes: list[str] | None = None):
@@ -738,6 +773,13 @@ def update_price_limits_by_range(start_date: str, end_date: str,
         else:
             listing_expr = "FALSE"
 
+        # 不设涨跌幅的特定交易日名单(股改复牌首日等), 以临时表参与关联; 空名单也建表,
+        # 让 SQL 形状固定
+        no_limit_days = _load_no_limit_days()
+        con.execute("CREATE OR REPLACE TEMP TABLE _no_limit_days (code VARCHAR, date DATE)")
+        if no_limit_days:
+            con.executemany("INSERT INTO _no_limit_days VALUES (?, ?)", no_limit_days)
+
         # 0.000001 是浮点加法补偿，确保恰好在临界值时 ROUND 向上进位
         calc_sql = f"""
             WITH early_trade_days AS (
@@ -773,11 +815,13 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                     COALESCE(b.is_st, 0) as is_st,
                     -- 99 = 已过前 5 个交易日的哨兵值，下游只判 <= 5 与 = 1
                     COALESCE(e.tn, 99) as days_count,
-                    CASE WHEN {listing_expr} THEN 1 ELSE 0 END as is_merger_listing
+                    CASE WHEN {listing_expr} THEN 1 ELSE 0 END as is_merger_listing,
+                    CASE WHEN n.code IS NOT NULL THEN 1 ELSE 0 END as is_no_limit_day
                 FROM STOCK_DAILY d
                 JOIN STOCK_INFO i ON d.code = i.code
                 LEFT JOIN DAILY_BASIC b ON d.code = b.code AND d.date = b.trade_date
                 LEFT JOIN early_trade_days e ON e.code = i.code AND e.cal_date = d.date
+                LEFT JOIN _no_limit_days n ON n.code = d.code AND n.date = d.date
                 WHERE d.date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                   AND d.tradestatus = 1
                   AND d.pre_close != -1
@@ -789,6 +833,9 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                 SELECT
                     *,
                     CASE
+                        -- 名单内的特定交易日(股权分置改革复牌首日等)不设涨跌幅,
+                        -- 名单见 config.yaml price_limit.no_limit_days_file
+                        WHEN is_no_limit_day = 1 THEN 0.0
                         -- 上市首日不设涨跌幅: 新股首日 44% 上限 2014-01-01 才生效(沪深同日),
                         -- 此前首日无限制; 合并上市(换股吸收合并 / B 转 A)没有发行价, 任何时期
                         -- 首日都不适用 44%。名单见 config.yaml price_limit

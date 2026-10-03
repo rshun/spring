@@ -5,6 +5,9 @@
 #   2026-10-02  Claude  新增上市首日规则正反例: 2014-01-01 前首日不设限、合并上市名单首日不设限
 #                       上市日早于日历起点的股票不得把日历首日当上市首日
 #   2026-10-02  Claude  新增不设涨跌幅交易日名单(股改复牌首日)的正反例与名单文件契约测试
+#   2026-10-03  Claude  名单改为可配多个文件(股改复牌 + 增发/追加对价上市日), 补多文件合并、
+#                       跨文件重复报错的正反例与两份名单的契约测试; _run 改回多行 with
+#   2026-10-03  Claude  股改名单才限 2005-2008; 增发清单补 2011 新规后不得收录增发类的边界与反例
 """update_price_limits_by_range 涨跌停比率计算测试 (聚焦沪深主板 ST 规则切换)。"""
 from unittest.mock import patch, MagicMock
 
@@ -182,7 +185,9 @@ def _seed_listing(mem_db, symbol, exchange, board, trade_days, pre_close=10.0):
 
 
 def _run(mem_db, begin, end, merger_codes=(), no_limit_days=()):
-    with patch("util.dbutil.get_connection", return_value=_wrap(mem_db)),          patch("util.dbutil._no_limit_first_day_codes", return_value=list(merger_codes)),          patch("util.dbutil._load_no_limit_days", return_value=list(no_limit_days)):
+    with (patch("util.dbutil.get_connection", return_value=_wrap(mem_db)),
+          patch("util.dbutil._no_limit_first_day_codes", return_value=list(merger_codes)),
+          patch("util.dbutil._load_no_limit_days", return_value=list(no_limit_days))):
         update_price_limits_by_range(begin, end)
 
 
@@ -323,9 +328,9 @@ def _ins_day(mem_db, code, d, pre_close=10.0):
 
 # ── 名单加载 ──────────────────────────────────────────────────────────────────
 
-def _patch_days_file(value):
+def _patch_days_files(files):
     return patch("util.dbutil.get_config",
-                 return_value={"price_limit": {"no_limit_days_file": value}})
+                 return_value={"price_limit": {"no_limit_days_files": files}})
 
 
 def test_load_no_limit_days_parses_file(tmp_path):
@@ -333,14 +338,39 @@ def test_load_no_limit_days_parses_file(tmp_path):
     from util.dbutil import _load_no_limit_days
     f = tmp_path / "days.csv"
     f.write_text("code,date,tier\n600036.SH,2006-02-27,price_breach\n", encoding="utf-8-sig")
-    with _patch_days_file(str(f)):
+    with _patch_days_files([str(f)]):
         assert _load_no_limit_days() == [("600036.SH", _dt.date(2006, 2, 27))]
 
 
-def test_load_no_limit_days_unconfigured_is_empty():
-    """反例: 未配置 / 置空 -> 空名单, 不报错"""
+def test_load_no_limit_days_merges_multiple_files(tmp_path):
+    """正例: 多个名单文件合并使用, 各文件可有不同的附加列"""
     from util.dbutil import _load_no_limit_days
-    with _patch_days_file(""):
+    a = tmp_path / "reform.csv"
+    a.write_text("code,date,tier\n600036.SH,2006-02-27,price_breach\n", encoding="utf-8")
+    b = tmp_path / "listing.csv"
+    b.write_text("code,date,event,note,source\n600481.SH,2008-01-21,public_offering,,\n",
+                 encoding="utf-8")
+    with _patch_days_files([str(a), str(b)]):
+        assert _load_no_limit_days() == [("600036.SH", _dt.date(2006, 2, 27)),
+                                         ("600481.SH", _dt.date(2008, 1, 21))]
+
+
+def test_load_no_limit_days_duplicate_across_files_raises(tmp_path):
+    """反例(关键): 同一 (code, date) 出现在两份名单里必须报错, 防止重复维护"""
+    from util.dbutil import _load_no_limit_days
+    a = tmp_path / "reform.csv"
+    a.write_text("code,date\n600481.SH,2008-01-21\n", encoding="utf-8")
+    b = tmp_path / "listing.csv"
+    b.write_text("code,date\n600481.SH,2008-01-21\n", encoding="utf-8")
+    with _patch_days_files([str(a), str(b)]):
+        with pytest.raises(ValueError, match="重复"):
+            _load_no_limit_days()
+
+
+def test_load_no_limit_days_unconfigured_is_empty():
+    """反例: 未配置 / 空列表 -> 空名单, 不报错"""
+    from util.dbutil import _load_no_limit_days
+    with _patch_days_files([]):
         assert _load_no_limit_days() == []
     with patch("util.dbutil.get_config", return_value={}):
         assert _load_no_limit_days() == []
@@ -349,7 +379,7 @@ def test_load_no_limit_days_unconfigured_is_empty():
 def test_load_no_limit_days_missing_file_raises(tmp_path):
     """反例(关键): 已配置但文件不存在必须报错, 不能静默退回 10%"""
     from util.dbutil import _load_no_limit_days
-    with _patch_days_file(str(tmp_path / "nope.csv")):
+    with _patch_days_files([str(tmp_path / "nope.csv")]):
         with pytest.raises(FileNotFoundError):
             _load_no_limit_days()
 
@@ -359,16 +389,67 @@ def test_load_no_limit_days_missing_columns_raises(tmp_path):
     from util.dbutil import _load_no_limit_days
     f = tmp_path / "days.csv"
     f.write_text("symbol,day\n600036,2006-02-27\n", encoding="utf-8")
-    with _patch_days_file(str(f)):
+    with _patch_days_files([str(f)]):
         with pytest.raises(ValueError):
             _load_no_limit_days()
 
 
-def test_repo_reform_list_is_well_formed():
-    """契约: 仓库内的股改复牌首日名单可读、无重复、日期都在 2005-2008、代码带交易所后缀"""
+# ── 仓库内名单文件的契约 ──────────────────────────────────────────────────────
+
+def _read_repo_csv(name):
+    import csv
+    from util.dbutil import _PROJECT_ROOT
+    with open(_PROJECT_ROOT / "data" / name, encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def test_repo_lists_load_together_without_duplicates():
+    """契约: config 配置的名单都能读、合并后无重复、代码带交易所后缀"""
     from util.dbutil import _load_no_limit_days
-    days = _load_no_limit_days()
+    days = _load_no_limit_days()          # 跨文件重复时这里就会抛错
     assert len(days) > 1000
-    assert len(set(days)) == len(days)
-    assert all(_dt.date(2005, 1, 1) <= d <= _dt.date(2008, 12, 31) for _, d in days)
     assert all(c.endswith((".SH", ".SZ")) for c, _ in days)
+
+
+def test_repo_reform_list_tiers_are_known():
+    """契约: 股改名单的 tier 只允许 README 中列出的取值, 日期都在股改时期 2005-2008
+    (增发清单不限年份: 增发上市首日不设涨跌幅至少延续到 2010 年)"""
+    rows = _read_repo_csv("reform_resume_days.csv")
+    assert {r["tier"] for r in rows} <= {"price_breach", "no_exright", "manual"}
+    assert all("2005-01-01" <= r["date"] <= "2008-12-31" for r in rows)
+
+
+# 增发上市首日不设涨跌幅的规定 2011 年新版交易规则实施后取消, 此后的增发上市日照常限价,
+# 不得收录。确切实施日待核实, 先按「不晚于 2011 年底」卡边界。追加对价不受此限。
+_OFFERING_RULE_LAST_DATE = "2011-12-31"
+
+
+def _offering_after_rule_change(rows):
+    """返回日期晚于规则取消边界的增发类记录 [(code, date), ...]"""
+    return [(r["code"], r["date"]) for r in rows
+            if r["event"] in ("public_offering", "private_placement")
+            and r["date"] > _OFFERING_RULE_LAST_DATE]
+
+
+def test_offering_after_rule_change_is_caught():
+    """反例: 2012 年的增发上市日必须被拦下; 2010 年的增发、2012 年的追加对价不受影响"""
+    rows = [{"code": "600642.SH", "date": "2010-10-29", "event": "public_offering"},
+            {"code": "600000.SH", "date": "2012-03-01", "event": "public_offering"},
+            {"code": "600001.SH", "date": "2012-03-01", "event": "private_placement"},
+            {"code": "600002.SH", "date": "2012-03-01", "event": "extra_consideration"}]
+    assert _offering_after_rule_change(rows) == [("600000.SH", "2012-03-01"),
+                                                 ("600001.SH", "2012-03-01")]
+
+
+def test_repo_share_listing_list_is_well_formed():
+    """契约: 增发清单列齐全、event 取值合法、日期格式正确, 早先人工核实的 6 条都在"""
+    rows = _read_repo_csv("share_listing_days.csv")
+    assert list(rows[0].keys()) == ["code", "date", "event", "note", "source"]
+    assert {r["event"] for r in rows} <= {"public_offering", "private_placement",
+                                          "extra_consideration"}
+    assert all(_dt.date.fromisoformat(r["date"]) for r in rows)
+    assert _offering_after_rule_change(rows) == []
+    keys = {(r["code"], r["date"]) for r in rows}
+    assert {("600753.SH", "2007-05-22"), ("600481.SH", "2008-01-21"),
+            ("000921.SZ", "2008-04-11"), ("000722.SZ", "2008-04-17"),
+            ("000868.SZ", "2008-05-09"), ("600594.SH", "2008-06-17")} <= keys

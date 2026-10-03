@@ -1,4 +1,6 @@
 # 修改记录:
+#   2026-10-03  Claude  不设涨跌幅名单改为可配多个文件(price_limit.no_limit_days_files),
+#                       新增增发/追加对价上市日清单; 跨文件重复的 (code, date) 报错
 #   2026-10-02  Claude  update_price_limits_by_range: 读取 config.yaml price_limit.no_limit_days_file
 #                       (股改复牌首日名单), 命中的 (code, date) 不设涨跌幅
 #   2026-10-02  Claude  update_price_limits_by_range: 2014-01-01 前的上市首日不设涨跌幅
@@ -706,34 +708,42 @@ def _no_limit_first_day_codes() -> list[str]:
     return [str(c) for c in (section.get("no_limit_first_day_codes") or [])]
 
 
-# 项目根目录: price_limit.no_limit_days_file 的相对路径按它解析
+# 项目根目录: price_limit.no_limit_days_files 中的相对路径按它解析
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_no_limit_days() -> list[tuple[str, date]]:
-    """config.yaml price_limit.no_limit_days_file: 不设涨跌幅的 (code, date) 名单
+    """config.yaml price_limit.no_limit_days_files: 不设涨跌幅的 (code, date) 名单, 可配多个文件
 
-    目前收录 2005-2008 年股权分置改革复牌首日(data/reform_resume_days.csv)。
-    未配置或置空 -> 空列表; 已配置但文件不存在 / 缺 code、date 列 -> 抛错:
+    目前两份: data/reform_resume_days.csv(股权分置改革复牌首日)、
+    data/share_listing_days.csv(增发 / 追加对价股份上市日)。各文件至少含 code、date 两列,
+    多个文件合并使用。
+    未配置或为空列表 -> 空名单; 已配置但文件不存在 / 缺 code、date 列 -> 抛错:
     名单静默失效会把这些日子退回按 10% 算, 且不报错, 属静默回归。
+    同一 (code, date) 在名单中出现两次也抛错, 防止两份名单重复维护后各改各的。
     """
     section = get_config().get("price_limit") or {}
-    configured = str(section.get("no_limit_days_file") or "").strip()
-    if not configured:
-        return []
-    path = Path(configured).expanduser()
-    if not path.is_absolute():
-        path = _PROJECT_ROOT / path
-    if not path.exists():
-        raise FileNotFoundError(f"price_limit.no_limit_days_file 指向的文件不存在: {path}")
+    configured = [str(x).strip() for x in (section.get("no_limit_days_files") or []) if str(x).strip()]
 
     days: list[tuple[str, date]] = []
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        if not {"code", "date"} <= set(reader.fieldnames or []):
-            raise ValueError(f"{path} 缺少 code / date 列, 实际表头: {reader.fieldnames}")
-        for row in reader:
-            days.append((row["code"].strip(), date.fromisoformat(row["date"].strip())))
+    seen: dict[tuple[str, date], Path] = {}
+    for item in configured:
+        path = Path(item).expanduser()
+        if not path.is_absolute():
+            path = _PROJECT_ROOT / path
+        if not path.exists():
+            raise FileNotFoundError(f"price_limit.no_limit_days_files 中的文件不存在: {path}")
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            if not {"code", "date"} <= set(reader.fieldnames or []):
+                raise ValueError(f"{path} 缺少 code / date 列, 实际表头: {reader.fieldnames}")
+            for row in reader:
+                key = (row["code"].strip(), date.fromisoformat(row["date"].strip()))
+                if key in seen:
+                    raise ValueError(f"不设涨跌幅名单重复: {key[0]} {key[1]} "
+                                     f"同时出现在 {seen[key].name} 与 {path.name}")
+                seen[key] = path
+                days.append(key)
     return days
 
 
@@ -833,8 +843,8 @@ def update_price_limits_by_range(start_date: str, end_date: str,
                 SELECT
                     *,
                     CASE
-                        -- 名单内的特定交易日(股权分置改革复牌首日等)不设涨跌幅,
-                        -- 名单见 config.yaml price_limit.no_limit_days_file
+                        -- 名单内的特定交易日(股改复牌首日、增发/追加对价股份上市日)不设涨跌幅,
+                        -- 名单见 config.yaml price_limit.no_limit_days_files
                         WHEN is_no_limit_day = 1 THEN 0.0
                         -- 上市首日不设涨跌幅: 新股首日 44% 上限 2014-01-01 才生效(沪深同日),
                         -- 此前首日无限制; 合并上市(换股吸收合并 / B 转 A)没有发行价, 任何时期

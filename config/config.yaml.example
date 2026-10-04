@@ -1,21 +1,28 @@
-# spring 项目全局配置
-# 所有硬编码的固定值统一管理于此文件
+# spring 配置模板(占位符版)
+#
+# 用法: 复制为同目录下的 config.yaml 后修改 local_paths 一节; 其余各节为通用默认值, 一般无需改动。
+#   安装包部署: spring-init 会自动把本文件复制为 $SPRING_HOME/config/config.yaml
+#   源码部署:   cp config/config.yaml.example config/config.yaml
+# 维护约定: 除 local_paths 外, 本文件须与 config/config.yaml 保持一致
+#           (tests/unit/test_config_example.py 会校验)。
 
-# Windows 本机通达信安装路径；非 Windows 系统下忽略此节
+# 本机路径配置: 一律写绝对路径(不要用 ~ 或相对路径)。
+# ~ 会随「执行命令的用户」变化, 相对路径会随启动目录变化, cron / systemd / 手工执行
+# 可能因此各自读写一个不同的库。下面的 /absolute/path/to/... 均为占位符, 部署时必须改掉。
 local_paths:
-  # 通达信 Vipdoc 根目录（其下分 sh/sz/.../lday/*.day）
-  tdx_vipdoc: "C:\\new_zszq_cf\\Vipdoc"
-  # 通达信 gbbq 股本变迁二进制文件路径
-  tdx_gbbq: "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
-  # DuckDB 正式库文件路径（~ 会展开为用户主目录）
-  db: "~/data/quant.db"
-  # DuckDB 测试库文件路径：正式库被 MCP server 等进程占用(写锁冲突)时，
-  # 把 db_active 切到 test 即可让 ETL/脚本改用此库，互不干扰
-  db_test: "~/data/quant_test.db"
-  # 当前生效的库：prod=正式库(db) | test=测试库(db_test)；缺省/留空按 prod
+  # 通达信 Vipdoc 根目录(其下分 sh/sz/.../lday/*.day); 仅 Windows 读取, 例如 "C:\\new_zszq_cf\\Vipdoc"(双引号内反斜杠写两个)
+  tdx_vipdoc: "/absolute/path/to/Vipdoc"
+  # 通达信 gbbq 股本变迁二进制文件; 仅 Windows 读取, 例如 "C:\\new_zszq_cf\\T0002\\hq_cache\\gbbq"
+  tdx_gbbq: "/absolute/path/to/gbbq"
+  # DuckDB 正式库文件, 例如 Linux: /srv/data/quant.db; Windows: "D:\\data\\quant.db"
+  db: "/absolute/path/to/quant.db"
+  # DuckDB 测试库文件: 正式库被 MCP server 等进程占用(写锁冲突)时,
+  # 把 db_active 切到 test 即可让 ETL/脚本改用此库, 互不干扰
+  db_test: "/absolute/path/to/quant_test.db"
+  # 当前生效的库: prod=正式库(db) | test=测试库(db_test); 缺省/留空按 prod
   db_active: "prod"
-  # 基础/输入数据目录（如 sync_industry 的 SwClassCode_2021.csv）；
-  # 未配置或留空时回退到项目根目录下的 data/
+  # 基础/输入数据目录(如 sync_industry 的 SwClassCode_2021.csv);
+  # 留空即使用随包分发的 data/ 目录; 如需自定义, 同样写绝对路径
   data_dir: ""
 
 # 涨跌停价计算(etl.update_limit -> dbutil.update_price_limits_by_range)

@@ -51,7 +51,7 @@ spring/
 │   ├── validators.py    # 数据校验逻辑
 │   ├── checker.py       # 核对框架: 结果状态机与外部数据源可用性判定
 │   └── paths.py         # 程序目录 / 运行目录(SPRING_HOME) 路径约定
-├── config/              # 配置文件 (config.yaml: 数据库路径、数据源等)
+├── config/              # 配置文件 (config.yaml: 数据库路径、数据源等; config.yaml.example: 占位符模板)
 ├── data/                # 基础输入数据 (随仓库分发)
 │   ├── SwClassCode_*.csv        # 申万行业层级定义 (sync_industry --input)
 │   ├── reform_resume_days.csv   # 不设涨跌幅名单: 股改复牌首日 (update_limit, 见下文)
@@ -136,12 +136,25 @@ python -m build
 # 2. 目标机安装(推荐 pipx, 每个应用一个独立虚拟环境; 依赖由 pip 自动安装)
 pipx install dist/spring_quant-0.1.0-py3-none-any.whl
 
-# 3. 首次使用: 初始化运行目录(建目录、复制配置模板, 已有配置不覆盖)
+# 3. 首次使用: 初始化运行目录(建目录, 把占位符模板 config.yaml.example 复制为 config.yaml; 已有配置不覆盖)
 spring-init
 
-# 4. 按本机情况修改 ~/.spring/config/config.yaml, 需要同花顺接口时在 ~/.spring/.env 写入 THS_API_KEY
+# 4. 把 ~/.spring/config/config.yaml 中 local_paths 的 /absolute/path/to/... 占位符改为本机绝对路径
+#    (规则见下方「配置文件路径规则」); 需要同花顺接口时在 ~/.spring/.env 写入 THS_API_KEY
 spring-init-db
 ```
+
+**配置文件路径规则**（源码部署与安装包部署通用）
+
+- `config.yaml` 中 `local_paths` 下的路径（`db`、`db_test`、`tdx_vipdoc`、`tdx_gbbq`、自定义的 `data_dir`）
+  **一律写绝对路径，不要用 `~` 或相对路径**。`~` 会随「执行命令的用户」变化，相对路径会随启动目录变化，
+  cron、systemd、手工执行可能因此各自读写一个不同的库，且不会报错。
+- 写在双引号里的 Windows 路径，反斜杠要写两个，例如 `"D:\\data\\quant.db"`；也可以写成 `"D:/data/quant.db"`。
+- `price_limit.no_limit_days_files` 是随包分发的名单文件，**保持相对路径**（先找运行目录，再找程序目录），
+  不受上面这条约束。
+- 配置模板是 [`config/config.yaml.example`](config/config.yaml.example)：除 `local_paths` 为占位符外，
+  其余各节与 `config/config.yaml` 完全一致（`tests/unit/test_config_example.py` 校验）。修改 `config.yaml`
+  的通用配置时须同步修改模板；仓库里的 `config/config.yaml` 是开发机自用配置，部署时请以模板为准。
 
 每个程序安装后都有一个对应命令，命令名为 `spring-` 加程序名（下划线换成连字符），参数与
 `python -m` 写法完全相同，例如：
@@ -161,12 +174,192 @@ spring-init-db
 解释器（pipx 安装时在 `pipx` 的 venvs 目录下），外部调度方（如 etl-quant-mcp）应通过环境变量把
 `SPRING_HOME` 传给子进程。
 
+#### Linux 服务器部署示例
+
+以「程序装在 `/opt/spring`、运行目录 `/srv/spring`、数据库放 `/srv/data`」为例。要求 Python 3.11+
+（`python3 --version` 确认；Debian/Ubuntu 建 venv 报 `ensurepip is not available` 时需先装系统包 `python3-venv`）。
+
+```bash
+# 1. 建目录并交给运行用户(/opt、/srv 默认只有 root 可写)
+sudo mkdir -p /opt/spring /srv/spring /srv/data
+sudo chown your_user:your_group /opt/spring /srv/spring /srv/data
+
+# 2. 用自建 venv 安装(目录完全自定; 程序与依赖都在 /opt/spring 下)
+python3 -m venv /opt/spring
+/opt/spring/bin/pip install spring_quant-<版本>-py3-none-any.whl
+
+# 3. 指定运行目录(只对当前用户的交互 shell 生效)并初始化
+echo 'export SPRING_HOME=/srv/spring' >> ~/.bashrc
+echo 'export PATH=/opt/spring/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
+spring-init
+```
+
+`spring-init` 生成的 `/srv/spring/config/config.yaml` 来自占位符模板，把 `local_paths` 改为绝对路径
+（Linux 上只需改这一节，规则见上方「配置文件路径规则」）：
+
+```yaml
+local_paths:
+  db: "/srv/data/quant.db"            # 替换占位符 /absolute/path/to/quant.db
+  db_test: "/srv/data/quant_test.db"  # 替换占位符 /absolute/path/to/quant_test.db
+  db_active: "prod"
+  # tdx_vipdoc / tdx_gbbq 是 Windows 通达信路径, Linux 上不读取, 保留占位符即可
+```
+
+需要同花顺接口时，在 `/srv/spring/.env` 写入 `THS_API_KEY=your_api_key_here` 并 `chmod 600`
+（只有 `sync_xdr_ths` 读取该文件，须由文件属主执行）。
+
+**新库首次初始化顺序**（缺了后两步，取数程序会报「数据库中没有找到符合条件的股票」）：
+
+```bash
+spring-init-db          # 建表(幂等, 对已有库只补缺失的表)
+spring-trade-cal        # 交易日历, 其他程序判断交易日都依赖它
+spring-sync-basic -f    # 股票基本信息; 非交易日执行要加 -f
+```
+
+验证：`/opt/spring/bin/python -c "from util.paths import spring_home; from util import myutil; print(spring_home(), myutil.get_default_dbfile())"`
+应输出 `/srv/spring /srv/data/quant.db`。注意 `import_daily -p` 虽然不写库，但同样要求库已存在且
+`STOCK_INFO` 中有该股票。
+
+**注意事项**
+
+- **cron 与 systemd 不读 `~/.bashrc`**：定时脚本里必须显式 `export SPRING_HOME=/srv/spring`，并用绝对路径
+  调用命令；systemd 服务在单元文件里用 `Environment=SPRING_HOME=/srv/spring` 设置。
+- **多个用户共用运行目录 / 数据库目录时用组权限，不要用 777**（777 会让任何账号读到 `.env` 中的密钥、改写数据库）。
+  DuckDB 写库时会在库文件同目录生成 `.wal` 文件，因此目录本身也要组可写；建议加默认 ACL，
+  让任一方新建的文件对组自动可写：
+  ```bash
+  sudo chgrp your_group /srv/spring /srv/data
+  sudo chmod 2770 /srv/spring /srv/data
+  sudo setfacl -d -m g:your_group:rwX /srv/spring /srv/data
+  ```
+- **同一时间只能有一个进程写库**：手工补数不要与定时任务、etl-quant-mcp 的任务同时运行。
+- **源码部署与安装包部署并存时**，两边 `config.yaml` 的 `db` 要指向同一个库文件，否则数据会分别写进两个库。
+
+定时脚本示例（只列关键写法，取数顺序同下文「ETL」一节）：
+
+```bash
+SPRING_BIN=/opt/spring/bin
+export SPRING_HOME=/srv/spring
+TODAY=$(date '+%Y%m%d')
+
+$SPRING_BIN/spring-import-daily -b $TODAY -e $TODAY
+$SPRING_BIN/spring-adjust       -b $TODAY -e $TODAY
+# 完整性核对通过(退出码 0)后再补齐指标
+if $SPRING_BIN/spring-check-daily -b $TODAY -e $TODAY; then
+    $SPRING_BIN/spring-fill-volratio -b $TODAY -e $TODAY
+fi
+```
+
+#### 升级与卸载
+
+程序目录与运行目录分开存放，**升级、卸载只动程序目录**（venv），运行目录（配置、`.env`、日志）和数据库都不受影响。
+下面以自建 venv `/opt/spring` 为例；用 pipx 安装的，把 `/opt/spring/bin/pip install` 换成
+`pipx install --force`，`/opt/spring/bin/pip uninstall` 换成 `pipx uninstall spring-quant`。
+Windows 自建 venv 时，把 `/opt/spring/bin/` 换成 `D:\apps\spring\Scripts\`。
+
+**查看当前版本**
+
+```bash
+/opt/spring/bin/pip show spring-quant
+```
+
+**升级**（在定时任务和 etl-quant-mcp 都没有任务运行时进行）
+
+```bash
+# 1. 备份数据库(新版本可能新增表或修改数据处理逻辑, 先留一份可回退的副本)
+cp -p /srv/data/quant.db /srv/data/quant.db.bak
+
+# 2. 安装新版本(覆盖旧版本; 依赖有变化时 pip 会一并处理)
+/opt/spring/bin/pip install spring_quant-<新版本>-py3-none-any.whl
+
+# 3. 补建新版本新增的表(幂等, 已有表和数据不受影响)
+spring-init-db
+
+# 4. 对比配置模板: 新版本若新增了配置项, 手工补进自己的 config.yaml
+#    (spring-init 不会覆盖已有配置, 新配置项不会自动出现)
+diff /srv/spring/config/config.yaml \
+  "$(/opt/spring/bin/python -c 'from util.paths import PACKAGE_ROOT; print(PACKAGE_ROOT)')/config/config.yaml.example"
+
+# 5. 验证
+/opt/spring/bin/pip show spring-quant
+spring-check-daily -b <最近交易日> -e <最近交易日>
+```
+
+第 4 步的 `diff` 中，`local_paths` 的差异是正常的（你的配置是真实路径，模板是占位符），只需关注**新增的配置项**。
+
+**回退到旧版本**：用旧版本的 `.whl` 再执行一次第 2 步即可。若新版本已对数据库做过改动，还需要用第 1 步的备份恢复数据库。
+
+**单独升级某个依赖包（以 akshare 为例）**
+
+`datasource/akstock.py` 底层调用的是第三方包 akshare。它接口变动频繁，经常需要单独升级，直接在 spring 所在 venv 里
+`pip install --upgrade` 即可，**不需要重新打包或重装 spring**。但要注意：
+
+- akshare 在 `pyproject.toml` 中**未锁版本**，可以随时升级；`pandas` / `numpy` / `duckdb` 是**锁定版本**的。
+  若新版 akshare 要求更高的 pandas，pip 会把它一并升级，事后只打印一条警告——`duckdb` 关系到库文件格式，**绝不能被连带升级**。
+- 受 akshare 影响的程序：`sync_basic`（`-s akstock`）、`sync_industry`、`sync_margin`、`sync_limit_pool`、`sync_suspension`。
+- 之后升级 spring 本身不会把 akshare 降回去（未锁版本时 pip 保留已安装的版本）。
+
+建议先在开发机的虚拟环境里升级同一版本并跑一遍 `pytest`。单元测试全部是 mock，验证不了真实接口，
+**下面第 5 步的真实取数检查才是关键**。在定时任务没有运行时操作：
+
+```bash
+# 1. 记录当前版本, 留作回退依据
+/opt/spring/bin/pip show akshare | grep Version
+/opt/spring/bin/pip freeze > /srv/spring/pip-freeze-$(date +%Y%m%d).txt
+
+# 2. 预演: 只显示将要变动的包, 不实际安装
+/opt/spring/bin/pip install --upgrade akshare --dry-run
+
+# 3. 正式升级(镜像未同步到最新版时, 加 -i https://pypi.org/simple 改从官方源安装)
+/opt/spring/bin/pip install --upgrade akshare
+
+# 4. 检查依赖一致性, 预期输出 No broken requirements found.
+/opt/spring/bin/pip check
+
+# 5. 真实取数检查(只联网取数, 不写库; 日期换成最近的交易日)
+/opt/spring/bin/python -c "from datasource import akstock; print(akstock.fetch_suspension('20260930').shape); print(akstock.fetch_limit_pool('20260930').shape)"
+```
+
+- 第 2 步的 `Would install ...` 里**出现 `pandas`、`numpy` 或 `duckdb` 时，停止升级**：新版 akshare 与 spring 锁定的版本冲突，
+  需要先评估、调整 spring 的依赖版本并发布新版本。
+- 第 4 步提示 `spring-quant requires ...`，或第 5 步报错（例如接口返回缺少列），按下面的方法回退。
+- 升级后的第一个交易日，检查定时任务日志：`grep -E "ERROR|WARNING" /srv/spring/log/stockdaily<日期>.log`。
+
+回退：
+
+```bash
+# 只回退 akshare
+/opt/spring/bin/pip install akshare==<第 1 步记录的版本>
+
+# pandas / numpy / duckdb 也被连带改动时, 按第 1 步的快照整体恢复
+/opt/spring/bin/pip install -r /srv/spring/pip-freeze-<日期>.txt
+```
+
+其他依赖（如 baostock）的升级流程相同，把包名换掉即可。
+
+**卸载**
+
+```bash
+# 1. 卸载程序(只删除 venv 里的 spring 代码与命令, 第三方依赖仍留在 venv 中)
+/opt/spring/bin/pip uninstall spring-quant
+```
+
+如需彻底清理，以下步骤会**永久删除**文件，执行前请确认路径和备份：
+
+- 整个 venv 目录 `/opt/spring`（程序与全部依赖；删除后无法再运行任何 `spring-*` 命令）
+- 运行目录 `/srv/spring`（含配置、`.env` 中的密钥、日志）——不打算重装时再删
+- 数据库 `/srv/data/quant.db`——**删除前务必确认已有可用备份**，库中历史数据无法从安装包恢复
+- 同时删除 `~/.bashrc` 中 `SPRING_HOME` / `PATH` 两行、crontab 中的定时任务，以及 systemd 服务里的
+  `SPRING_HOME` 等设置，否则定时任务会持续报「命令不存在」
+
 ### **数据库初始化**
-   在 `config/config.yaml` 中配置 `local_paths.db` 指向你的本地数据库文件路径（默认 `~/data/quant.db`），然后执行初始化脚本建表：
+   在 `config/config.yaml` 中配置 `local_paths.db` 指向你的数据库文件，**写绝对路径**（见上文「配置文件路径规则」；
+   新机器可先 `cp config/config.yaml.example config/config.yaml` 再替换占位符），然后执行初始化脚本建表：
 ```yaml
    # config/config.yaml
    local_paths:
-     db: "~/data/quant.db"
+     db: "/srv/data/quant.db"        # Windows 例: "D:/data/quant.db"
 ```
 ```bash
    python -m etl.init_db

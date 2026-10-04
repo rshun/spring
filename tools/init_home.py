@@ -1,10 +1,12 @@
 # 修改记录:
 #   2026-10-04  Claude  新建: 安装包部署时初始化运行目录 SPRING_HOME(建目录 + 复制配置模板)
+#   2026-10-04  Claude  模板改用占位符版 config/config.yaml.example, 不再复制开发机的 config.yaml
 """
 初始化运行目录 SPRING_HOME
 
 安装包部署后首次使用前运行一次: 建好 config/ log/ csv/ download/ 目录,
-并把随包分发的 config.yaml 复制为运行目录下的 config/config.yaml 供修改。
+并把随包分发的 config/config.yaml.example 复制为运行目录下的 config/config.yaml,
+其中 local_paths 是占位符, 须改为本机的绝对路径。
 已存在的配置文件一律不覆盖, 重复运行安全。
 源码部署时运行目录就是项目根目录, 本工具只会补建缺失的目录。
 
@@ -23,6 +25,7 @@ from util.paths import PACKAGE_ROOT, spring_home
 
 RUNTIME_DIRS = ("config", "log", "csv", "download")
 CONFIG_RELATIVE = ("config", "config.yaml")
+TEMPLATE_RELATIVE = ("config", "config.yaml.example")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def init_home() -> int:
     home = spring_home()
-    template = PACKAGE_ROOT.joinpath(*CONFIG_RELATIVE)
+    template = PACKAGE_ROOT.joinpath(*TEMPLATE_RELATIVE)
     target = home.joinpath(*CONFIG_RELATIVE)
     try:
         for name in RUNTIME_DIRS:
@@ -46,7 +49,8 @@ def init_home() -> int:
             return 1
         else:
             shutil.copyfile(template, target)
-            print(f"已生成配置文件, 请按本机情况修改: {target}")
+            print(f"已生成配置文件: {target}")
+            print("请把其中 local_paths 的 /absolute/path/to/... 占位符改为本机的绝对路径(不要用 ~)")
     except OSError as e:
         print(f"初始化运行目录失败: {e}", file=sys.stderr)
         return 1

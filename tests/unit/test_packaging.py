@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-10-04  Claude  新建: pyproject.toml 安装包契约(命令入口 / 随包资源)的正反例
+#   2026-10-04  Claude  随包资源补 config/config.yaml.example(spring-init 的模板)
 """pyproject.toml 契约: 命令入口都能解析到可调用对象, 程序不漏注册, 资源文件随包分发"""
 import importlib
 import re
@@ -56,6 +57,7 @@ def test_package_data_covers_runtime_resources():
     """正例: 运行时从程序目录读取的资源都被 package-data 收入安装包"""
     package_data = PYPROJECT["tool"]["setuptools"]["package-data"]
     required = [Path("sql/schema.sql"), Path("config/config.yaml"), Path("config/pipeline.yaml"),
+                Path("config/config.yaml.example"),
                 Path("data/SwClassCode_2021.csv"), Path("data/reform_resume_days.csv"),
                 Path("data/share_listing_days.csv")]
     for rel in required:

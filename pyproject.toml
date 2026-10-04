@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-10-04  Claude  新建: 安装包(wheel)部署配置, 每个 ETL / 工具注册一个 spring-* 命令
+#   2026-10-04  Claude  package-data 收入 config/config.yaml.example(spring-init 的占位符模板)
 #
 # 构建: python -m build  (产出 dist/*.whl, 纯 Python, Windows / Linux / macOS 通用)
 # 安装: pipx install dist/spring_quant-<版本>-py3-none-any.whl
@@ -78,4 +79,4 @@ namespaces = true
 [tool.setuptools.package-data]
 sql = ["*.sql"]
 data = ["*.csv"]
-config = ["*.yaml"]
+config = ["*.yaml", "*.yaml.example"]

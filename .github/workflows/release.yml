@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-10-04  Claude  新建: 三平台测试 + 构建 wheel + 安装冒烟测试; 推送 v* 标签时发布 Release
+#   2026-10-04  Claude  冒烟测试: spring-init 生成占位符模板后先替换库路径再建库
 #
 # 普通推送 / PR: 只跑 test + build, 不发布
 # 推送标签 vX.Y.Z: 额外校验标签与 pyproject.toml 版本号一致, 通过后创建 GitHub Release 并上传安装包
@@ -59,8 +60,12 @@ jobs:
           cd "$RUNNER_TEMP"
           export SPRING_HOME="$RUNNER_TEMP/spring_home"
           spring-init
+          # spring-init 生成的是占位符模板, 按部署流程把库路径改成真实的绝对路径
+          sed -i "s#/absolute/path/to/quant.db#$RUNNER_TEMP/quant.db#" "$SPRING_HOME/config/config.yaml"
+          grep -n "db:" "$SPRING_HOME/config/config.yaml"
           spring-describe-cli --list
           spring-init-db
+          test -f "$RUNNER_TEMP/quant.db"
       - uses: actions/upload-artifact@v4
         with:
           name: dist

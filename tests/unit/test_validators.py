@@ -1,6 +1,11 @@
+# 修改记录:
+#   2026-10-04  Claude  单日交易日校验测试改 mock get_trading_day_status: 原先 mock 的
+#                       check_is_trading_day 已不被调用, 测试实际查本机正式库, 无库的机器(CI)上失败;
+#                       补「日历无该日记录」反例
 import pytest
 from unittest.mock import patch
 
+from util import dbutil
 from util.validators import (
     ValidationError,
     run,
@@ -79,17 +84,31 @@ def test_v_single_day_unequal_skips():
 
 
 def test_v_single_day_equal_trading_day():
-    with patch("util.validators.dbutil.check_is_trading_day", return_value=True):
+    with patch("util.validators.dbutil.get_trading_day_status",
+               return_value=dbutil.TRADING_DAY_OPEN):
         v = v_single_day_must_be_trading_day("b", "e")
         assert v({"b": "20230103", "e": "20230103"}) == []
 
 
 def test_v_single_day_equal_non_trading_day():
-    with patch("util.validators.dbutil.check_is_trading_day", return_value=False):
+    with patch("util.validators.dbutil.get_trading_day_status",
+               return_value=dbutil.TRADING_DAY_CLOSED):
         v = v_single_day_must_be_trading_day("b", "e")
         errors = v({"b": "20230101", "e": "20230101"})
     assert len(errors) == 1
     assert "2023-01-01" in errors[0].message
+    assert "休市" in errors[0].message
+
+
+def test_v_single_day_not_in_calendar():
+    """反例: 日历无该日记录 -> 提示同步 TRADE_CAL, 不得误报成休市"""
+    with patch("util.validators.dbutil.get_trading_day_status",
+               return_value=dbutil.TRADING_DAY_UNKNOWN):
+        v = v_single_day_must_be_trading_day("b", "e")
+        errors = v({"b": "20230103", "e": "20230103"})
+    assert len(errors) == 1
+    assert "trade_cal" in errors[0].message
+    assert "休市" not in errors[0].message
 
 
 def test_v_single_day_only_one_field_raises():

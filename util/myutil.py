@@ -9,6 +9,7 @@
 #                       取值都静默回落正式库，实测 "db_test" 把「测试」跑批写进了 quant.db
 #   2026-09-12  Claude  新增 symbol_to_std_code 裸码转标准代码
 #   2026-09-13  Claude  新增 load_env 读取 .env，不引入 python-dotenv
+#   2026-10-04  Claude  log/ 与 .env 改用运行目录 SPRING_HOME，schema.sql 改用程序目录，支持安装包部署
 import time
 import os
 import pkgutil
@@ -20,12 +21,14 @@ from functools import wraps
 from pathlib import Path
 from types import ModuleType
 
+from util.paths import PACKAGE_ROOT, spring_home
+
 logger = logging.getLogger("etl.util.myutil")
 
 def configure_etl_logging(console_stream=None) -> None:
     """配置 ETL 共享日志输出
 
-    日志文件: <项目根>/log/stockdailyYYYYMMDD.log
+    日志文件: <运行目录 SPRING_HOME>/log/stockdailyYYYYMMDD.log(源码部署时即项目根/log)
     每行格式: HH:MM:SS [module_name] [LEVEL] message
 
     console_stream: 控制台输出流，默认 sys.stdout。
@@ -45,7 +48,7 @@ def configure_etl_logging(console_stream=None) -> None:
     )
 
     try:
-        log_dir = Path(__file__).resolve().parents[1] / "log"
+        log_dir = spring_home() / "log"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"stockdaily{datetime.now().strftime('%Y%m%d')}.log"
 
@@ -135,8 +138,7 @@ def get_sql_file() -> Path:
     返回:
         sql文件路径
     """
-    root = Path(__file__).resolve().parents[1]
-    schema_sql = root / "sql" / "schema.sql"
+    schema_sql = PACKAGE_ROOT / "sql" / "schema.sql"
     if not schema_sql.is_file():
         raise FileNotFoundError(f"错误：找不到数据库架构文件 '{schema_sql}'。请确保该文件存在。")
 
@@ -239,7 +241,7 @@ def symbol_to_std_code(symbol: str) -> str | None:
 
 
 def load_env(path: str | Path | None = None) -> int:
-    """把项目根目录 .env 的 KEY=VALUE 读进 os.environ，返回写入的键数。
+    """把运行目录(SPRING_HOME，源码部署时即项目根目录) .env 的 KEY=VALUE 读进 os.environ，返回写入的键数。
 
     不引入 python-dotenv：全项目只有一个密钥要读，格式简单，
     不值得为它多一个依赖（依赖红线）。
@@ -250,7 +252,7 @@ def load_env(path: str | Path | None = None) -> int:
     文件不存在返回 0 且不抛错：未配置 .env 是常态，调用方靠
     os.environ.get() 拿不到值时再报错，错误信息更贴近使用场景。
     """
-    env_path = Path(path) if path else Path(__file__).resolve().parents[1] / ".env"
+    env_path = Path(path) if path else spring_home() / ".env"
     if not env_path.is_file():
         return 0
 

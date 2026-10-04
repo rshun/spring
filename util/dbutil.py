@@ -1,4 +1,5 @@
 # 修改记录:
+#   2026-10-04  Claude  no_limit_days_files 相对路径改为先找运行目录再找程序目录, 支持安装包部署
 #   2026-10-03  Claude  不设涨跌幅名单改为可配多个文件(price_limit.no_limit_days_files),
 #                       新增增发/追加对价上市日清单; 跨文件重复的 (code, date) 报错
 #   2026-10-02  Claude  update_price_limits_by_range: 读取 config.yaml price_limit.no_limit_days_file
@@ -69,6 +70,7 @@ import duckdb
 import pandas as pd
 from . import myutil
 from .config import get_config
+from .paths import resolve_data_file
 from datetime import datetime, date
 from typing import List, Tuple, Optional
 
@@ -708,10 +710,6 @@ def _no_limit_first_day_codes() -> list[str]:
     return [str(c) for c in (section.get("no_limit_first_day_codes") or [])]
 
 
-# 项目根目录: price_limit.no_limit_days_files 中的相对路径按它解析
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
 def _load_no_limit_days() -> list[tuple[str, date]]:
     """config.yaml price_limit.no_limit_days_files: 不设涨跌幅的 (code, date) 名单, 可配多个文件
 
@@ -730,7 +728,8 @@ def _load_no_limit_days() -> list[tuple[str, date]]:
     for item in configured:
         path = Path(item).expanduser()
         if not path.is_absolute():
-            path = _PROJECT_ROOT / path
+            # 相对路径: 先找运行目录(用户自加的名单), 再找程序目录(随包分发的名单)
+            path = resolve_data_file(path)
         if not path.exists():
             raise FileNotFoundError(f"price_limit.no_limit_days_files 中的文件不存在: {path}")
         with open(path, encoding="utf-8-sig", newline="") as f:

@@ -11,6 +11,7 @@
 #                       改传 codes=candidates 收窄删除范围; (2) 候选集为空是多数交易日
 #                       的正常结果, 不该算"部分成功", 改为返回 0 而非 3；顺带把 -x 的
 #                       报错文案从"同上原因"改成写全, 单独触发时也能看到完整解释
+#   2026-10-04  Claude  DOWNLOAD_DIR 改用运行目录 SPRING_HOME/download, 支持安装包部署
 """同花顺除权事件入库工具
 
 两种模式:
@@ -43,10 +44,11 @@ import pandas as pd
 from datasource import ths
 from util import dbutil, myutil
 from util import validators as pv
+from util.paths import spring_home
 
 logger = logging.getLogger("etl.sync_xdr_ths")
 
-DOWNLOAD_DIR = Path(__file__).resolve().parents[1] / "download"
+DOWNLOAD_DIR = spring_home() / "download"
 PARQUET_GLOB = "a_share_adjustment_factors_event_*.parquet"
 _DATE_SUFFIX_RE = re.compile(r"(\d{8})\.parquet$")
 

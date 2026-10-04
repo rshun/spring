@@ -42,19 +42,22 @@ spring/
 │   │   ├── suspension.py       # 停牌一致性核对(SUSPENSION_DAILY vs STOCK_DAILY)
 │   │   └── limit_pool.py       # 涨跌停一致性核对(LIMIT_POOL_DAILY vs DAILY_BASIC)
 │   ├── export_etl_tables.py    # 按程序导出其写入的表 (跨机器搬运数据)
-│   └── import_etl_tables.py    # 导入上面导出的 parquet (幂等 upsert)
+│   ├── import_etl_tables.py    # 导入上面导出的 parquet (幂等 upsert)
+│   └── init_home.py            # 安装包部署: 初始化运行目录 SPRING_HOME (spring-init)
 ├── util/                # 核心工具包
 │   ├── dbutil.py        # 数据库连接与执行工具
 │   ├── myutil.py        # 通用辅助函数
 │   ├── config.py        # 读取 config/config.yaml 配置
 │   ├── validators.py    # 数据校验逻辑
-│   └── checker.py       # 核对框架: 结果状态机与外部数据源可用性判定
+│   ├── checker.py       # 核对框架: 结果状态机与外部数据源可用性判定
+│   └── paths.py         # 程序目录 / 运行目录(SPRING_HOME) 路径约定
 ├── config/              # 配置文件 (config.yaml: 数据库路径、数据源等)
 ├── data/                # 基础输入数据 (随仓库分发)
 │   ├── SwClassCode_*.csv        # 申万行业层级定义 (sync_industry --input)
 │   ├── reform_resume_days.csv   # 不设涨跌幅名单: 股改复牌首日 (update_limit, 见下文)
 │   └── share_listing_days.csv   # 不设涨跌幅名单: 增发 / 追加对价股份上市日 (update_limit, 见下文)
 ├── tests/               # 测试 (unit / db / integration 三层)
+├── pyproject.toml       # 安装包(wheel)构建配置与 spring-* 命令入口
 └── requirements.txt     # Python 依赖清单
 ```
 
@@ -110,10 +113,53 @@ python -m pip install --upgrade baostock -i https://pypi.org/simple
 ```
 
 ### **环境准备**
-   确保已安装 Python 3.10+（代码使用 `X | None` 等 PEP 604 写法，3.9 无法运行），并安装所需依赖：
+   确保已安装 Python 3.11+（依赖的 numpy 2.4 要求 3.11 起），并安装所需依赖：
 ```bash
    pip install -r requirements.txt
 ```
+
+### **安装包部署（Windows / Linux / macOS 通用）**
+除上面的源码部署外，也可以打成 wheel 安装包部署。两种方式共用同一套代码，区别只在两个目录：
+
+| 目录 | 内容 | 源码部署 | 安装包部署 |
+|------|------|----------|------------|
+| 程序目录 | 代码与随包资源 `sql/`、`data/`、`config/pipeline.yaml` | 项目根目录 | Python 环境的 site-packages |
+| 运行目录 `SPRING_HOME` | `config/config.yaml`、`.env`、`log/`、`csv/`、`download/` | 项目根目录 | 默认 `~/.spring`，可用环境变量 `SPRING_HOME` 指定 |
+
+判定规则见 `util/paths.py`：设置了环境变量 `SPRING_HOME` 就用它；否则程序目录下有
+`pyproject.toml`（源码检出）就用项目根目录，与改造前完全一致；否则用 `~/.spring`。
+
+```bash
+# 1. 构建(在源码检出里执行; 需要 build 工具)
+python -m build
+
+# 2. 目标机安装(推荐 pipx, 每个应用一个独立虚拟环境; 依赖由 pip 自动安装)
+pipx install dist/spring_quant-0.1.0-py3-none-any.whl
+
+# 3. 首次使用: 初始化运行目录(建目录、复制配置模板, 已有配置不覆盖)
+spring-init
+
+# 4. 按本机情况修改 ~/.spring/config/config.yaml, 需要同花顺接口时在 ~/.spring/.env 写入 THS_API_KEY
+spring-init-db
+```
+
+每个程序安装后都有一个对应命令，命令名为 `spring-` 加程序名（下划线换成连字符），参数与
+`python -m` 写法完全相同，例如：
+
+| 源码部署 | 安装包部署（两种写法等价） |
+|----------|----------------------------|
+| `python -m etl.import_daily -b 20261009` | `spring-import-daily -b 20261009` 或 `python -m etl.import_daily -b 20261009` |
+| `python -m etl.adjust -b 20261009` | `spring-adjust -b 20261009` 或 `python -m etl.adjust -b 20261009` |
+| `python -m tools.check_daily` | `spring-check-daily` 或 `python -m tools.check_daily` |
+
+**GitHub 自动发布**：推送 `vX.Y.Z` 标签（须与 `pyproject.toml` 的 `version` 一致）后，
+`.github/workflows/release.yml` 会在 Windows / Linux / macOS 跑测试、构建 wheel 并做安装冒烟测试，
+通过后创建同名 Release 并上传安装包；目标机从 Release 页面下载 `.whl` 后按上面第 2 步安装即可。
+普通推送只跑测试与构建，不发布。
+
+完整命令列表见 `pyproject.toml` 的 `[project.scripts]`。安装包部署时 `python -m` 写法需使用安装该包的
+解释器（pipx 安装时在 `pipx` 的 venvs 目录下），外部调度方（如 etl-quant-mcp）应通过环境变量把
+`SPRING_HOME` 传给子进程。
 
 ### **数据库初始化**
    在 `config/config.yaml` 中配置 `local_paths.db` 指向你的本地数据库文件路径（默认 `~/data/quant.db`），然后执行初始化脚本建表：

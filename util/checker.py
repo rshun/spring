@@ -1,4 +1,5 @@
 # 修改记录:
+#   2026-10-04  Claude  CSV_DIR 改用运行目录 SPRING_HOME/csv, 支持安装包部署
 #   2026-09-12  Claude  新增 set_diff/num_close 比较器与 CSV 落盘、日志输出
 #   2026-09-12  Claude  新建核对框架: 五态状态机 + 外部源可用性三条判定规则
 """核对框架: 结果状态机与外部数据源可用性判定
@@ -21,9 +22,10 @@ import csv
 import logging
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import duckdb
+
+from util.paths import spring_home
 
 logger = logging.getLogger("etl.util.checker")
 
@@ -103,7 +105,7 @@ def resolve_status(has_dates: list[str], missing_dates: list[str],
 
 
 # CSV 落盘目录。测试通过 monkeypatch 覆盖此模块级变量重定向到 tmp_path。
-CSV_DIR = Path(__file__).resolve().parents[1] / "csv"
+CSV_DIR = spring_home() / "csv"
 
 
 def set_diff(source_keys: set, db_keys: set) -> tuple[list, list]:

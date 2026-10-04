@@ -14,6 +14,7 @@
 #                       不被 sync_cw_files 的 except RuntimeError 捕获，整批同步带栈中止）
 #   2026-09-11  Claude  md5 更新改为「下载到 .part 成功后再替换」：此前先 unlink 再下载，
 #                       下载失败即丢失本地 zip
+#   2026-10-04  Claude  DOWNLOAD_DIR / CSV_DIR 改用运行目录 SPRING_HOME, 支持安装包部署
 """
 通达信离线文件数据源
 
@@ -45,12 +46,12 @@ from queue import Queue
 import pandas as pd
 
 from util.config import get_config
+from util.paths import spring_home
 
 logger = logging.getLogger("etl.datasource.tdx_offline")
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DOWNLOAD_DIR = PROJECT_ROOT / "download"
-CSV_DIR      = PROJECT_ROOT / "csv"
+DOWNLOAD_DIR = spring_home() / "download"
+CSV_DIR      = spring_home() / "csv"
 GBBQ_FILE    = CSV_DIR / "gbbq"
 
 # 通达信财务文件名格式: "gpcw" + "YYYYMMDD" + ".ext" = 4+8+4 = 16 字符

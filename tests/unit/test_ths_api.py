@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-09-13  Claude  新建同花顺 API 取数测试(全 mock, 不触网、不使用真实 key)
 #   2026-09-13  Claude  补充网络异常路径的密钥不泄漏断言(异常文本+日志两条出口)
+#   2026-10-04  Claude  缺 key 反例把 SPRING_HOME 指向空目录, 不再受本机真实 .env 影响
 """同花顺 API 取数。全部 mock, 不触网、不使用真实 key。"""
 import datetime
 
@@ -74,9 +75,11 @@ def test_api_key_error_raises_without_leaking_key(monkeypatch):
     assert "test-key-not-real" not in str(ei.value)
 
 
-def test_missing_key_raises_clear_error(monkeypatch):
+def test_missing_key_raises_clear_error(monkeypatch, tmp_path):
     """反例: 未设置 THS_API_KEY 时给出可操作的提示"""
     monkeypatch.delenv("THS_API_KEY", raising=False)
+    # 运行目录指向空目录: 否则本机真实 .env 里的 key 会被 load_env 读进来, 测试结果随机器而变
+    monkeypatch.setenv("SPRING_HOME", str(tmp_path))
     with pytest.raises(ths.ThsError, match="THS_API_KEY"):
         ths.fetch_xdr_events("600519.SH")
 

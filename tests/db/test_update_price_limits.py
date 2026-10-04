@@ -8,6 +8,7 @@
 #   2026-10-03  Claude  名单改为可配多个文件(股改复牌 + 增发/追加对价上市日), 补多文件合并、
 #                       跨文件重复报错的正反例与两份名单的契约测试; _run 改回多行 with
 #   2026-10-03  Claude  股改名单才限 2005-2008; 增发清单补 2011 新规后不得收录增发类的边界与反例
+#   2026-10-04  Claude  名单文件改从 util.paths.PACKAGE_ROOT 读取(dbutil._PROJECT_ROOT 已移除)
 """update_price_limits_by_range 涨跌停比率计算测试 (聚焦沪深主板 ST 规则切换)。"""
 from unittest.mock import patch, MagicMock
 
@@ -398,8 +399,8 @@ def test_load_no_limit_days_missing_columns_raises(tmp_path):
 
 def _read_repo_csv(name):
     import csv
-    from util.dbutil import _PROJECT_ROOT
-    with open(_PROJECT_ROOT / "data" / name, encoding="utf-8-sig") as f:
+    from util.paths import PACKAGE_ROOT
+    with open(PACKAGE_ROOT / "data" / name, encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
 

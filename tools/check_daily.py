@@ -24,6 +24,7 @@
 #   2026-10-02  Claude  -t 新增 limit(涨跌停) / volratio(量比) 两类: 涨跌停价空值从
 #                       「指标空值」拆到新核对项「涨跌停价」(并加区间/标志一致性),
 #                       涨停/跌停核对由 basic 改归 limit; 新增「量比空值」核对项
+#   2026-10-04  Claude  差异 CSV 目录改为模块级 CSV_DIR(运行目录 SPRING_HOME/csv), 支持安装包部署
 """
 功能: 检查指定日期范围内 STOCK_DAILY / ADJ_FACTOR / DAILY_BASIC 等数据完整性
       1) 记录完整性: 对比 STOCK_INFO + TRADE_CAL 的预期记录数，找出缺失的股票
@@ -86,10 +87,14 @@ from tools.checks.volume_ratio import check_volume_ratio
 from util import checker
 from util import dbutil, myutil
 from util import validators as pv
+from util.paths import spring_home
 
 # 挂在 "etl" 之下，日志才会进 configure_etl_logging 配置的 stockdailyYYYYMMDD.log；
 # 与同目录的 export_etl_tables / import_etl_tables 命名保持一致。
 logger = logging.getLogger("etl.tools.check_daily")
+
+# 差异 CSV 落盘目录。测试通过 monkeypatch 覆盖此模块级变量重定向到 tmp_path。
+CSV_DIR = spring_home() / "csv"
 
 # --json 输出中 missing_codes 的默认条数上限。全市场缺一天就是 5000+ 条，
 # 不设限会灌爆调用方的上下文；完整明细始终以 CSV 落盘，路径在 csv_path 里。
@@ -375,7 +380,7 @@ def _check_is_st_null(conn: duckdb.DuckDBPyConnection,
         # 正确的一律不输出日志: 不分核对项类别, OK 都不打印
         return 0
 
-    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir = CSV_DIR
     csv_dir.mkdir(parents=True, exist_ok=True)
     csv_file = csv_dir / f"check_isst_null_{begin_date}_{end_date}.csv"
     with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
@@ -474,7 +479,7 @@ def _check_daily_basic_nulls(conn: duckdb.DuckDBPyConnection,
         # 都不打印(pe 缺失已在上面单独告警过); 返回值不变, 仍是 0
         return 0
 
-    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir = CSV_DIR
     csv_dir.mkdir(parents=True, exist_ok=True)
     csv_file = csv_dir / f"check_dailybasic_nulls_{begin_date}_{end_date}.csv"
     with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
@@ -544,7 +549,7 @@ def _check_stock_daily_nulls(conn: duckdb.DuckDBPyConnection,
         # 正确的一律不输出日志: 不分核对项类别, OK 都不打印
         return 0
 
-    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir = CSV_DIR
     csv_dir.mkdir(parents=True, exist_ok=True)
     csv_file = csv_dir / f"check_stockdaily_nulls_{begin_date}_{end_date}.csv"
     with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
@@ -608,7 +613,7 @@ def _check_adj_factor_nulls(conn: duckdb.DuckDBPyConnection,
         # 正确的一律不输出日志: 不分核对项类别, OK 都不打印
         return 0
 
-    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir = CSV_DIR
     csv_dir.mkdir(parents=True, exist_ok=True)
     csv_file = csv_dir / f"check_adjfactor_nulls_{begin_date}_{end_date}.csv"
     with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
@@ -769,7 +774,7 @@ def _check_xdr_preclose(conn: duckdb.DuckDBPyConnection,
         # 子情形都不打印(uncomputable 已在上面单独告警过); 返回值不变, 仍是 0
         return 0
 
-    csv_dir = Path(__file__).parent.parent / "csv"
+    csv_dir = CSV_DIR
     csv_dir.mkdir(parents=True, exist_ok=True)
     csv_file = csv_dir / f"check_preclose_xdr_{begin_date}_{end_date}.csv"
     with open(csv_file, "w", newline="", encoding="utf-8-sig") as f:
@@ -839,7 +844,7 @@ def _check_table(conn: duckdb.DuckDBPyConnection,
         )
 
     if csv_rows:
-        csv_dir = Path(__file__).parent.parent / "csv"
+        csv_dir = CSV_DIR
         csv_dir.mkdir(parents=True, exist_ok=True)
         tag = table.lower().replace("_", "")
         csv_file = csv_dir / f"check_{tag}_missing_{begin_date}_{end_date}.csv"

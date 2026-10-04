@@ -14,6 +14,7 @@
 #   2026-09-07  Claude  删除 --by-date 开关：路由完全由参数形态推断，强制开关没有
 #                       实际使用场景(带非日期参数时逐股本就更划算)；数据源判断收进
 #                       resolve_by_date；模块能力守卫改为检查实际要调用的方法
+#   2026-10-04  Claude  导出目录 CSV_DIR 改用运行目录 SPRING_HOME/csv, 支持安装包部署
 """
 功能: 获取指定日期范围的所有股票交易数据
      退市股同样获取, 但需把 -b/-e 给到它还在市的区间: 候选集以 delist_date
@@ -29,10 +30,10 @@ import argparse
 import duckdb
 import logging
 import sys
-from pathlib import Path
 
 from util import dbutil, myutil
 from util import validators as pv
+from util.paths import spring_home
 
 logger = logging.getLogger("etl.import_daily")
 
@@ -90,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # 导出目录: 与 check_daily / check_adjust 的差异明细同目录, 已在 .gitignore 中
-CSV_DIR = Path(__file__).resolve().parents[1] / "csv"
+CSV_DIR = spring_home() / "csv"
 
 
 def resolve_by_date(source: str = 'bstock') -> bool:

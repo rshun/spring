@@ -4,6 +4,7 @@
 #                       Exception 后直接 return，写库/取数失败仍退出 0(契约 C1)
 #   2026-09-11  Claude  B043: 两个数据源(akstock→申万官网回退)都拿不到数据、或 --input 文件
 #                       一条都读不出时退出 1——此前打一句 warning 后退出 0
+#   2026-10-04  Claude  默认输入目录改用程序目录 util.paths.PACKAGE_ROOT/data, 支持安装包部署
 """
 同步申万行业数据
   1、默认通过 ak.stock_industry_clf_hist_sw() 获取股票申万三级行业历史原始数据
@@ -20,11 +21,11 @@ import pandas as pd
 
 from util import dbutil, myutil
 from util import validators as pv
+from util.paths import PACKAGE_ROOT
 
 logger = logging.getLogger("etl.sync_industry")
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT_DIR = PROJECT_ROOT / "data"
+DEFAULT_INPUT_DIR = PACKAGE_ROOT / "data"
 DEFAULT_INPUT_FILE = "SwClassCode_2021.csv"
 
 

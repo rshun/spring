@@ -3,6 +3,7 @@
 #   2026-09-13  Claude  补全 ms_to_cn_date/load_xdr_events 的类型注解(brief 里有,
 #                       实现时漏了)
 #   2026-09-13  Claude  新增 fetch_xdr_events 在线 API 取数(密钥走环境变量, 不入库)
+#   2026-10-04  Claude  缺 THS_API_KEY 的提示改为运行目录 SPRING_HOME 下的 .env
 """同花顺(fuyao.aicubes.cn)除权事件取数(只取数, 不入库)
 
 两个入口返回**同一套列**, 调用方不关心数据来自本地文件还是接口:
@@ -122,8 +123,8 @@ def _api_key() -> str:
     myutil.load_env()
     key = os.environ.get("THS_API_KEY")
     if not key:
-        raise ThsError("未设置 THS_API_KEY，请在项目根目录 .env 中配置"
-                       "（参考 .env.example）")
+        raise ThsError("未设置 THS_API_KEY，请在运行目录(SPRING_HOME，源码部署时即"
+                       "项目根目录)的 .env 中配置（参考 .env.example）")
     return key
 
 

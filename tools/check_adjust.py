@@ -23,6 +23,7 @@
 #   2026-09-06  Claude  修复 BUG-005: fetch_xdr_events 新返回 (df, failed_codes);
 #                       event_missing_in_tx 判定基准改为成功取数股票集合;
 #                       汇总按校验状态如实输出, 腾讯未完成时不再报「全部一致 OK」
+#   2026-10-04  Claude  差异 CSV 目录改为模块级 CSV_DIR(运行目录 SPRING_HOME/csv), 支持安装包部署
 """
 功能: 复权因子三方对账(只告警写 CSV, 不阻断流程, 退出码恒为 0)
   1) LOCAL vs RAW: ADJ_FACTOR_LOCAL(自算, 主源) 与 ADJ_FACTOR_RAW(baostock 留痕)
@@ -57,9 +58,13 @@ import pandas as pd
 from tools.checks import adjust_invariant
 from util import dbutil, myutil
 from util import validators as pv
+from util.paths import spring_home
 
 # 挂在 "etl" 之下，日志才会进 configure_etl_logging 配置的 stockdailyYYYYMMDD.log
 logger = logging.getLogger("etl.tools.check_adjust")
+
+# 差异 CSV 落盘目录。测试通过 monkeypatch 覆盖此模块级变量重定向到 tmp_path。
+CSV_DIR = spring_home() / "csv"
 
 DEFAULT_TOLERANCE = 1e-3
 
@@ -442,7 +447,7 @@ def _parse_codes_arg(codes: list[str] | None) -> list[str]:
 
 def _csv_path(tag: str, begin: str, end: str) -> Path:
     """差异 CSV 的落盘路径(不创建目录, 供 --json 输出引用)"""
-    return (Path(__file__).parent.parent / "csv"
+    return (CSV_DIR
             / f"check_adjust_{tag}_{begin}_{end}.csv")
 
 

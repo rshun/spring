@@ -12,6 +12,11 @@ log/
 docs/
 __init__.py
 
+# 安装包构建产物(python -m build)
+build/
+dist/
+*.egg-info/
+
 # 密钥: 真实值绝不入库; .env.example 是占位符模板, 保留入库
 .env
 .env.*

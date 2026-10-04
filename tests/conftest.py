@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-10-02  Claude  新增 autouse fixture _redirect_csv_output: 所有测试的 CSV 落盘
 #                       统一重定向到 tmp_path/csv, 此前未单独重定向的测试会污染项目 csv/
+#   2026-10-04  Claude  check_daily / check_adjust 改为模块级 CSV_DIR, 重定向改为直接替换该变量
 import pytest
 import duckdb
 import sys
@@ -15,10 +16,8 @@ def _redirect_csv_output(tmp_path, monkeypatch):
     """所有测试的 CSV 落盘一律重定向到 tmp_path/csv, 不污染项目 csv/ 目录。
 
     项目 csv/ 是给人看核对结果的地方, 测试写进去的文件(日期是测试数据的日期)
-    混在里面会被当成真实核对结果。各输出口的目录写法不同, 分别处理:
-      - util.checker / etl.import_daily: 模块级 CSV_DIR, 直接替换
-      - tools.check_daily / tools.check_adjust: 用 Path(__file__).parent.parent / "csv"
-        现算目录, 替换模块的 __file__(两模块中 __file__ 只用于此)
+    混在里面会被当成真实核对结果。各输出口都是模块级 CSV_DIR, 直接替换:
+    util.checker / etl.import_daily / tools.check_daily / tools.check_adjust。
     datasource.tdx_offline 的 csv/gbbq 是 gbbq 输入缓存而非输出, 不在此重定向。
     单个测试若需自定目录, 在测试内再次 monkeypatch 即可覆盖本 fixture。
     """
@@ -30,8 +29,8 @@ def _redirect_csv_output(tmp_path, monkeypatch):
     out = tmp_path / "csv"
     monkeypatch.setattr(checker, "CSV_DIR", out)
     monkeypatch.setattr(etl.import_daily, "CSV_DIR", out)
-    monkeypatch.setattr(tools.check_daily, "__file__", str(tmp_path / "tools" / "check_daily.py"))
-    monkeypatch.setattr(tools.check_adjust, "__file__", str(tmp_path / "tools" / "check_adjust.py"))
+    monkeypatch.setattr(tools.check_daily, "CSV_DIR", out)
+    monkeypatch.setattr(tools.check_adjust, "CSV_DIR", out)
 
 
 @pytest.fixture

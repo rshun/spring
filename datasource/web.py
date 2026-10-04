@@ -6,6 +6,7 @@
 #   2026-06-19  Claude  新增官网下载编排 fetch_margin_summary/fetch_margin_detail
 #   2026-06-20  Claude  兼容历史(约 2015 前)上交所文件融券数量列带 (股) 后缀的列名(_normalize_sse_cols)
 #   2026-06-20  Claude  _normalize_sse_cols 增加列名首尾空白清理(2014 等年份的 ' 标的证券代码' 带前导空格)
+#   2026-10-04  Claude  DOWNLOAD_DIR 改用运行目录 SPRING_HOME/download, 支持安装包部署
 """通用 http/https 文件下载数据源
 
 通过 http/https 下载外部数据文件并解析，作为 akshare/baostock 等接口取数失败时的回退数据源。
@@ -21,11 +22,11 @@ from pathlib import Path
 import pandas as pd
 
 from util.config import get_config
+from util.paths import spring_home
 
 logger = logging.getLogger("etl.datasource.web")
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DOWNLOAD_DIR = PROJECT_ROOT / "download"
+DOWNLOAD_DIR = spring_home() / "download"
 
 CLASSIFY_XLS_NAME = "StockClassifyUse_stock.xls"
 
